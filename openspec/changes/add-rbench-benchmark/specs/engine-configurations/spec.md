@@ -151,12 +151,17 @@ medians when a smoke run exists.
 ### Requirement: Rounds
 A matrix SHALL be split into rounds, in the order of their importance. Each round SHALL list its
 configurations and its token budget per provider, and a run executes one round (see run-ledger,
-Round budget).
+Round budget). Planning SHALL refuse a round whose token estimate exceeds its budget for any
+provider.
 
 #### Scenario: Plan of one round
 - **WHEN** the operator plans a round
 - **THEN** the trial count and token estimate of that round alone are printed and compared with its
   budget
+
+#### Scenario: Round over budget
+- **WHEN** the operator plans a round whose Codex token estimate exceeds its Codex budget
+- **THEN** planning refuses the round and nothing runs
 
 ### Requirement: Stages
 The benchmark SHALL provide three stages as matrix files:
@@ -164,8 +169,9 @@ The benchmark SHALL provide three stages as matrix files:
 - **screening:** the core tasks, one attempt;
 - **full:** all tasks, three attempts, for configurations the maintainer selects.
 
-Screening SHALL only select the configurations for the full stage. The full stage SHALL run fresh
-attempts and SHALL NOT count screening trials in its scores.
+Screening SHALL only select configurations, for the full stage or for screening round R3 (see
+Screening round R3 from the front). The full stage SHALL run fresh attempts and SHALL NOT count
+screening trials in its scores.
 
 #### Scenario: Full stage attempts
 - **WHEN** the full stage runs
@@ -174,3 +180,16 @@ attempts and SHALL NOT count screening trials in its scores.
 #### Scenario: Screening trials kept out of the full stage
 - **WHEN** a configuration selected from screening runs in the full stage
 - **THEN** its full-stage scores use only full-stage trials, even where screening ran the same task
+
+### Requirement: Screening round R3 from the front
+Screening SHALL run round R3 (effort `xhigh`) after R1 (`high`) and R2 (`medium`). R3 SHALL contain
+exactly one `xhigh` configuration for each engine and role-model combination on the joint
+quality-against-cost Pareto front of R1 and R2, and no other configuration.
+
+#### Scenario: Combination on the front at two efforts
+- **WHEN** one engine and role-model combination is on the joint front at both `high` and `medium`
+- **THEN** R3 runs it once, as an `xhigh` configuration with its own id
+
+#### Scenario: Combination off the front
+- **WHEN** an engine and role-model combination is not on the joint front of R1 and R2
+- **THEN** R3 does not run it

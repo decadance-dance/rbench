@@ -1,0 +1,18 @@
+# Smoke stage (spec engine-configurations, Stages): one core task, each engine's default, one
+# attempt. It shows that every engine runs end to end and gives the token medians planning
+# estimates from.
+stage = "smoke"
+tasks = "core"
+max_tasks = 1
+attempts = 1
+
+[[rounds]]
+name = "defaults"
+# Not approved yet: the maintainer sets each budget from the round's plan estimate (decision O6,
+# issue #16). A round cannot run on an undecided budget.
+budget = { claude = "undecided", codex = "undecided" }
+
+# Every declared engine's default, so the stage covers each engine as its adapter declares it.
+[[rounds.entries]]
+engine = "*"
+default = true
