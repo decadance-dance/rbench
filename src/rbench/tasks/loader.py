@@ -181,7 +181,7 @@ def load_task(task_dir: Path, hidden_canary_prefix: str | None = None) -> Task:
     def gt_where(key: str) -> str:
         return f"task {task_dir}: {gt_path.name}: {key!r}"
 
-    canary = _string(gt, "canary", gt_where)
+    canary = gt["canary"]
     if task_set == "hidden":
         if hidden_canary_prefix is None:
             raise TaskError(
@@ -191,7 +191,12 @@ def load_task(task_dir: Path, hidden_canary_prefix: str | None = None) -> Task:
         prefix, prefix_name = hidden_canary_prefix, "the hidden canary prefix"
     else:
         prefix, prefix_name = PUBLIC_CANARY_PREFIX, repr(PUBLIC_CANARY_PREFIX)
-    if not (canary.startswith(prefix) and CANARY_SUFFIX.fullmatch(canary.removeprefix(prefix))):
+    # The message never quotes the value: a hidden task's canary must not reach logs.
+    if not (
+        isinstance(canary, str)
+        and canary.startswith(prefix)
+        and CANARY_SUFFIX.fullmatch(canary.removeprefix(prefix))
+    ):
         raise TaskError(
             f"{gt_where('canary')} must be {prefix_name} and 32 lowercase hex digits"
             f" for a task in {task_set!r}"
@@ -280,11 +285,30 @@ def _read_object(task_dir: Path, path: Path) -> dict:
     if not path.is_file():
         raise TaskError(f"task {task_dir}: missing file {path.name}")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_keys)
+    except _RepeatedKey as e:
+        raise TaskError(f"task {task_dir}: {path.name}: {e}") from e
+    # ValueError covers malformed JSON, bad UTF-8 and Python's integer-digit limit.
+    except (OSError, ValueError, RecursionError) as e:
         raise TaskError(f"task {task_dir}: cannot read {path.name}: {e}") from e
     if not isinstance(data, dict):
         raise TaskError(f"task {task_dir}: {path.name} must hold a JSON object")
+    return data
+
+
+class _RepeatedKey(ValueError):
+    pass
+
+
+def _unique_keys(pairs: list[tuple[str, object]]) -> dict:
+    """Build a JSON object, rejecting a repeated key that `json` would silently overwrite."""
+    data: dict = {}
+    for key, value in pairs:
+        if key in data:
+            ids = [v for k, v in pairs if k == "id" and isinstance(v, str)]
+            where = f" in the object with id {ids[0]!r}" if ids else ""
+            raise _RepeatedKey(f"key {key!r} is repeated{where}")
+        data[key] = value
     return data
 
 
