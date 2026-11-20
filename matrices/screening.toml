@@ -1,0 +1,7 @@
+# Screening stage (spec engine-configurations, Stages): the core tasks, one attempt. It only
+# selects the configurations for the full stage. Its rounds (design D13) are added by issue #61;
+# their order and budgets wait for decision O6 (issue #16).
+stage = "screening"
+tasks = "core"
+attempts = 1
+rounds = []
