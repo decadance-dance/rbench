@@ -1,8 +1,10 @@
+import os
 import signal
 import subprocess
 import time
 
 import pytest
+from conftest import FAKE_BIN, require_fakes
 
 
 def run(*argv: str, stdin: str = "", timeout: float = 10) -> subprocess.CompletedProcess:
@@ -58,3 +60,27 @@ def test_crash(fake_bin):
 
     assert (result.returncode, result.stdout) == (-signal.SIGKILL, "partial")
     assert fake_bin.calls()[-1]["argv"] == ["pr", "view"]
+
+
+@pytest.mark.parametrize("broken", ["missing", "not executable", "plain copy"])
+def test_fixture_fails_closed_on_a_broken_shim(tmp_path, broken):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "gh").write_text("#!/bin/sh\nexit 91\n")
+    (real / "gh").chmod(0o755)
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    for tool in ["fake", "claude", "codex", "docker"]:
+        (shims / tool).symlink_to(FAKE_BIN / tool)
+    if broken == "not executable":
+        (shims / "gh").write_text("fake")  # what git writes for a symlink with symlinks off
+    elif broken == "plain copy":
+        (shims / "gh").write_text("#!/bin/sh\n")
+        (shims / "gh").chmod(0o755)
+
+    with pytest.raises(pytest.fail.Exception, match="fake gh does not resolve"):
+        require_fakes(shims, f"{shims}{os.pathsep}{real}")
+
+
+def test_fixture_accepts_the_shims():
+    require_fakes(FAKE_BIN, str(FAKE_BIN))
