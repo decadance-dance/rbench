@@ -51,7 +51,7 @@ A PR written by a coding agent merges only after a reviewer of the other model f
 
 - When: after `ci-ok` is green and before `gh pr ready`, on the pushed branch (the PR is a draft).
 - Who: the other model family in a fresh session. Codex reviews Claude's code, Claude reviews Codex's. A subagent of the authoring session does not count: it shares the author's model and framing.
-- Input: the PR's own diff against its base (`gh pr diff <pr>`: `develop` for a task, `main` for a release or hotfix), the issue (`gh issue view <n>`), the spec sections it cites and this guide, not the author's summary. The reviewer runs `bin/check`, and for a change to reviewer launch or isolation also the live audit that change names (spec §6.4), where Docker and the `claude` and `codex` logins are available.
+- Input: the PR's own diff against its base (`gh pr diff <pr>`: `develop` for a task, `main` for a release or hotfix), the issue (`gh issue view <n>`), the spec sections it cites and this guide, not the author's summary. The reviewer runs `bin/check`, and for a change to reviewer launch or isolation also the live tests (`RBENCH_LIVE=1 uv run pytest -m live`, see `AGENTS.md`, Tests) where Docker and the `claude` and `codex` logins are available.
 - Output: a GitHub review in Comment mode (`gh pr review <pr> --comment --body-file <file>`). A finding is must-fix only with a failing test or a repro; the author fixes or answers each finding in the PR.
 - Rounds: at most two. After the second, the maintainer decides.
 - A push after the review is a new commit: the reviewer looks at the change again.
