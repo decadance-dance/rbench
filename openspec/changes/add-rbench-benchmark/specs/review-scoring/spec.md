@@ -44,10 +44,10 @@ The judge SHALL label every finding that matches no ground-truth item as one of:
 - **THEN** it is labelled `valid` and counts toward augmented precision
 
 #### Scenario: Real issue reported in a different file
-- **WHEN** a finding correctly describes a defect at a caller, and the only ground-truth item for
-  that issue is in the callee's file
-- **THEN** the finding is labelled `valid` and counts toward augmented precision, and the item stays
-  a recall miss
+- **WHEN** a finding in a caller's file correctly describes a defect, and the only ground-truth item
+  for that issue is in the callee's file, another file
+- **THEN** the finding is labelled `valid` and counts toward augmented precision, and the item is a
+  recall miss unless another finding of the trial matches it, such as one in the callee's file
 
 ### Requirement: Judge isolation and caching
 - The judge SHALL be blind to the engine and configuration that produced the findings.

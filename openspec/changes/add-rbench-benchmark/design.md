@@ -459,12 +459,14 @@ and O6 are open.
   - Spec `review-scoring`, Matching findings to ground truth, states the rule.
   - This keeps matching comparable with ReviewBench.
   - Cost: a finding that names the right issue in another file (a caller, a test) is not matched.
-    The ground-truth item stays a recall miss; the finding goes to the unmatched-finding labels and,
-    if it describes a real defect, is labelled `valid` and counts toward augmented precision, as
-    upstream's classifier would count it (spec `review-scoring`, Labels for unmatched findings).
-  - Size of that cost: a manual count on ReviewBench's 25-PR test subset at the pinned commit
-    (`082f65f`, D1) found 15 of the 342 `tp` items (6 issues in 5 PRs) where one issue is reported
-    in different files.
+    The ground-truth item is a recall miss unless another finding of the trial matches it (such as
+    one in the item's file); the finding goes to the unmatched-finding labels and, if it describes a
+    real defect, is labelled `valid` and counts toward augmented precision (spec `review-scoring`,
+    Labels for unmatched findings).
+  - How often the ground truth reports one issue in different files: a manual count on
+    ReviewBench's 25-PR test subset at the pinned commit (`082f65f`, D1) found 15 of the 342 `tp`
+    items (6 issues in 5 PRs). This is the prevalence in the ground truth, not the number of lost
+    matches, which depends on where engines report each issue.
   - Not taken, option B: compare across files, all of a PR's findings in chunks. Closer to the
     spec's earlier wording, but it compares more pairs, can need more calls and is a further
     deviation from ReviewBench.
