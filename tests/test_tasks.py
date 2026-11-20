@@ -17,8 +17,10 @@ from rbench.tasks import (
     TASK_FILE,
     Producer,
     TaskError,
+    load_task,
     load_tasks,
 )
+from rbench.tasks.loader import HIDDEN_DIR_ENV, _load_tasks
 
 _canaries = iter(range(1, 1000))
 # The real hidden canary prefix is operator configuration and never appears in this repository.
@@ -26,6 +28,13 @@ HIDDEN = f"{secrets.token_hex(8)}-"
 # Built at runtime: the publication guard rejects tracked files holding hidden-prefixed task ids.
 HID = f"{HIDDEN_ID_PREFIX}1"
 ID_PREFIX = re.escape(repr(HIDDEN_ID_PREFIX))
+# The neutral label errors give a hidden task instead of its path or id.
+ENTRY0 = f"{HIDDEN_DIR_ENV} entry 0"
+
+
+def load_hidden(set_dir: Path, prefix: str = HIDDEN):
+    """The loader's hidden mode, which `rbench.tasks.hidden` enters after validating the directory."""
+    return _load_tasks([set_dir], prefix)
 
 
 def canary(prefix: str = PUBLIC_CANARY_PREFIX) -> str:
@@ -253,10 +262,14 @@ def test_item_without_source_names_task_and_item(
     raw = item(id="i3", source=source)
     if source == "missing":
         del raw["source"]
-    task_id = HID if task_set == "hidden" else "t-1"
-    write_task(tmp_path, task_id, task_set=task_set, items=[raw])
-    with pytest.raises(TaskError, match=rf"{task_id}: ground_truth.json: item 'i3'"):
-        load_tasks(tmp_path, hidden_canary_prefix=HIDDEN)
+    hidden = task_set == "hidden"
+    write_task(tmp_path, HID if hidden else "t-1", task_set=task_set, items=[raw])
+    # A hidden item is named by its position, not its id.
+    where = (
+        f"{ENTRY0}: ground_truth.json: item 0" if hidden else "t-1: ground_truth.json: item 'i3'"
+    )
+    with pytest.raises(TaskError, match=re.escape(where)):
+        load_hidden(tmp_path) if hidden else load_tasks(tmp_path)
 
 
 def test_reviewbench_item_may_omit_source(tmp_path: Path) -> None:
@@ -301,36 +314,49 @@ def test_malformed_canary_fails(tmp_path: Path, value: object) -> None:
 
 def test_hidden_task_uses_hidden_canary_prefix(tmp_path: Path) -> None:
     write_task(tmp_path, HID, "hidden")
-    task = load_tasks(tmp_path, hidden_canary_prefix=HIDDEN)[0]
+    task = load_hidden(tmp_path)[0]
     assert task.canary.startswith(HIDDEN)
 
 
-def test_hidden_task_needs_a_configured_hidden_prefix(tmp_path: Path) -> None:
+def test_hidden_task_fails_the_public_loaders(tmp_path: Path) -> None:
     write_task(tmp_path, HID, "hidden")
-    with pytest.raises(
-        TaskError, match=rf"{HID} is hidden, and no hidden canary prefix is configured"
-    ):
+    message = f"entry 0 has a hidden id; hidden tasks load only from the directory {HIDDEN_DIR_ENV}"
+    with pytest.raises(TaskError, match=message) as error:
         load_tasks(tmp_path)
+    assert HID not in str(error.value)
+    with pytest.raises(TaskError, match="an entry has a hidden id") as error:
+        load_task(tmp_path / HID)
+    assert HID not in str(error.value)
+
+
+def test_task_repr_hides_the_canary_and_a_hidden_task(tmp_path: Path) -> None:
+    write_task(tmp_path / "ours")
+    write_task(tmp_path / "hidden", HID, "hidden")
+    public, hidden = load_tasks(tmp_path / "ours")[0], load_hidden(tmp_path / "hidden")[0]
+    assert repr(public).startswith("Task(id='t-1'") and public.canary not in repr(public)
+    assert repr(hidden) == "Task(set='hidden')"
 
 
 @pytest.mark.parametrize("task_set", ["ours", "reviewbench"])
 def test_public_task_cannot_use_hidden_canary_prefix(tmp_path: Path, task_set: str) -> None:
     write_task(tmp_path, task_set=task_set, gt={"canary": canary(HIDDEN), "items": []})
     with pytest.raises(TaskError, match=r"'canary' must be 'rbench-canary-'"):
-        load_tasks(tmp_path, hidden_canary_prefix=HIDDEN)
+        load_tasks(tmp_path)
 
 
 def test_hidden_task_cannot_use_public_canary_prefix(tmp_path: Path) -> None:
     write_task(tmp_path, HID, "hidden", gt={"canary": canary(), "items": []})
-    with pytest.raises(TaskError, match=rf"{HID}: ground_truth.json: 'canary' must be the hidden"):
-        load_tasks(tmp_path, hidden_canary_prefix=HIDDEN)
+    with pytest.raises(
+        TaskError, match=rf"{ENTRY0}: ground_truth.json: 'canary' must be the hidden"
+    ):
+        load_hidden(tmp_path)
 
 
 @pytest.mark.parametrize("wrap", [lambda c: c + "x", lambda c: [c], lambda c: {"value": c}])
 def test_canary_errors_do_not_echo_the_canary(tmp_path: Path, wrap) -> None:
     write_task(tmp_path, HID, "hidden", gt={"canary": wrap(canary(HIDDEN)), "items": []})
     with pytest.raises(TaskError, match=r"'canary' must be the hidden canary prefix") as error:
-        load_tasks(tmp_path, hidden_canary_prefix=HIDDEN)
+        load_hidden(tmp_path)
     assert HIDDEN not in str(error.value)
 
 
@@ -348,16 +374,18 @@ def test_canary_errors_do_not_echo_the_canary(tmp_path: Path, wrap) -> None:
 def test_hidden_prefix_must_be_distinct_from_the_public_one(tmp_path: Path, prefix: str) -> None:
     write_task(tmp_path)
     with pytest.raises(TaskError, match=r"the hidden canary prefix must"):
-        load_tasks(tmp_path, hidden_canary_prefix=prefix)
+        load_hidden(tmp_path, prefix)
 
 
 @pytest.mark.parametrize("task_set", ["ours", "reviewbench"])
 def test_hidden_id_prefix_reserved_for_hidden_tasks(tmp_path: Path, task_set: str) -> None:
     write_task(tmp_path, HID, task_set)
-    with pytest.raises(
-        TaskError, match=rf"{HID}: task.json: 'id': the {ID_PREFIX} id prefix is reserved"
-    ):
+    with pytest.raises(TaskError, match=r"entry 0 has a hidden id"):
         load_tasks(tmp_path)
+    with pytest.raises(
+        TaskError, match=rf"{ENTRY0}: task.json: 'id': the {ID_PREFIX} id prefix is reserved"
+    ):
+        load_hidden(tmp_path)
 
 
 def test_hidden_task_needs_hidden_id_prefix(tmp_path: Path) -> None:
@@ -434,6 +462,6 @@ def test_repeated_key_errors_do_not_echo_contents(tmp_path: Path, shape: str) ->
     write_task(tmp_path, HID, "hidden", gt=False)
     (tmp_path / HID / GROUND_TRUTH_FILE).write_text(text)
     with pytest.raises(TaskError, match=r"ground_truth.json: 'canary'.* is repeated") as error:
-        load_tasks(tmp_path, hidden_canary_prefix=HIDDEN)
+        load_hidden(tmp_path)
     for exc in (error.value, error.value.__cause__, error.value.__context__):
         assert HIDDEN not in str(exc)
