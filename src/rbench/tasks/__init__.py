@@ -1,4 +1,4 @@
-"""Benchmark tasks: the task directory format and the task-set loader (spec review-tasks)."""
+"""Benchmark tasks: the task format, the loader, manifests and the core list (spec review-tasks)."""
 
 from rbench.tasks.loader import (
     GROUND_TRUTH_FILE,
@@ -13,17 +13,49 @@ from rbench.tasks.loader import (
     load_task,
     load_tasks,
 )
+from rbench.tasks.manifest import (
+    CORE_LIST_FILE,
+    MANIFEST_FILE,
+    ChangelogEntry,
+    CoreList,
+    Manifest,
+    ManifestTask,
+    check_repository_tasks,
+    check_version_history,
+    load_committed_manifest,
+    load_core_list,
+    load_manifest,
+    load_task_set,
+    merge_base,
+    select_core,
+    task_content_sha256,
+)
 
 __all__ = [
+    "CORE_LIST_FILE",
     "GROUND_TRUTH_FILE",
     "HIDDEN_ID_PREFIX",
+    "MANIFEST_FILE",
     "PUBLIC_CANARY_PREFIX",
     "TASK_FILE",
+    "ChangelogEntry",
+    "CoreList",
     "GroundTruthItem",
+    "Manifest",
+    "ManifestTask",
     "Producer",
     "Task",
     "TaskError",
     "check_hidden_canary_prefix",
+    "check_repository_tasks",
+    "check_version_history",
+    "load_committed_manifest",
+    "load_core_list",
+    "load_manifest",
     "load_task",
+    "load_task_set",
     "load_tasks",
+    "merge_base",
+    "select_core",
+    "task_content_sha256",
 ]

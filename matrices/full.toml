@@ -1,0 +1,7 @@
+# Full stage (spec engine-configurations, Stages): all tasks, three fresh attempts, for the
+# configurations the maintainer selects from screening (issue #69, decision O2). It never reuses
+# screening trials, so its scores count only its own.
+stage = "full"
+tasks = "all"
+attempts = 3
+rounds = []
