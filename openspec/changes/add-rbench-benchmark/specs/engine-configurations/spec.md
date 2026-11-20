@@ -169,9 +169,9 @@ The benchmark SHALL provide three stages as matrix files:
 - **screening:** the core tasks, one attempt;
 - **full:** all tasks, three attempts, for configurations the maintainer selects.
 
-Screening SHALL only select configurations, for the full stage or a later screening round (see
-Screening round selected from the front). The full stage SHALL run fresh attempts and SHALL NOT
-count screening trials in its scores.
+Screening SHALL only select configurations, for the full stage or for screening round R3 (see
+Screening round R3 from the front). The full stage SHALL run fresh attempts and SHALL NOT count
+screening trials in its scores.
 
 #### Scenario: Full stage attempts
 - **WHEN** the full stage runs
@@ -181,12 +181,15 @@ count screening trials in its scores.
 - **WHEN** a configuration selected from screening runs in the full stage
 - **THEN** its full-stage scores use only full-stage trials, even where screening ran the same task
 
-### Requirement: Screening round selected from the front
-A screening round MAY run only configurations selected from earlier rounds. Such a round SHALL take
-the engine and role-model combinations on the quality-against-cost Pareto front of the earlier
-rounds and run each once at its own effort, even when several earlier rounds put the same
-combination on the front.
+### Requirement: Screening round R3 from the front
+Screening SHALL run round R3 (effort `xhigh`) after R1 (`high`) and R2 (`medium`). R3 SHALL contain
+exactly one `xhigh` configuration for each engine and role-model combination on the joint
+quality-against-cost Pareto front of R1 and R2, and no other configuration.
 
 #### Scenario: Combination on the front at two efforts
-- **WHEN** one engine and role-model combination is on the Pareto front at both `high` and `medium`
-- **THEN** the `xhigh` round runs it once, as a configuration with its own id
+- **WHEN** one engine and role-model combination is on the joint front at both `high` and `medium`
+- **THEN** R3 runs it once, as an `xhigh` configuration with its own id
+
+#### Scenario: Combination off the front
+- **WHEN** an engine and role-model combination is not on the joint front of R1 and R2
+- **THEN** R3 does not run it

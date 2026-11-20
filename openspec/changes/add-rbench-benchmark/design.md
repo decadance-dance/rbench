@@ -460,7 +460,7 @@ marked so in place. O2 and O4 are open.
     R3 takes the engine and role-model combinations on the front and runs each at `xhigh`, once
     even if both R1 and R2 put it on the front; its configuration ids differ from those of R1 and
     R2 because the effort is part of the settings (spec `engine-configurations`, Screening round
-    selected from the front).
+    R3 from the front).
   - Budget rule: a round's budget per provider is the `rbench plan` estimate for that round (trial
     count × token medians from the smoke stage) × 1.2. After the smoke stage the coordinator brings
     the numbers per round to the maintainer, who approves them before the round runs. `rbench plan`
