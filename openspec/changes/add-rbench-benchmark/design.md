@@ -36,13 +36,14 @@ Constraints that shape the approach:
 
 ## Decisions
 
-### D1. Reuse ReviewBench; trial executor pending (see Open decisions, O3)
+### D1. Reuse ReviewBench's data and matcher; our own runner
 **Choice.** ReviewBench (MIT) supplies:
 - the external task set (its 25-PR test subset first);
 - the findings and golden format;
 - the matcher (same underlying issue, many-to-many, grounded and augmented metrics).
 
 ReviewBench is pinned to a commit; importing from a newer commit makes a new task-set version.
+Trials run on our own `docker compose` runner (D3, D5, D8), not on Harbor (O3, decided).
 
 **Pinned commit.** `review-bench/ReviewBench` at `082f65f6746c39b6ac25b0a62c1b0d5131a3803a`
 (2026-11-18, MIT), the head of its `main` branch when the spike ran.
@@ -129,8 +130,8 @@ prompt hash.
 - *Matching* (`scripts/eval/matcher.ts`, `MATCHER_SYSTEM_PROMPT`, plus the untrusted-data notice of
   `prompt-format.ts`): the prompt is ported as is, with no tools as in ReviewBench. Upstream groups
   findings by exact file path, never compares findings in different files, and compares each
-  file's findings in chunks of 10 candidates × 10 golden items. The port keeps the chunk cap; whether
-  it keeps the file grouping is open (O7). The answer is JSON
+  file's findings in chunks of 10 candidates × 10 golden items. The port keeps both the file grouping
+  (O7, decided) and the chunk cap. The answer is JSON
   `{reasoning, candidateFindings: [{index, matchedGoldenIndices}]}`, validated whole. ReviewBench
   reuses one session per PR across chunks; the port makes each chunk one stateless call.
 - *Resolving matches for scoring* (`scripts/lib/match-types.ts`, METHODOLOGY 6.2.4): recall covers
@@ -143,8 +144,8 @@ prompt hash.
   numerator nor the denominator of grounded or augmented precision, never gets a label, and the
   report shows each trial's duplicate count separately. Repeating a found issue then neither raises
   nor lowers precision. **Deviation:** upstream classifies duplicates and counts them in augmented
-  precision. Spec `review-scoring` gets the matching requirement in the metrics implementation
-  issue; this change does not edit the specs.
+  precision. Spec `review-scoring` gets the duplicate rule in the metrics implementation issue;
+  this change does not add it to the specs.
 - *Labels for unmatched findings* (`scripts/classifier/prompts.ts`): ReviewBench's classifier
   explores the repository at head with `read`, `grep`, `find` and `ls`. Spec `review-scoring` gives
   the judge no tools, so the port has none. Its input is only the normalized unmatched finding and
@@ -166,7 +167,8 @@ prompt hash.
   precision is not comparable.
 - ReviewBench's own judge settings (leaderboard: Claude Opus 5; matcher thinking `low`, classifier
   `medium`) differ from ours (O1), another reason our numbers are not its leaderboard's.
-- Whether matching stays within one file is open: O7.
+- Matching stays within one file, as upstream (O7, decided), so this part of the matcher stays
+  comparable with ReviewBench.
 
 **Alternatives considered:**
 - *Martian code-review bench (MIT, 50 PRs).* Optional later, as a second external set.
@@ -174,9 +176,9 @@ prompt hash.
 - *Inspect AI.* A strong harness, but more glue than our ledger needs.
 
 ### D2. Python 3.12 with `uv`; one static HTML report
-**Choice.** Python fits ReviewBench and Harbor tooling. The report is one HTML file with the results
-embedded as JSON and plain JavaScript. It needs no server or build step, and opens from disk as the
-spec requires.
+**Choice.** Python fits the runner, which mostly drives child processes and reads and writes JSON.
+The report is one HTML file with the results embedded as JSON and plain JavaScript. It needs no
+server or build step, and opens from disk as the spec requires.
 
 ### D3. Trial = one `docker compose` project: agent container + squid proxy
 **Choice.**
@@ -392,7 +394,7 @@ limit stops the run by default; waiting for the reset is opt-in (`--wait`).
   judge from the other family labels a sample (O1).
 - **[Ground truth for our PRs is incomplete or produced by an engine under test.]** → Augmented
   precision, and each item's recorded producer and source (specs `review-tasks`,
-  `review-scoring`). How the ground truth is obtained is O5.
+  `review-scoring`). The ground truth is mined from reviewed historical PRs (O5, decided).
 - **[ReviewBench's matcher needs an API key.]** → Confirmed at the pinned commit. Its prompts (MIT)
   are ported to the CLI judge, and the report records the deviations (D1).
 - **[Publishing source archives of third-party repositories.]** → The license check on import
@@ -420,34 +422,51 @@ New repository; nothing to migrate. Rollout:
 
 ## Open decisions (need the maintainer before tasks.md)
 
-- **O1. Judge model.**
-  - Proposal: `claude-opus-5-5` at high effort.
+O1, O3, O5 and O7 were decided by the maintainer on 2026-11-20 and are marked so in place; O2, O4
+and O6 are open.
+
+- **O1. Judge model.** **Decided (maintainer, 2026-11-20):**
+  - `claude-opus-5-5` at high effort is the judge.
   - A second judge, `gpt-6.2-sol`, labels a 20% sample.
-  - The report shows the agreement between the two judges.
+  - The report shows the agreement between the two judges (spec `review-scoring`, Agreement between
+    judges).
 - **O2. Size of the full stage.** Proposal: up to 8 configurations from the screening Pareto front,
   plus each engine's default.
-- **O3. Harbor or our own runner.**
+- **O3. Harbor or our own runner.** **Decided (maintainer, 2026-11-20):** our own `docker compose`
+  runner from the start; ReviewBench's data and matcher are kept (D1). Harbor is not used.
   - D3, D5 and D8 already define the trial, the policy, the raw output and the ledger, so Harbor's
     runner adds little the design relies on.
-  - Using Harbor costs a spike item and a second code path.
-  - Proposal: our own `docker compose` runner from the start, with ReviewBench kept.
-  - This changes the earlier choice of Harbor, so it needs a yes.
+  - Using Harbor would cost a spike item and a second code path.
+  - This reverses the earlier choice of Harbor.
 - **O4. Calibration of the judge against human labels.** Proposal: the maintainer labels the 5
   calibration PRs once, and the report shows judge-human agreement on them.
-- **O5. Source of ground truth for `ours` and `hidden`.**
-  - Option A: mine historical PRs of active repositories with a human review culture: review
-    comments, plus follow-up commits that change the commented lines. Only PRs merged after the
-    models' training cutoffs, from repositories with permissive licenses.
-  - Option B: pool the findings of all engines on our PRs, and the maintainer confirms them.
+- **O5. Source of ground truth for `ours` and `hidden`.** **Decided (maintainer, 2026-11-20):**
+  option A.
+  - Ground truth is mined from historical PRs of active, permissively licensed repositories with a
+    human review culture, merged after the models' training cutoffs: review comments, plus
+    follow-up commits that change the commented lines.
+  - Each item records the comment or commit it was taken from (spec `review-tasks`, Recorded origin
+    of ground truth for our PRs).
+  - Not taken, option B: pool the findings of all engines on our PRs, and the maintainer confirms
+    them.
 - **O6. Round details.** The order of the rounds, the budget per round and the soft threshold value.
-- **O7. File-scoped matching.** ReviewBench's matcher never compares findings in different files
-  (METHODOLOGY 6.2.1), while spec `review-scoring` says location is context only. The spec's
-  scenarios (same issue a few lines away; same code, different failure) hold either way.
-  - Option A: keep file-scoping. Matching stays as in ReviewBench, and the judge sees one
-    file's findings per call, which keeps the calls small. A finding that names the right issue in
-    another file (a caller, a test) is not matched.
-  - Option B: compare across files: all of a PR's findings in chunks. Closer to the spec's wording.
-    With the same chunk cap a call holds no more findings; it compares more pairs and can need more
-    calls, depending on batching. It is a further deviation from ReviewBench.
-  - Proposal: Option A, with the spec's sentence amended to "within the same file, location is
-    context only" and the report stating the rule.
+- **O7. File-scoped matching.** **Decided (maintainer, 2026-11-20):** option A, as in ReviewBench
+  (METHODOLOGY 6.2.1).
+  - A finding is compared only with ground-truth items in the same file; within a file, location is
+    context only. The judge sees one file's findings per call, which keeps the calls small.
+  - A match is a match: there is no separate score for a finding that names the root cause rather
+    than a symptom.
+  - Spec `review-scoring`, Matching findings to ground truth, states the rule.
+  - This keeps matching comparable with ReviewBench.
+  - Cost: a finding that names the right issue in another file (a caller, a test) is not matched.
+    The ground-truth item is a recall miss unless another finding of the trial matches it (such as
+    one in the item's file); the finding goes to the unmatched-finding labels and, if it describes a
+    real defect, is labelled `valid` and counts toward augmented precision (spec `review-scoring`,
+    Labels for unmatched findings).
+  - How often the ground truth reports one issue in different files: a manual count on
+    ReviewBench's 25-PR test subset at the pinned commit (`082f65f`, D1) found 15 of the 342 `tp`
+    items (6 issues in 5 PRs). This is the prevalence in the ground truth, not the number of lost
+    matches, which depends on where engines report each issue.
+  - Not taken, option B: compare across files, all of a PR's findings in chunks. Closer to the
+    spec's earlier wording, but it compares more pairs, can need more calls and is a further
+    deviation from ReviewBench.

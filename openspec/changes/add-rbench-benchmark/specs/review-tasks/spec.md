@@ -59,8 +59,10 @@ The mapping SHALL be recorded with the imported task set.
 
 ### Requirement: Recorded origin of ground truth for our PRs
 Every ground-truth item in the `ours` and `hidden` sets SHALL record its producer and its source:
-the review, comment or commit it was taken from. How these sets obtain their ground truth is an open
-decision (design.md, O5).
+the review, comment or commit it was taken from. Both sets take their tasks only from historical PRs
+of active, permissively licensed repositories with a human review culture, merged after the models'
+training cutoffs, and their ground truth from those PRs' review comments, plus follow-up commits
+that change the commented lines (design.md, O5).
 
 #### Scenario: Item without a source
 - **WHEN** a ground-truth item in the `ours` set has no recorded source
