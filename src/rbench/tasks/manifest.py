@@ -34,6 +34,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from rbench.tasks.archive import LICENSED_SETS, SourceArchive
 from rbench.tasks.hidden import HiddenConfig, load_hidden_tasks
 from rbench.tasks.loader import (
     GROUND_TRUTH_FILE,
@@ -113,6 +114,23 @@ def task_content_sha256(task: Task) -> str:
         content[key] = doc
     canonical = json.dumps(content, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def manifest_task(task: Task, archive: SourceArchive) -> ManifestTask:
+    """The manifest entry of an imported `task` whose source `archive` was built for it.
+
+    The archive must be the one `task.json` records. A `reviewbench` or `ours` task records the
+    license id the archive's license check returned; a hidden task skips that check and records
+    none.
+    """
+    where = "a task in set 'hidden'" if task.set == "hidden" else f"task {task.path}"
+    if archive.sha256 != task.archive_sha256:
+        raise TaskError(f"{where}: the archive's SHA-256 is not the one {TASK_FILE} records")
+    if task.set not in LICENSED_SETS:
+        return ManifestTask(task_content_sha256(task), None)
+    if archive.license is None:
+        raise TaskError(f"{where}: the archive was built without the source license check")
+    return ManifestTask(task_content_sha256(task), archive.license)
 
 
 def load_task_set(set_dir: Path, task_set: str) -> tuple[Manifest, list[Task]]:

@@ -31,12 +31,15 @@ from rbench.tasks import (
     load_committed_manifest,
     load_core_list,
     load_hidden_task_set,
+    load_hidden_tasks,
     load_task_set,
     load_tasks,
     merge_base,
     select_core,
     task_content_sha256,
 )
+from rbench.tasks.archive import SourceArchive
+from rbench.tasks.manifest import manifest_task
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO_TASKS = ROOT / "tasks"
@@ -707,3 +710,49 @@ def test_base_outside_a_git_repository_fails_closed(tmp_path: Path) -> None:
     set_dir = two_task_set(tmp_path)
     with pytest.raises(TaskError, match=r"cannot resolve the base revision"):
         load_committed_manifest(tmp_path, "HEAD", set_dir / MANIFEST_FILE, "ours")
+
+
+def archive(sha256: str = "c" * 64, license_id: str | None = "MIT") -> SourceArchive:
+    """A built archive as `build_archive` returns it; `write_task` records `c` * 64."""
+    return SourceArchive(Path("t.bundle"), sha256, license_id, "LICENSE" if license_id else None)
+
+
+@pytest.mark.parametrize("task_set", ["reviewbench", "ours"])
+def test_import_records_the_license_id_in_the_manifest(tmp_path: Path, task_set: str) -> None:
+    set_dir = tmp_path / task_set
+    write_task(set_dir, "t-1", task_set=task_set)
+    (task,) = load_tasks(set_dir)
+    entry = manifest_task(task, archive())
+    assert entry == ManifestTask(task_content_sha256(task), "MIT")
+    edit(
+        write_manifest(set_dir, task_set),
+        lambda d: d["tasks"]["t-1"].update(license=entry.license),
+    )
+    manifest, _ = load_task_set(set_dir, task_set)
+    assert manifest.tasks["t-1"] == entry
+
+
+def test_hidden_manifest_entry_has_no_license(tmp_path: Path) -> None:
+    set_dir = tmp_path / "hidden"
+    write_task(set_dir, HID, task_set="hidden")
+    (task,) = load_hidden_tasks(hidden_set(set_dir))
+    assert manifest_task(task, archive(license_id=None)).license is None
+    with pytest.raises(TaskError, match=r"^a task in set 'hidden': the archive's SHA-256") as err:
+        manifest_task(task, archive(sha256="d" * 64))
+    assert_private(err, HID, HIDDEN, str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("built", "message"),
+    [
+        (archive(sha256="d" * 64), "is not the one task.json records"),
+        (archive(license_id=None), "without the source license check"),
+    ],
+)
+def test_manifest_entry_needs_the_tasks_checked_archive(
+    tmp_path: Path, built: SourceArchive, message: str
+) -> None:
+    write_task(tmp_path / "ours", "t-1")
+    (task,) = load_tasks(tmp_path / "ours")
+    with pytest.raises(TaskError, match=message):
+        manifest_task(task, built)
