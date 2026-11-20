@@ -4,13 +4,13 @@ Every task here is synthetic and built in tmp_path.
 """
 
 import json
+import secrets
 from pathlib import Path
 
 import pytest
 
 from rbench.tasks import (
     GROUND_TRUTH_FILE,
-    HIDDEN_CANARY_PREFIX,
     PUBLIC_CANARY_PREFIX,
     TASK_FILE,
     Producer,
@@ -19,6 +19,8 @@ from rbench.tasks import (
 )
 
 _canaries = iter(range(1, 1000))
+# The real hidden canary prefix is operator configuration and never appears in this repository.
+HIDDEN = f"{secrets.token_hex(8)}-"
 
 
 def canary(prefix: str = PUBLIC_CANARY_PREFIX) -> str:
@@ -59,7 +61,7 @@ def write_task(
         **meta,
     }
     (task_dir / TASK_FILE).write_text(json.dumps(data))
-    prefix = HIDDEN_CANARY_PREFIX if task_set == "hidden" else PUBLIC_CANARY_PREFIX
+    prefix = HIDDEN if task_set == "hidden" else PUBLIC_CANARY_PREFIX
     if gt is None:
         gt = {"canary": canary(prefix), "items": [item()] if items is None else items}
     if gt is not False:
@@ -249,7 +251,7 @@ def test_item_without_source_names_task_and_item(
     task_id = "h-1" if task_set == "hidden" else "t-1"
     write_task(tmp_path, task_id, task_set=task_set, items=[raw])
     with pytest.raises(TaskError, match=rf"{task_id}: ground_truth.json: item 'i3'"):
-        load_tasks(tmp_path)
+        load_tasks(tmp_path, hidden_canary_prefix=HIDDEN)
 
 
 def test_reviewbench_item_may_omit_source(tmp_path: Path) -> None:
@@ -294,25 +296,53 @@ def test_malformed_canary_fails(tmp_path: Path, value: object) -> None:
 
 def test_hidden_task_uses_hidden_canary_prefix(tmp_path: Path) -> None:
     write_task(tmp_path, "h-1", "hidden")
-    task = load_tasks(tmp_path)[0]
-    assert task.canary.startswith(HIDDEN_CANARY_PREFIX)
-    assert not HIDDEN_CANARY_PREFIX.startswith(PUBLIC_CANARY_PREFIX)
-    assert not PUBLIC_CANARY_PREFIX.startswith(HIDDEN_CANARY_PREFIX)
+    task = load_tasks(tmp_path, hidden_canary_prefix=HIDDEN)[0]
+    assert task.canary.startswith(HIDDEN)
+
+
+def test_hidden_task_needs_a_configured_hidden_prefix(tmp_path: Path) -> None:
+    write_task(tmp_path, "h-1", "hidden")
+    with pytest.raises(
+        TaskError, match=r"h-1 is hidden, and no hidden canary prefix is configured"
+    ):
+        load_tasks(tmp_path)
 
 
 @pytest.mark.parametrize("task_set", ["ours", "reviewbench"])
 def test_public_task_cannot_use_hidden_canary_prefix(tmp_path: Path, task_set: str) -> None:
-    write_task(
-        tmp_path, task_set=task_set, gt={"canary": canary(HIDDEN_CANARY_PREFIX), "items": []}
-    )
+    write_task(tmp_path, task_set=task_set, gt={"canary": canary(HIDDEN), "items": []})
     with pytest.raises(TaskError, match=r"'canary' must be 'rbench-canary-'"):
-        load_tasks(tmp_path)
+        load_tasks(tmp_path, hidden_canary_prefix=HIDDEN)
 
 
 def test_hidden_task_cannot_use_public_canary_prefix(tmp_path: Path) -> None:
     write_task(tmp_path, "h-1", "hidden", gt={"canary": canary(), "items": []})
-    with pytest.raises(TaskError, match=r"h-1: ground_truth.json: 'canary'"):
-        load_tasks(tmp_path)
+    with pytest.raises(TaskError, match=r"h-1: ground_truth.json: 'canary' must be the hidden"):
+        load_tasks(tmp_path, hidden_canary_prefix=HIDDEN)
+
+
+def test_canary_errors_do_not_echo_the_hidden_prefix(tmp_path: Path) -> None:
+    write_task(tmp_path, "h-1", "hidden", gt={"canary": HIDDEN + "x", "items": []})
+    with pytest.raises(TaskError) as error:
+        load_tasks(tmp_path, hidden_canary_prefix=HIDDEN)
+    assert HIDDEN not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "",
+        " ",
+        PUBLIC_CANARY_PREFIX,
+        PUBLIC_CANARY_PREFIX + "x-",
+        PUBLIC_CANARY_PREFIX[:-1],
+        PUBLIC_CANARY_PREFIX[:1],
+    ],
+)
+def test_hidden_prefix_must_be_distinct_from_the_public_one(tmp_path: Path, prefix: str) -> None:
+    write_task(tmp_path)
+    with pytest.raises(TaskError, match=r"the hidden canary prefix must"):
+        load_tasks(tmp_path, hidden_canary_prefix=prefix)
 
 
 @pytest.mark.parametrize("task_set", ["ours", "reviewbench"])

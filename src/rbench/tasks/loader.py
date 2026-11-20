@@ -16,8 +16,11 @@ read it. Other files in a set directory (such as `manifest.json`) and dot entrie
                           "severity", "producer", "source"?}]}
 
 `producer` is `human`, `unknown` or `<engine>:<model>`. `source` (the review, comment or commit
-the item was taken from) is required in the `ours` and `hidden` sets. A canary is its set's
-prefix followed by 32 lowercase hex digits, e.g. `PUBLIC_CANARY_PREFIX + uuid.uuid4().hex`.
+the item was taken from) is required in the `ours` and `hidden` sets. A canary is a prefix
+followed by 32 lowercase hex digits, e.g. `PUBLIC_CANARY_PREFIX + uuid.uuid4().hex`; hidden tasks
+use the hidden canary prefix instead. That prefix is operator configuration kept with the hidden
+task directory, never in this repository (spec review-tasks, Publication guard), so the caller
+passes it in, and hidden tasks load only when it is given.
 Every key is required and no other key is allowed; a malformed task fails the whole load.
 """
 
@@ -38,9 +41,6 @@ SETS_WITH_SOURCE = ("ours", "hidden")
 
 HIDDEN_ID_PREFIX = "h-"
 PUBLIC_CANARY_PREFIX = "rbench-canary-"
-# The public check (spec review-tasks, Publication guard) fails on any tracked file holding this
-# prefix, so it must exempt this module.
-HIDDEN_CANARY_PREFIX = "rbench-hidden-canary-"
 
 TASK_ID = re.compile(r"[a-z0-9][a-z0-9_.-]*")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -108,11 +108,13 @@ class Task:
     path: Path
 
 
-def load_tasks(*set_dirs: Path) -> list[Task]:
+def load_tasks(*set_dirs: Path, hidden_canary_prefix: str | None = None) -> list[Task]:
     """Load every task under `set_dirs`, sorted by id; raise `TaskError` on the first bad one.
 
-    Task ids and canaries must be unique across everything loaded in one call.
+    Task ids and canaries must be unique across everything loaded in one call. Hidden tasks need
+    `hidden_canary_prefix`, from the hidden directory's configuration.
     """
+    check_hidden_canary_prefix(hidden_canary_prefix)
     tasks: list[Task] = []
     for set_dir in set_dirs:
         set_dir = Path(set_dir)
@@ -120,7 +122,7 @@ def load_tasks(*set_dirs: Path) -> list[Task]:
             raise TaskError(f"task set directory {set_dir} does not exist")
         for task_dir in sorted(set_dir.iterdir()):
             if task_dir.is_dir() and not task_dir.name.startswith("."):
-                tasks.append(load_task(task_dir))
+                tasks.append(load_task(task_dir, hidden_canary_prefix))
     for attr in ("id", "canary"):
         seen: dict[str, Task] = {}
         for task in tasks:
@@ -130,8 +132,26 @@ def load_tasks(*set_dirs: Path) -> list[Task]:
     return sorted(tasks, key=lambda t: t.id)
 
 
-def load_task(task_dir: Path) -> Task:
-    """Load and validate one task directory."""
+def check_hidden_canary_prefix(prefix: str | None) -> None:
+    """Reject a hidden canary prefix that could be confused with the public one.
+
+    With neither prefix starting the other, no canary can carry both, so a public task never
+    uses the hidden prefix. The prefix itself stays out of the message.
+    """
+    if prefix is None:
+        return
+    if not isinstance(prefix, str) or not prefix.strip():
+        raise TaskError("the hidden canary prefix must be a non-empty string")
+    if prefix.startswith(PUBLIC_CANARY_PREFIX) or PUBLIC_CANARY_PREFIX.startswith(prefix):
+        raise TaskError(
+            f"the hidden canary prefix must differ from the public prefix {PUBLIC_CANARY_PREFIX!r},"
+            " and neither may start the other"
+        )
+
+
+def load_task(task_dir: Path, hidden_canary_prefix: str | None = None) -> Task:
+    """Load and validate one task directory; a hidden task needs `hidden_canary_prefix`."""
+    check_hidden_canary_prefix(hidden_canary_prefix)
     meta_path = task_dir / TASK_FILE
     meta = _read_object(task_dir, meta_path)
     _check_keys(meta, TASK_KEYS, set(), f"task {task_dir}: {meta_path.name}")
@@ -162,10 +182,18 @@ def load_task(task_dir: Path) -> Task:
         return f"task {task_dir}: {gt_path.name}: {key!r}"
 
     canary = _string(gt, "canary", gt_where)
-    prefix = HIDDEN_CANARY_PREFIX if task_set == "hidden" else PUBLIC_CANARY_PREFIX
+    if task_set == "hidden":
+        if hidden_canary_prefix is None:
+            raise TaskError(
+                f"task {task_dir} is hidden, and no hidden canary prefix is configured;"
+                " it comes from the hidden directory's configuration"
+            )
+        prefix, prefix_name = hidden_canary_prefix, "the hidden canary prefix"
+    else:
+        prefix, prefix_name = PUBLIC_CANARY_PREFIX, repr(PUBLIC_CANARY_PREFIX)
     if not (canary.startswith(prefix) and CANARY_SUFFIX.fullmatch(canary.removeprefix(prefix))):
         raise TaskError(
-            f"{gt_where('canary')} must be {prefix!r} and 32 lowercase hex digits"
+            f"{gt_where('canary')} must be {prefix_name} and 32 lowercase hex digits"
             f" for a task in {task_set!r}"
         )
     items = gt["items"]

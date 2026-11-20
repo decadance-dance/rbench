@@ -2,7 +2,6 @@
 
 from rbench.tasks.loader import (
     GROUND_TRUTH_FILE,
-    HIDDEN_CANARY_PREFIX,
     HIDDEN_ID_PREFIX,
     PUBLIC_CANARY_PREFIX,
     TASK_FILE,
@@ -10,13 +9,13 @@ from rbench.tasks.loader import (
     Producer,
     Task,
     TaskError,
+    check_hidden_canary_prefix,
     load_task,
     load_tasks,
 )
 
 __all__ = [
     "GROUND_TRUTH_FILE",
-    "HIDDEN_CANARY_PREFIX",
     "HIDDEN_ID_PREFIX",
     "PUBLIC_CANARY_PREFIX",
     "TASK_FILE",
@@ -24,6 +23,7 @@ __all__ = [
     "Producer",
     "Task",
     "TaskError",
+    "check_hidden_canary_prefix",
     "load_task",
     "load_tasks",
 ]
