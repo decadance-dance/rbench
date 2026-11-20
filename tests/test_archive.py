@@ -168,6 +168,14 @@ def test_license_id_recorded_and_license_file_kept(
         ),
         ({"stdout": license_reply("MIT", "NOTICE")}, "NOTICE is not in the reviewed tree"),
         ({"stdout": '{"license": null}'}, "malformed license reply"),
+        ({"stdout": license_reply("MIT", "LICENSE\0")}, "malformed license reply"),
+        ({"stdout": license_reply("MIT", "../LICENSE")}, "malformed license reply"),
+        ({"stdout": license_reply("MIT", "/LICENSE")}, "malformed license reply"),
+        ({"stdout": license_reply("MIT", "")}, "malformed license reply"),
+        (
+            {"stdout": '{"path":"LICENSE","license":{"spdx_id":"NOASSERTION","spdx_id":"MIT"}}'},
+            "malformed license reply",
+        ),
         ({"stderr": "error connecting to api.github.com\n", "exit": 1}, "reading the license"),
     ],
 )
@@ -237,3 +245,16 @@ def test_bad_inputs_fail_and_name_the_repository(
         build_archive(REPO, out=tmp_path / "t.bundle", **args)
     assert reason in str(err.value)
     assert not (tmp_path / "t.bundle").exists()
+
+
+def test_missing_gh_is_a_license_error_naming_the_repository(
+    source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, head = pr(source, MIT, MIT)
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    with pytest.raises(LicenseError, match=f"^{REPO}: cannot run gh") as err:
+        build_archive(REPO, str(source), base, head, tmp_path / "out" / "t.bundle", "ours")
+    assert isinstance(err.value.__cause__, FileNotFoundError)
+    assert not (tmp_path / "out").exists()
