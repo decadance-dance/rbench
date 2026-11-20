@@ -27,10 +27,11 @@ set, the file, the field and the position instead.
 
 import hashlib
 import json
+import os
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from rbench.tasks.loader import (
     GROUND_TRUTH_FILE,
@@ -41,6 +42,7 @@ from rbench.tasks.loader import (
     TASK_SETS,
     Task,
     TaskError,
+    load_task,
     load_tasks,
 )
 
@@ -100,23 +102,30 @@ def task_content_sha256(task: Task) -> str:
 
 
 def load_task_set(
-    set_dir: Path, hidden_canary_prefix: str | None = None
+    set_dir: Path, task_set: str, hidden_canary_prefix: str | None = None
 ) -> tuple[Manifest, list[Task]]:
-    """Load a task set and check every task against its manifest; raise `TaskError` naming the task.
+    """Load the set `task_set` from `set_dir` and check every task against its manifest.
 
-    This checks the set against its own manifest; `check_version_history` checks the manifest
-    against the one committed before it.
+    `task_set` comes from the caller (the directory or the hidden configuration), never from the
+    files: it decides what errors may name. In the hidden set they name no task id and quote no
+    loader message. This checks the set against its own manifest; `check_version_history` checks
+    the manifest against the one committed before it.
     """
     set_dir = Path(set_dir)
-    tasks = load_tasks(set_dir, hidden_canary_prefix=hidden_canary_prefix)
-    manifest = load_manifest(set_dir / MANIFEST_FILE)
-    private = manifest.set == "hidden" or any(task.set == "hidden" for task in tasks)
+    if task_set not in TASK_SETS:
+        raise TaskError(f"unknown task set {task_set!r}")
+    private = task_set == "hidden"
+    tasks = _load_tasks(set_dir, hidden_canary_prefix) if private else load_tasks(set_dir)
+    manifest = load_manifest(set_dir / MANIFEST_FILE, task_set)
 
     def who(index: int, task: Task) -> str:
         if private:
             return f"task {index + 1} of {len(tasks)} in {set_dir} (sorted by id)"
         return f"task {task.path}"
 
+    for index, task in enumerate(tasks):
+        if task.set != task_set:
+            raise TaskError(f"{who(index, task)} is in set {task.set!r}, not {task_set!r}")
     on_disk = {task.id: task for task in tasks}
     for ids, problem in (
         (sorted(on_disk.keys() - manifest.tasks.keys()), "does not list tasks"),
@@ -126,11 +135,6 @@ def load_task_set(
             names = f"{len(ids)} of them" if private else ", ".join(ids)
             raise TaskError(f"{manifest.path} {problem}: {names}")
     for index, task in enumerate(tasks):
-        if task.set != manifest.set:
-            raise TaskError(
-                f"{who(index, task)} is in set {task.set!r}, but {manifest.path} is for"
-                f" {manifest.set!r}"
-            )
         actual = task_content_sha256(task)
         if actual != manifest.tasks[task.id].sha256:
             now = "" if private else f" (now {actual})"
@@ -141,37 +145,129 @@ def load_task_set(
     return manifest, tasks
 
 
-def load_manifest(path: Path) -> Manifest:
-    """Read and validate one manifest file; this does not look at the tasks."""
+def _load_tasks(set_dir: Path, hidden_canary_prefix: str | None) -> list[Task]:
+    """`load_tasks` for the hidden set: a failure gives the task's position, not its message.
+
+    The loader's messages name the task directory, which is the task id, and can quote values.
+    """
+    if not set_dir.is_dir():
+        raise TaskError(f"task set directory {set_dir} does not exist")
+    dirs = sorted(d for d in set_dir.iterdir() if d.is_dir() and not d.name.startswith("."))
+    for index, task_dir in enumerate(dirs):
+        try:
+            load_task(task_dir, hidden_canary_prefix)
+        except TaskError:
+            error = TaskError(
+                f"hidden task {index + 1} of {len(dirs)} in {set_dir} (sorted by directory name)"
+                " does not load; its message is withheld, since it can carry a hidden id or canary"
+            )
+        else:
+            continue
+        raise error
+    try:
+        return load_tasks(set_dir, hidden_canary_prefix=hidden_canary_prefix)
+    except TaskError:
+        error = TaskError(
+            f"the hidden set {set_dir} does not load: two of its tasks share an id or a canary"
+        )
+    raise error
+
+
+def load_manifest(path: Path, task_set: str) -> Manifest:
+    """Read and validate the manifest of `task_set`; this does not look at the tasks."""
     path = Path(path)
-    return _parse_manifest(_read_json(path, f"manifest {path}"), f"manifest {path}", path)
+    label = f"manifest {path}"
+    return _parse_manifest(_read_json(path, label), label, path, task_set)
 
 
-def load_committed_manifest(repo: Path, rev: str, path: Path) -> Manifest | None:
-    """The manifest at `path` as committed at `rev` in the git repository `repo`.
+def check_repository_tasks(
+    root: Path, repo: Path | None = None, base: str | None = None
+) -> list[Task]:
+    """The repository check (design D11) of the public tasks directory `root`.
+
+    Nothing under `root` may be a symlink, every directory is a public set named by its
+    directory, and every task matches its set's manifest; a core list, if present, resolves.
+    Given a git `repo` and a `base` revision, every set at the base still exists and every
+    manifest passes `check_version_history` against its committed version.
+    """
+    root = Path(root)
+    for top, dirs, files in os.walk(root):
+        for name in [*dirs, *files]:
+            if os.path.islink(os.path.join(top, name)):
+                raise TaskError(f"{os.path.join(top, name)} is a symlink; {root} may hold none")
+    if root.is_symlink():
+        raise TaskError(f"{root} is a symlink")
+    sets = sorted(d.name for d in root.iterdir() if d.is_dir() and not d.name.startswith("."))
+    if unknown := [name for name in sets if name not in CORE_SETS]:
+        raise TaskError(
+            f"{root} holds only the public sets {', '.join(CORE_SETS)}, not {', '.join(unknown)}"
+        )
+    if repo is not None:
+        commit = _resolve(Path(repo), base)
+        rel = _repo_path(Path(repo), root)
+        listed = _git(
+            repo,
+            ["ls-tree", "-d", "--name-only", "--end-of-options", commit, "--", f"{rel}/"],
+            f"cannot list {root} at {base}",
+        )
+        if gone := sorted({PurePosixPath(p).name for p in listed.splitlines()} - set(sets)):
+            raise TaskError(
+                f"task sets {', '.join(gone)} exist at {base} but not in {root};"
+                " a set is never removed or renamed"
+            )
+    tasks: list[Task] = []
+    for name in sets:
+        manifest, loaded = load_task_set(root / name, name)
+        if repo is not None:
+            path = root / name / MANIFEST_FILE
+            check_version_history(load_committed_manifest(repo, base, path, name), manifest)
+        tasks += loaded
+    if (root / CORE_LIST_FILE).exists():
+        select_core(load_core_list(root / CORE_LIST_FILE), tasks)
+    return tasks
+
+
+def merge_base(repo: Path, ref: str) -> str:
+    """The merge base of HEAD and `ref` in `repo`; a shallow clone is refused, not trusted."""
+    repo = Path(repo)
+    shallow = _git(
+        repo, ["rev-parse", "--is-shallow-repository"], f"cannot inspect the repository {repo}"
+    )
+    if shallow.strip() != "false":
+        raise TaskError(
+            f"{repo} is a shallow clone, so its merge base cannot be trusted; fetch the full"
+            " history (git fetch --unshallow, or fetch-depth: 0 in CI)"
+        )
+    commit = _resolve(repo, ref)
+    return _git(
+        repo,
+        ["merge-base", "--end-of-options", "HEAD", commit],
+        f"cannot find the merge base of HEAD and {ref!r} in {repo}",
+    ).strip()
+
+
+def load_committed_manifest(repo: Path, rev: str, path: Path, task_set: str) -> Manifest | None:
+    """The manifest of `task_set` at `path` as committed at `rev` in the git repository `repo`.
 
     Returns None when `rev` has no file there (a new set). Anything else that stops the read, such
     as a revision missing from a shallow clone, raises `TaskError`: the history check never passes
     for want of a base.
     """
     repo, path = Path(repo), Path(path)
-    if not rev or rev.startswith("-"):
-        raise TaskError(f"invalid base revision {rev!r}")
-    try:
-        rel = path.resolve().relative_to(repo.resolve()).as_posix()
-    except ValueError:
-        raise TaskError(f"manifest {path} is not inside the repository {repo}") from None
-    commit = _git(
-        repo,
-        ["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
-        f"cannot resolve the base revision {rev!r} in {repo}; the manifest history check needs"
-        " it (in CI, check out with fetch-depth: 0)",
-    ).strip()
+    if path.is_symlink():
+        raise TaskError(f"manifest {path} is a symlink")
+    commit = _resolve(repo, rev)
+    rel = _repo_path(repo, path)
     label = f"manifest {path} at {rev}"
-    if not _git(repo, ["ls-tree", "--name-only", commit, "--", rel], f"cannot list {label}"):
+    listed = _git(
+        repo,
+        ["ls-tree", "--name-only", "--end-of-options", commit, "--", rel],
+        f"cannot list {label}",
+    )
+    if not listed:
         return None
-    text = _git(repo, ["show", f"{commit}:{rel}"], f"cannot read {label}")
-    return _parse_manifest(_parse_json(text, label, path.name), label, path)
+    text = _git(repo, ["show", "--end-of-options", f"{commit}:{rel}"], f"cannot read {label}")
+    return _parse_manifest(_parse_json(text, label, path.name), label, path, task_set)
 
 
 def check_version_history(base: Manifest | None, manifest: Manifest) -> None:
@@ -185,13 +281,33 @@ def check_version_history(base: Manifest | None, manifest: Manifest) -> None:
     label = f"manifest {manifest.path}"
     if manifest.set != base.set:
         raise TaskError(f"{label}: 'set' differs from the committed manifest")
-    kept = manifest.changelog[: len(base.changelog)]
-    for index, entry in enumerate(base.changelog):
-        if index >= len(kept) or kept[index] != entry:
+    hidden = manifest.set == "hidden"
+    for index, old in enumerate(base.changelog):
+        if index >= len(manifest.changelog):
             raise TaskError(
-                f"{label}: changelog entry {index} differs from the committed manifest;"
+                f"{label}: changelog entry {index} of the committed manifest was removed;"
                 " changelog entries are append-only"
             )
+        new = manifest.changelog[index]
+        if new == old:
+            continue
+        missing = object()
+        order = [*new.changed, *(k for k in old.changed if k not in new.changed)]
+        differ = [
+            (position, task_id)
+            for position, task_id in enumerate(order)
+            if new.changed.get(task_id, missing) != old.changed.get(task_id, missing)
+        ]
+        if not differ:
+            what = "its note changed"
+        elif hidden:
+            what = "'changed' entries " + ", ".join(str(p) for p, _ in differ) + " changed"
+        else:
+            what = "tasks " + ", ".join(t for _, t in differ) + " changed"
+        raise TaskError(
+            f"{label}: changelog entry {index} differs from the committed manifest ({what});"
+            " changelog entries are append-only, so a changed task needs a new set version"
+        )
 
     def sha(entries: dict[str, ManifestTask], task_id: str) -> str | None:
         return entries[task_id].sha256 if task_id in entries else None
@@ -199,7 +315,7 @@ def check_version_history(base: Manifest | None, manifest: Manifest) -> None:
     ids = base.tasks.keys() | manifest.tasks.keys()
     changed = sorted(i for i in ids if sha(base.tasks, i) != sha(manifest.tasks, i))
     if changed and manifest.version <= base.version:
-        names = f"{len(changed)} tasks" if manifest.set == "hidden" else ", ".join(changed)
+        names = f"{len(changed)} tasks" if hidden else ", ".join(changed)
         raise TaskError(
             f"{label}: tasks changed since the committed version {base.version} ({names}),"
             " but 'version' is not higher; a changed task needs a new set version whose"
@@ -247,11 +363,13 @@ def select_core(core: CoreList, tasks: Iterable[Task]) -> list[Task]:
     return selected
 
 
-def _parse_manifest(data: dict, label: str, path: Path) -> Manifest:
-    _check_keys(data, MANIFEST_KEYS, set(), label)
-    task_set = data["set"]
+def _parse_manifest(data: dict, label: str, path: Path, task_set: str) -> Manifest:
+    """Validate a manifest of `task_set`, which the caller trusts; the file's own 'set' is not."""
     if task_set not in TASK_SETS:
-        raise TaskError(f"{label}: 'set' must be one of {', '.join(TASK_SETS)}")
+        raise TaskError(f"unknown task set {task_set!r}")
+    _check_keys(data, MANIFEST_KEYS, set(), label)
+    if data["set"] != task_set:
+        raise TaskError(f"{label}: 'set' must be {task_set!r}, the set it is loaded as")
     hidden = task_set == "hidden"
     version = _version(data["version"], f"{label}: 'version'")
 
@@ -331,6 +449,26 @@ def _changelog_entry(raw: object, index: int, label: str, task_set: str) -> Chan
         if sha is not None:
             _sha256(sha, entry_where)
     return ChangelogEntry(version, note, dict(changed))
+
+
+def _resolve(repo: Path, rev: str | None) -> str:
+    """Resolve `rev` to a commit; a ref that looks like an option stays a ref."""
+    if not rev:
+        raise TaskError("no base revision given")
+    return _git(
+        repo,
+        ["rev-parse", "--verify", "--quiet", "--end-of-options", f"{rev}^{{commit}}"],
+        f"cannot resolve the base revision {rev!r} in {repo}; the manifest history check needs"
+        " it (in CI, check out with fetch-depth: 0)",
+    ).strip()
+
+
+def _repo_path(repo: Path, path: Path) -> str:
+    """`path` relative to `repo`, with symlinks resolved in its parents only."""
+    try:
+        return (path.parent.resolve() / path.name).relative_to(repo.resolve()).as_posix()
+    except ValueError:
+        raise TaskError(f"{path} is not inside the repository {repo}") from None
 
 
 def _git(repo: Path, args: list[str], failure: str) -> str:
