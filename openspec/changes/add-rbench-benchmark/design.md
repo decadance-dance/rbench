@@ -71,12 +71,17 @@ At that commit:
 *Import gap: title and description at the reviewed head.* The manifest's `title` and `body` are
 not the values at the reviewed head. Example: it records `cmik/apilix#12` as
 `implement data storages`, a rename made at 2026-04-09T05:06:14Z, after the merge at 05:05:18Z;
-the title before the merge was `Add jsonwebtoken and bcryptjs to server dependencies`. Proposed
-handling, within the spec: the import takes the cutoff as the earlier of the PR's first review or
-review comment and its merge or close, then rebuilds the title from the timeline's `renamed` events
-and the body from its edit history (GraphQL `userContentEdits`) as of that cutoff. A task whose
-title or body cannot be rebuilt is not imported, and the set's changelog names it. The judge then
-sees the rebuilt values, where ReviewBench's classifier sees the manifest's. Six PRs of the full set
+the title before the merge was `Add jsonwebtoken and bcryptjs to server dependencies`. Handling
+(maintainer's decision): the import takes a title and a body only with evidence that they were the
+versions while the pinned head was the PR's head, and never rewinds to an earlier point such as the
+first review. The evidence: the timeline's `renamed` events and the body's edit history (GraphQL
+`userContentEdits`) show no change to that field from the head commit's committer date to the PR's
+merge or close; the value then is the one in force over that whole window. The committer date is no
+later than the push, so the window only errs toward a skip. When the evidence is missing (a change
+inside the window, or no readable history), the task is skipped by the existing path: it is not
+imported, and the set's changelog names it. In the example, the window runs from 23:21:05Z to the
+merge, with no edit inside it, so the title is the pre-rename one. The judge then sees these values,
+where ReviewBench's classifier sees the manifest's. Six PRs of the full set
 have an empty body, none in the test subset; an empty description is a value, not a missing field.
 
 **Field mapping to spec `review-tasks`, Ground truth items.**
@@ -133,17 +138,23 @@ prompt hash.
   item it matched that no earlier finding claimed. Upstream sends a finding that matched only
   already-claimed items to the classifier with the unmatched ones. The port does not: such a
   *duplicate* matches ground truth, so it is not an unmatched finding (spec `review-scoring`, Labels
-  for unmatched findings) and is never labelled `valid`. It stays out of grounded precision, as
-  upstream, counts as correct in augmented precision, and the report gives the number of duplicates
-  per trial. **Deviation:** upstream's classifier can label a duplicate `fp`; the port never does,
-  and spends no judge call on it.
+  for unmatched findings). **Decided by the maintainer:** a duplicate, a finding that matches only
+  ground-truth items already claimed by another finding of the same trial, counts in neither the
+  numerator nor the denominator of grounded or augmented precision, never gets a label, and the
+  report shows each trial's duplicate count separately. Repeating a found issue then neither raises
+  nor lowers precision. **Deviation:** upstream classifies duplicates and counts them in augmented
+  precision. Spec `review-scoring` gets the matching requirement in the metrics implementation
+  issue; this change does not edit the specs.
 - *Labels for unmatched findings* (`scripts/classifier/prompts.ts`): ReviewBench's classifier
   explores the repository at head with `read`, `grep`, `find` and `ls`. Spec `review-scoring` gives
-  the judge no tools, so the port has none. Its inline context is the PR diff, the title, the
-  description and, from the task's archive, the head version of each file an unmatched finding
-  cites. The prompt's directions to explore the repository with tools become directions to verify
-  against that context, and upstream's rule that an unverifiable claim is `fp` applies to it. The
-  port asks for the spec's labels directly, with this rubric:
+  the judge no tools, so the port has none. Its input is only the normalized unmatched finding and
+  the rendered PR context: the diff, the title, the description and the content of each file the
+  finding cites, resolved inside the immutable reviewed tree of the task's verified archive, never
+  an engine's workspace. It gets no matcher transcript, no golden item, no canary and no engine or
+  configuration identity. Repository text is untrusted data, quoted as such in the prompt like the
+  finding. The rendered context is part of the judge's cache key. The prompt's directions to
+  explore the repository with tools become directions to verify against that context, and
+  upstream's rule that an unverifiable claim is `fp` applies to it. The port asks for the spec's labels directly, with this rubric:
   - `false`: upstream's FP criteria (incorrect, unverifiable, generic, sub-threshold, harmful);
   - `nit`: a TP whose fix only changes naming, formatting, spelling or comment wording, with no
     effect on behavior, security, reliability, performance, tests or a public API (upstream's
@@ -436,7 +447,7 @@ New repository; nothing to migrate. Rollout:
     file's findings per call, which keeps the calls small. A finding that names the right issue in
     another file (a caller, a test) is not matched.
   - Option B: compare across files: all of a PR's findings in chunks. Closer to the spec's wording.
-    With the same chunk cap a call holds no more findings, but there are more chunk pairs, so more
-    judge calls, and it is a further deviation from ReviewBench.
+    With the same chunk cap a call holds no more findings; it compares more pairs and can need more
+    calls, depending on batching. It is a further deviation from ReviewBench.
   - Proposal: Option A, with the spec's sentence amended to "within the same file, location is
     context only" and the report stating the rule.
