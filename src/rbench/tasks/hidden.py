@@ -62,10 +62,20 @@ class HiddenConfig:
         return path
 
 
-def public_checkouts(cwd: Path | None = None, package_dir: Path = PACKAGE_DIR) -> list[Path]:
-    """The git checkouts rbench runs from and is installed from, which the hidden directory avoids.
+def _is_rbench(root: Path) -> bool:
+    try:
+        with (root / "pyproject.toml").open("rb") as f:
+            project = tomllib.load(f).get("project")
+    except (OSError, ValueError):
+        return False
+    return isinstance(project, dict) and project.get("name") == "rbench"
 
-    The hidden directory may be a git checkout of its own; only these two count.
+
+def public_checkouts(cwd: Path | None = None, package_dir: Path = PACKAGE_DIR) -> list[Path]:
+    """The rbench checkouts rbench runs from and is installed from, which the hidden directory avoids.
+
+    A git checkout counts only when its `pyproject.toml` names the project rbench: the working
+    directory may be another checkout, such as the hidden directory's own repository.
     """
     roots = []
     for start in (Path.cwd() if cwd is None else Path(cwd), Path(package_dir)):
@@ -76,8 +86,9 @@ def public_checkouts(cwd: Path | None = None, package_dir: Path = PACKAGE_DIR) -
                 capture_output=True,
                 text=True,
             )
-            if result.returncode == 0:
-                roots.append(Path(result.stdout.strip()))
+            root = Path(result.stdout.strip())
+            if result.returncode == 0 and _is_rbench(root):
+                roots.append(root)
     return roots
 
 
@@ -95,15 +106,19 @@ def hidden_config(
         raise TaskError(
             f"hidden tasks are selected, but no hidden directory is configured: {HOW_TO_CONFIGURE}"
         )
-    hidden_dir = Path(value).expanduser().resolve()
-    if not hidden_dir.is_dir():
+    try:
+        hidden_dir = Path(value).expanduser().resolve()
+    # Python 3.12 raises RuntimeError on a link loop, later versions OSError; both quote the path.
+    except (OSError, RuntimeError):
+        hidden_dir = None
+    if hidden_dir is None or not hidden_dir.is_dir():
         raise TaskError(f"{HIDDEN_DIR} is not a directory: {HOW_TO_CONFIGURE}")
     # Fail closed: without a known public checkout, the overlap cannot be ruled out.
     checkouts = public_checkouts(cwd, package_dir)
     if not checkouts:
         raise TaskError(
-            f"cannot find the public rbench checkout to keep {HIDDEN_DIR} out of it;"
-            " run rbench from its checkout"
+            f"cannot find the rbench checkout to keep {HIDDEN_DIR} out of it: run rbench from"
+            " its checkout, where pyproject.toml names the project rbench"
         )
     for root in checkouts:
         if is_within(hidden_dir, root) or is_within(root, hidden_dir):
@@ -113,7 +128,7 @@ def hidden_config(
             )
     config_path = hidden_dir / HIDDEN_CONFIG_FILE
     if not is_within(config_path, hidden_dir):
-        raise TaskError(f"{CONFIG_NAME} resolves outside the hidden directory")
+        raise TaskError(f"{CONFIG_NAME} resolves outside the hidden directory, or not at all")
     if not config_path.is_file():
         raise TaskError(f"{CONFIG_NAME} does not exist: {HOW_TO_CONFIGURE}")
     # Parser and OS messages may quote the file or its path: only a position or a reason is kept,

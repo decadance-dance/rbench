@@ -126,17 +126,33 @@ def _show(value: object) -> str:
     return "<hidden>" if _hidden_label.get() else repr(value)
 
 
-def _refuse_hidden(set_dir: Path, entry: str) -> TaskError:
+def _refuse_hidden(entry: str) -> TaskError:
+    # Named by position only: the path of a hidden task holds its id, and the set directory may be
+    # the hidden directory itself.
     return TaskError(
-        f"task set directory {set_dir}: {entry} has a hidden id; hidden tasks load only from the"
-        f" directory {HIDDEN_DIR_ENV} names"
+        f"{entry} is a hidden task; hidden tasks load only from the directory {HIDDEN_DIR_ENV}"
+        " names"
+    )
+
+
+def _is_hidden(meta: dict) -> bool:
+    task_id = meta.get("id")
+    return meta.get("set") == "hidden" or (
+        isinstance(task_id, str) and task_id.startswith(HIDDEN_ID_PREFIX)
     )
 
 
 def is_within(path: Path, root: Path) -> bool:
-    """Whether `path`, with every link followed, is `root` or inside it; aliases of `root` count."""
-    resolved = Path(path).resolve()
-    return any(p.exists() and os.path.samefile(p, root) for p in (resolved, *resolved.parents))
+    """Whether `path`, with every link followed, is `root` or inside it; aliases of `root` count.
+
+    A path that cannot be resolved, such as a link loop, counts as outside.
+    """
+    try:
+        resolved = Path(path).resolve()
+        return any(p.exists() and os.path.samefile(p, root) for p in (resolved, *resolved.parents))
+    # Python 3.12 raises RuntimeError on a link loop, later versions OSError.
+    except (OSError, RuntimeError):
+        return False
 
 
 def load_tasks(*set_dirs: Path) -> list[Task]:
@@ -158,22 +174,23 @@ def _load_tasks(set_dirs, hidden_canary_prefix: str | None = None) -> list[Task]
     check_hidden_canary_prefix(hidden_canary_prefix)
     hidden = hidden_canary_prefix is not None
     loaded: list[tuple[str, Task]] = []
-    for set_dir in map(Path, set_dirs):
+    for k, set_dir in enumerate(map(Path, set_dirs)):
+        name = (
+            f"the directory {HIDDEN_DIR_ENV} names" if hidden else f"task set directory {set_dir}"
+        )
         if not set_dir.is_dir():
-            name = (
-                f"the directory {HIDDEN_DIR_ENV} names"
-                if hidden
-                else f"task set directory {set_dir}"
-            )
             raise TaskError(f"{name} does not exist")
-        entries = [
-            d for d in sorted(set_dir.iterdir()) if d.is_dir() and not d.name.startswith(".")
-        ]
+        try:
+            listed = sorted(set_dir.iterdir())
+        except OSError as e:
+            raise TaskError(f"{name} cannot be listed: {e.strerror}") from None
+        entries = [d for d in listed if d.is_dir() and not d.name.startswith(".")]
         for i, task_dir in enumerate(entries):
             if not hidden:
+                entry = f"task set directory argument {k}, entry {i},"
                 if task_dir.name.startswith(HIDDEN_ID_PREFIX):
-                    raise _refuse_hidden(set_dir, f"entry {i}")
-                loaded.append((f"task {task_dir}", _load_task(task_dir, None)))
+                    raise _refuse_hidden(entry)
+                loaded.append((f"task {task_dir}", _load_task(task_dir, None, entry)))
                 continue
             label = f"{HIDDEN_DIR_ENV} entry {i}"
             # limit: checked, then opened; a link swapped in between is not caught. The directory
@@ -184,7 +201,9 @@ def _load_tasks(set_dirs, hidden_canary_prefix: str | None = None) -> list[Task]
                 (task_dir / GROUND_TRUTH_FILE, GROUND_TRUTH_FILE),
             ):
                 if not is_within(path, set_dir):
-                    raise TaskError(f"{label}: {name} resolves outside the hidden directory")
+                    raise TaskError(
+                        f"{label}: {name} resolves outside the hidden directory, or not at all"
+                    )
             token = _hidden_label.set(label)
             try:
                 task = _load_task(task_dir, hidden_canary_prefix)
@@ -198,9 +217,10 @@ def _load_tasks(set_dirs, hidden_canary_prefix: str | None = None) -> list[Task]
     for attr in ("id", "canary"):
         seen: dict[str, str] = {}
         for label, task in loaded:
-            other = seen.setdefault(getattr(task, attr), label)
-            if other != label:
-                raise TaskError(f"{label} has the same {attr} as {other}")
+            value = getattr(task, attr)
+            if value in seen:
+                raise TaskError(f"{label} has the same {attr} as {seen[value]}")
+            seen[value] = label
     return sorted((task for _, task in loaded), key=lambda t: t.id)
 
 
@@ -224,15 +244,20 @@ def check_hidden_canary_prefix(prefix: str | None) -> None:
 def load_task(task_dir: Path) -> Task:
     """Load and validate one public task directory; a hidden one fails."""
     task_dir = Path(task_dir)
+    entry = "the task directory given"
     if task_dir.name.startswith(HIDDEN_ID_PREFIX):
-        raise _refuse_hidden(task_dir.parent, "an entry")
-    return _load_task(task_dir, None)
+        raise _refuse_hidden(entry)
+    return _load_task(task_dir, None, entry)
 
 
-def _load_task(task_dir: Path, hidden_canary_prefix: str | None) -> Task:
+def _load_task(task_dir: Path, hidden_canary_prefix: str | None, entry: str = "") -> Task:
+    """Load one task; `entry` names a public-mode task by position if it turns out hidden."""
     label = _hidden_label.get() or f"task {task_dir}"
     meta_path = task_dir / TASK_FILE
     meta = _read_object(label, meta_path)
+    # Before any error that quotes a value: a hidden task under another name must not leak.
+    if hidden_canary_prefix is None and _is_hidden(meta):
+        raise _refuse_hidden(entry)
     _check_keys(meta, TASK_KEYS, set(), f"{label}: {meta_path.name}")
 
     def where(key: str) -> str:
@@ -267,7 +292,7 @@ def _load_task(task_dir: Path, hidden_canary_prefix: str | None) -> Task:
     canary = gt["canary"]
     if task_set == "hidden":
         if hidden_canary_prefix is None:
-            raise _refuse_hidden(task_dir.parent, "an entry")
+            raise _refuse_hidden(entry)
         prefix, prefix_name = hidden_canary_prefix, "the hidden canary prefix"
     else:
         prefix, prefix_name = PUBLIC_CANARY_PREFIX, repr(PUBLIC_CANARY_PREFIX)

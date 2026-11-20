@@ -23,6 +23,7 @@ from rbench.tasks import (
     check_hidden_results_dir,
     hidden_config,
     load_hidden_tasks,
+    load_task,
     load_task_sets,
     load_tasks,
 )
@@ -38,10 +39,13 @@ def no_outer_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
 
 
-def git_repo(path: Path) -> Path:
+def git_repo(path: Path, project: str | None = "rbench") -> Path:
+    """A git checkout; with `project`, one whose pyproject.toml names that project."""
     path.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True)
     (path / ".gitignore").write_text("/runs/\n")
+    if project:
+        (path / "pyproject.toml").write_text(f'[project]\nname = "{project}"\n')
     return path
 
 
@@ -166,8 +170,64 @@ def test_no_known_checkout_refuses(tmp_path):
     path = hidden_dir(tmp_path)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
-    with pytest.raises(TaskError, match="cannot find the public rbench checkout"):
+    with pytest.raises(TaskError, match="cannot find the rbench checkout") as e:
         hidden_config({HIDDEN_DIR_ENV: str(path)}, cwd=elsewhere, package_dir=elsewhere)
+    assert "run rbench from its checkout" in str(e.value)
+
+
+@pytest.mark.parametrize("project", [None, "other", "[broken"])
+def test_unrelated_checkout_does_not_count_as_the_public_one(tmp_path, project):
+    # A non-editable install run from another checkout, the hidden directory inside rbench's.
+    rbench = git_repo(tmp_path / "public")
+    hidden = rbench / "private"
+    hidden.mkdir()
+    (hidden / HIDDEN_CONFIG_FILE).write_text(f'canary_prefix = "{HIDDEN}"\n')
+    other = git_repo(tmp_path / "other", project=None if project == "[broken" else project)
+    if project == "[broken":
+        (other / "pyproject.toml").write_text("[broken")
+    with pytest.raises(TaskError, match="cannot find the rbench checkout"):
+        hidden_config({HIDDEN_DIR_ENV: str(hidden)}, cwd=other, package_dir=tmp_path / "venv")
+
+
+def test_hidden_repository_as_working_directory_is_not_the_public_one(tmp_path):
+    path = hidden_dir(tmp_path)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    rbench = git_repo(tmp_path / "public")
+    package = rbench / "src" / "rbench" / "tasks"
+    package.mkdir(parents=True)
+    assert hidden_config({HIDDEN_DIR_ENV: str(path)}, cwd=path, package_dir=package).path == (
+        path.resolve()
+    )
+
+
+def loop(path: Path) -> None:
+    path.unlink(missing_ok=True)
+    path.symlink_to(path.name)
+
+
+def test_link_loops_refuse_without_naming_the_path(tmp_path):
+    root = tmp_path / "looped"
+    loop(root)
+    with pytest.raises(TaskError, match="not a directory") as e:
+        config(root, tmp_path)
+    assert_private(e, str(tmp_path))
+    path = hidden_dir(tmp_path)
+    loop(path / HIDDEN_CONFIG_FILE)
+    with pytest.raises(
+        TaskError, match="resolves outside the hidden directory, or not at all"
+    ) as e:
+        config(path, tmp_path)
+    assert_private(e, str(tmp_path))
+
+
+@pytest.mark.parametrize("file", [TASK_FILE, GROUND_TRUTH_FILE])
+def test_task_file_link_loop_refuses_without_naming_the_path(tmp_path, file):
+    path = hidden_dir(tmp_path)
+    loaded = config(path, tmp_path)
+    loop(write_task(path, HID, task_set="hidden") / file)
+    with pytest.raises(TaskError, match=f"{file} resolves outside the hidden directory") as e:
+        load_hidden_tasks(loaded)
+    assert_private(e, str(tmp_path))
 
 
 @pytest.mark.parametrize(
@@ -286,9 +346,12 @@ def test_hidden_task_in_a_public_set_refuses_without_naming_it(tmp_path):
 def test_hidden_directory_given_as_a_public_set_refuses(tmp_path):
     path = hidden_dir(tmp_path)
     write_task(path, HID, task_set="hidden")
-    with pytest.raises(TaskError, match="entry 0 has a hidden id") as e:
+    with pytest.raises(TaskError, match="argument 0, entry 0, is a hidden task") as e:
         load_task_sets(path)
-    assert_private(e)
+    assert_private(e, str(tmp_path))
+    with pytest.raises(TaskError, match="the task directory given is a hidden task") as e:
+        load_task(path / HID)
+    assert_private(e, str(tmp_path))
 
 
 def test_public_task_in_the_hidden_directory_refuses(tmp_path):

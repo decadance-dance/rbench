@@ -294,6 +294,12 @@ def test_task_id_unique_across_sets(tmp_path: Path) -> None:
         load_tasks(tmp_path / "ours", tmp_path / "reviewbench")
 
 
+def test_set_directory_listed_twice_fails(tmp_path: Path) -> None:
+    write_task(tmp_path, "t-1")
+    with pytest.raises(TaskError, match=r"t-1 has the same id as task .*t-1"):
+        load_tasks(tmp_path, tmp_path)
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -318,15 +324,37 @@ def test_hidden_task_uses_hidden_canary_prefix(tmp_path: Path) -> None:
     assert task.canary.startswith(HIDDEN)
 
 
+REFUSED = f"is a hidden task; hidden tasks load only from the directory {HIDDEN_DIR_ENV} names"
+
+
+def assert_names_neither(error: pytest.ExceptionInfo, *secrets: str) -> None:
+    for exc in (error.value, error.value.__cause__, error.value.__context__):
+        assert not any(secret in str(exc) for secret in secrets)
+
+
 def test_hidden_task_fails_the_public_loaders(tmp_path: Path) -> None:
     write_task(tmp_path, HID, "hidden")
-    message = f"entry 0 has a hidden id; hidden tasks load only from the directory {HIDDEN_DIR_ENV}"
-    with pytest.raises(TaskError, match=message) as error:
+    with pytest.raises(TaskError, match=f"argument 0, entry 0, {REFUSED}") as error:
         load_tasks(tmp_path)
-    assert HID not in str(error.value)
-    with pytest.raises(TaskError, match="an entry has a hidden id") as error:
+    assert_names_neither(error, HID, str(tmp_path))
+    with pytest.raises(TaskError, match=f"the task directory given {REFUSED}") as error:
         load_task(tmp_path / HID)
-    assert HID not in str(error.value)
+    assert_names_neither(error, HID, str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [{"id": HID}, {"id": HID, "pr": 0, "set": "unknown"}, {"id": HID, "set": "ours"}, {"id": "x"}],
+)
+def test_renamed_hidden_task_is_refused_before_any_value_is_quoted(tmp_path: Path, meta) -> None:
+    # A hidden task's directory renamed away from its id, or a hidden set under a plain id.
+    task_dir = write_task(tmp_path, "x", "hidden", **meta)
+    with pytest.raises(TaskError, match=REFUSED) as error:
+        load_tasks(tmp_path)
+    assert_names_neither(error, HID, str(tmp_path))
+    with pytest.raises(TaskError, match=REFUSED) as error:
+        load_task(task_dir)
+    assert_names_neither(error, HID, str(tmp_path))
 
 
 def test_task_repr_hides_the_canary_and_a_hidden_task(tmp_path: Path) -> None:
@@ -380,7 +408,7 @@ def test_hidden_prefix_must_be_distinct_from_the_public_one(tmp_path: Path, pref
 @pytest.mark.parametrize("task_set", ["ours", "reviewbench"])
 def test_hidden_id_prefix_reserved_for_hidden_tasks(tmp_path: Path, task_set: str) -> None:
     write_task(tmp_path, HID, task_set)
-    with pytest.raises(TaskError, match=r"entry 0 has a hidden id"):
+    with pytest.raises(TaskError, match=REFUSED):
         load_tasks(tmp_path)
     with pytest.raises(
         TaskError, match=rf"{ENTRY0}: task.json: 'id': the {ID_PREFIX} id prefix is reserved"
@@ -390,8 +418,10 @@ def test_hidden_id_prefix_reserved_for_hidden_tasks(tmp_path: Path, task_set: st
 
 def test_hidden_task_needs_hidden_id_prefix(tmp_path: Path) -> None:
     write_task(tmp_path, "t-1", "hidden")
-    with pytest.raises(TaskError, match=rf"t-1: task.json: 'id': the {ID_PREFIX} id prefix"):
+    with pytest.raises(TaskError, match=REFUSED):
         load_tasks(tmp_path)
+    with pytest.raises(TaskError, match=rf"{ENTRY0}: task.json: 'id': the {ID_PREFIX} id prefix"):
+        load_hidden(tmp_path)
 
 
 def test_missing_set_directory_fails(tmp_path: Path) -> None:
