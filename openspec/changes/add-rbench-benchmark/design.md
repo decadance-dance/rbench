@@ -342,8 +342,8 @@ measure a different task from the engines, which all read the repository.
 - Models: `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5`, `gpt-6.2-sol`,
   `gpt-6.2-astra`.
 - Efforts: `medium`, `high`, `xhigh`.
-- One round is one effort level for every role. Mixed-effort combinations and mixed rreview panels
-  are later rounds.
+- One round is one effort level for every role, in the order of O6: R1 `high`, R2 `medium`, R3
+  `xhigh`. Mixed-effort combinations and mixed rreview panels are later rounds, after R3.
 - Configurations per round:
 
   | Engine | Roles and models | Configurations |
@@ -364,7 +364,9 @@ measure a different task from the engines, which all read the repository.
 - rreview: the panel roles `intent_contracts`, `reliability` and `security` run on Codex with one
   model for the whole panel; the coordinator runs on Claude Code; the judge runs on Codex, because
   rreview refuses a coordinator and judge of the same family.
-- At 10 core tasks and one attempt, one round is 330 trials.
+- At 10 core tasks and one attempt, one round of all 33 configurations is 330 trials. R1 and R2 run
+  all 33; R3 runs only the configurations on the quality-against-cost Pareto front after R1 and R2
+  (O6).
 
 **Alternative considered:** a full cartesian product of models, efforts and roles in one run. It
 does not fit any budget the maintainer is willing to spend.
@@ -373,7 +375,8 @@ does not fit any budget the maintainer is willing to spend.
 **Choice.** The maintainer does not want a run to use up the subscription limits; ideally no run
 hits one. The matrix is split into rounds by importance, each with a token budget per provider. The
 runner starts a trial only if its estimate fits, and stops at a soft threshold of the subscription
-window where the CLI reports its used share. Codex reports `rate_limits` in its events; whether
+window where the CLI reports its used share. O6 sets the round order, the budget rule and the
+threshold value. Codex reports `rate_limits` in its events; whether
 Claude Code reports anything is a spike item. Checkpoint and resume stay as the safety net, and a
 limit stops the run by default; waiting for the reset is opt-in (`--wait`).
 
@@ -422,8 +425,8 @@ New repository; nothing to migrate. Rollout:
 
 ## Open decisions (need the maintainer before tasks.md)
 
-O1, O3, O5 and O7 were decided by the maintainer on 2026-11-20 and are marked so in place; O2, O4
-and O6 are open.
+O1, O3, O5 and O7 were decided by the maintainer on 2026-11-20 and O6 on 2026-11-21; they are
+marked so in place. O2 and O4 are open.
 
 - **O1. Judge model.** **Decided (maintainer, 2026-11-20):**
   - `claude-opus-5-5` at high effort is the judge.
@@ -449,7 +452,19 @@ and O6 are open.
     of ground truth for our PRs).
   - Not taken, option B: pool the findings of all engines on our PRs, and the maintainer confirms
     them.
-- **O6. Round details.** The order of the rounds, the budget per round and the soft threshold value.
+- **O6. Round details.** **Decided (maintainer, 2026-11-21):**
+  - Round order of screening: R1 effort `high`, R2 `medium`, R3 `xhigh`; each round is one effort
+    level for every role (D13). Mixed-effort and mixed rreview panels come after R3, as D13 says.
+  - R3 (`xhigh`) runs only the configurations on the quality-against-cost Pareto front after R1 and
+    R2, not all 33 (a round lists its own configurations, spec `engine-configurations`, Rounds).
+  - Budget rule: a round's budget per provider is the `rbench plan` estimate for that round (trial
+    count × token medians from the smoke stage) × 1.2. After the smoke stage the coordinator brings
+    the numbers per round to the maintainer, who approves them before the round runs. `rbench plan`
+    refuses a round whose estimate exceeds its budget.
+  - Soft threshold: 80% of every subscription window the CLI reports (for Codex both the 5-hour and
+    the weekly window). Where a CLI reports no used share, the threshold is not enforced for that
+    provider, and the plan and the report say so (spec `run-ledger`, Soft threshold of the
+    subscription window).
 - **O7. File-scoped matching.** **Decided (maintainer, 2026-11-20):** option A, as in ReviewBench
   (METHODOLOGY 6.2.1).
   - A finding is compared only with ground-truth items in the same file; within a file, location is
