@@ -21,8 +21,9 @@ any value does, and it depends on no other task.
 
 The core task list is `<tasks-root>/core.json`: `{"version": 1, "tasks": ["<task-id>", ...]}`.
 
-Errors never quote a value read from these files, and never name a hidden task: they give the
-set, the file, the field and the position instead.
+Errors never quote a value read from these files, and never name a hidden task or a private
+path: they give the set, the file, the field and the position instead. The hidden set loads only
+through `load_hidden_task_set`, from the configuration `hidden_config` issued.
 """
 
 import hashlib
@@ -33,8 +34,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from rbench.tasks.hidden import HiddenConfig, load_hidden_tasks
 from rbench.tasks.loader import (
     GROUND_TRUTH_FILE,
+    HIDDEN_DIR_ENV,
     HIDDEN_ID_PREFIX,
     SHA256,
     TASK_FILE,
@@ -42,7 +45,6 @@ from rbench.tasks.loader import (
     TASK_SETS,
     Task,
     TaskError,
-    load_task,
     load_tasks,
 )
 
@@ -78,6 +80,18 @@ class Manifest:
     changelog: tuple[ChangelogEntry, ...]
     path: Path
 
+    def __repr__(self) -> str:
+        # A hidden manifest's tasks and changelog are hidden ids, and its path is private.
+        if self.set == "hidden":
+            return f"Manifest(set='hidden', version={self.version})"
+        return f"Manifest(set={self.set!r}, version={self.version}, path={str(self.path)!r})"
+
+
+def _manifest_label(task_set: str, path: Path) -> str:
+    return (
+        f"manifest {HIDDEN_DIR_ENV}/{MANIFEST_FILE}" if task_set == "hidden" else f"manifest {path}"
+    )
+
 
 @dataclass(frozen=True)
 class CoreList:
@@ -101,26 +115,43 @@ def task_content_sha256(task: Task) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def load_task_set(
-    set_dir: Path, task_set: str, hidden_canary_prefix: str | None = None
-) -> tuple[Manifest, list[Task]]:
-    """Load the set `task_set` from `set_dir` and check every task against its manifest.
+def load_task_set(set_dir: Path, task_set: str) -> tuple[Manifest, list[Task]]:
+    """Load the public set `task_set` from `set_dir` and check every task against its manifest.
 
-    `task_set` comes from the caller (the directory or the hidden configuration), never from the
-    files: it decides what errors may name. In the hidden set they name no task id and quote no
-    loader message. This checks the set against its own manifest; `check_version_history` checks
-    the manifest against the one committed before it.
+    `task_set` comes from the caller (the directory), never from the files. This checks the set
+    against its own manifest; `check_version_history` checks the manifest against the one
+    committed before it. The hidden set loads through `load_hidden_task_set`.
     """
     set_dir = Path(set_dir)
     if task_set not in TASK_SETS:
         raise TaskError(f"unknown task set {task_set!r}")
+    if task_set == "hidden":
+        raise TaskError(
+            f"the hidden set loads only through load_hidden_task_set, from {HIDDEN_DIR_ENV}"
+        )
+    tasks = load_tasks(set_dir)
+    return _check_task_set(load_manifest(set_dir / MANIFEST_FILE, task_set), tasks), tasks
+
+
+def load_hidden_task_set(config: HiddenConfig) -> tuple[Manifest, list[Task]]:
+    """Load the hidden set of a configuration `hidden_config` issued and check it as above.
+
+    Errors name no task id, canary or path: tasks by their position, files by their name in
+    the directory `RBENCH_HIDDEN_DIR` names.
+    """
+    tasks = load_hidden_tasks(config)
+    manifest = load_manifest(config.inside(MANIFEST_FILE), "hidden")
+    return _check_task_set(manifest, tasks), tasks
+
+
+def _check_task_set(manifest: Manifest, tasks: list[Task]) -> Manifest:
+    task_set = manifest.set
     private = task_set == "hidden"
-    tasks = _load_tasks(set_dir, hidden_canary_prefix) if private else load_tasks(set_dir)
-    manifest = load_manifest(set_dir / MANIFEST_FILE, task_set)
+    label = _manifest_label(task_set, manifest.path)
 
     def who(index: int, task: Task) -> str:
         if private:
-            return f"task {index + 1} of {len(tasks)} in {set_dir} (sorted by id)"
+            return f"task {index + 1} of {len(tasks)} in {HIDDEN_DIR_ENV} (sorted by id)"
         return f"task {task.path}"
 
     for index, task in enumerate(tasks):
@@ -133,50 +164,22 @@ def load_task_set(
     ):
         if ids:
             names = f"{len(ids)} of them" if private else ", ".join(ids)
-            raise TaskError(f"{manifest.path} {problem}: {names}")
+            raise TaskError(f"{label} {problem}: {names}")
     for index, task in enumerate(tasks):
         actual = task_content_sha256(task)
         if actual != manifest.tasks[task.id].sha256:
             now = "" if private else f" (now {actual})"
             raise TaskError(
-                f"{who(index, task)}: content hash{now} does not match {manifest.path};"
+                f"{who(index, task)}: content hash{now} does not match {label};"
                 " a changed task needs a new set version whose changelog entry names it"
             )
-    return manifest, tasks
-
-
-def _load_tasks(set_dir: Path, hidden_canary_prefix: str | None) -> list[Task]:
-    """`load_tasks` for the hidden set: a failure gives the task's position, not its message.
-
-    The loader's messages name the task directory, which is the task id, and can quote values.
-    """
-    if not set_dir.is_dir():
-        raise TaskError(f"task set directory {set_dir} does not exist")
-    dirs = sorted(d for d in set_dir.iterdir() if d.is_dir() and not d.name.startswith("."))
-    for index, task_dir in enumerate(dirs):
-        try:
-            load_task(task_dir, hidden_canary_prefix)
-        except TaskError:
-            error = TaskError(
-                f"hidden task {index + 1} of {len(dirs)} in {set_dir} (sorted by directory name)"
-                " does not load; its message is withheld, since it can carry a hidden id or canary"
-            )
-        else:
-            continue
-        raise error
-    try:
-        return load_tasks(set_dir, hidden_canary_prefix=hidden_canary_prefix)
-    except TaskError:
-        error = TaskError(
-            f"the hidden set {set_dir} does not load: two of its tasks share an id or a canary"
-        )
-    raise error
+    return manifest
 
 
 def load_manifest(path: Path, task_set: str) -> Manifest:
     """Read and validate the manifest of `task_set`; this does not look at the tasks."""
     path = Path(path)
-    label = f"manifest {path}"
+    label = _manifest_label(task_set, path)
     return _parse_manifest(_read_json(path, label), label, path, task_set)
 
 
@@ -254,19 +257,31 @@ def load_committed_manifest(repo: Path, rev: str, path: Path, task_set: str) -> 
     for want of a base.
     """
     repo, path = Path(repo), Path(path)
+    label = f"{_manifest_label(task_set, path)} at {rev}"
     if path.is_symlink():
-        raise TaskError(f"manifest {path} is a symlink")
-    commit = _resolve(repo, rev)
-    rel = _repo_path(repo, path)
-    label = f"manifest {path} at {rev}"
-    listed = _git(
-        repo,
-        ["ls-tree", "--name-only", "--end-of-options", commit, "--", rel],
-        f"cannot list {label}",
-    )
+        raise TaskError(f"{label} is a symlink")
+    try:
+        commit = _resolve(repo, rev)
+        rel = _repo_path(repo, path)
+        listed = _git(
+            repo,
+            ["ls-tree", "--name-only", "--end-of-options", commit, "--", rel],
+            f"cannot list {label}",
+        )
+        text = listed and _git(
+            repo, ["show", "--end-of-options", f"{commit}:{rel}"], f"cannot read {label}"
+        )
+        error = None
+    except TaskError:
+        if task_set != "hidden":
+            raise
+        # Git's messages name the private repository and its paths: only the label is kept, and
+        # the error is raised outside the handler, so nothing is chained.
+        error = TaskError(f"{label}: git cannot read it at that revision")
+    if error:
+        raise error
     if not listed:
         return None
-    text = _git(repo, ["show", "--end-of-options", f"{commit}:{rel}"], f"cannot read {label}")
     return _parse_manifest(_parse_json(text, label, path.name), label, path, task_set)
 
 
@@ -278,7 +293,7 @@ def check_version_history(base: Manifest | None, manifest: Manifest) -> None:
     """
     if base is None:
         return
-    label = f"manifest {manifest.path}"
+    label = _manifest_label(manifest.set, manifest.path)
     if manifest.set != base.set:
         raise TaskError(f"{label}: 'set' differs from the committed manifest")
     hidden = manifest.set == "hidden"
@@ -491,20 +506,30 @@ def _git(repo: Path, args: list[str], failure: str) -> str:
 def _read_json(path: Path, label: str) -> dict:
     if not path.is_file():
         raise TaskError(f"{label}: missing file {path.name}")
+    # An OSError's message holds the path, which may be private: only its reason is kept. The
+    # error is raised outside the handler, so the file's bytes are not chained to it.
+    error, text = None, ""
     try:
         text = path.read_text(encoding="utf-8")
-    except (OSError, ValueError) as e:
-        raise TaskError(f"{label}: cannot read {path.name}: {e}") from None
+    except OSError as e:
+        error = e.strerror
+    except ValueError as e:
+        error = str(e)
+    if error is not None:
+        raise TaskError(f"{label}: cannot read {path.name}: {error}")
     return _parse_json(text, label, path.name)
 
 
 def _parse_json(text: str, label: str, name: str) -> dict:
+    error, data = None, None
     try:
         data = json.loads(text, object_pairs_hook=_unique_keys)
     # ValueError covers malformed JSON, repeated keys and the integer-digit limit; none of these
-    # messages quotes the input.
+    # messages quotes the input. Raised outside the handler: a JSON error holds the whole text.
     except (ValueError, RecursionError) as e:
-        raise TaskError(f"{label}: cannot read {name}: {e}") from None
+        error = str(e)
+    if error is not None:
+        raise TaskError(f"{label}: cannot read {name}: {error}")
     if not isinstance(data, dict):
         raise TaskError(f"{label}: {name} must hold a JSON object")
     return data
