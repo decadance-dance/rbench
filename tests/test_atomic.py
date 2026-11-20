@@ -7,7 +7,6 @@ import textwrap
 
 import pytest
 
-from rbench import atomic
 from rbench.atomic import atomic_write
 
 
@@ -21,26 +20,22 @@ def test_writes_and_replaces(tmp_path):
     assert os.listdir(tmp_path) == ["status.json"]
 
 
-@pytest.mark.parametrize("umask, mode", [(0o022, 0o644), (0o077, 0o600)])
-def test_new_file_honors_umask(tmp_path, monkeypatch, umask, mode):
-    monkeypatch.setattr(atomic, "_UMASK", umask)
+@pytest.mark.parametrize(
+    "old_mode", [None, 0o600, 0o644, 0o664], ids=lambda m: "new" if m is None else oct(m)
+)
+def test_file_is_always_private(tmp_path, old_mode):
     target = tmp_path / "status.json"
+    if old_mode is not None:
+        target.write_text("old")
+        target.chmod(old_mode)
 
-    atomic_write(target, "new")
+    old_umask = os.umask(0o022)
+    try:
+        atomic_write(target, "new")
+    finally:
+        os.umask(old_umask)
 
-    assert stat.S_IMODE(target.stat().st_mode) == mode
-
-
-@pytest.mark.parametrize("mode", [0o600, 0o640, 0o664], ids=oct)
-def test_replacement_keeps_the_mode(tmp_path, monkeypatch, mode):
-    monkeypatch.setattr(atomic, "_UMASK", 0o022)
-    target = tmp_path / "status.json"
-    target.write_text("old")
-    target.chmod(mode)
-
-    atomic_write(target, "new")
-
-    assert stat.S_IMODE(target.stat().st_mode) == mode
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 
 def test_failed_write_keeps_old_file_and_removes_temp(tmp_path, monkeypatch):
