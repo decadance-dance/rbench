@@ -344,7 +344,7 @@ measure a different task from the engines, which all read the repository.
 - Efforts: `medium`, `high`, `xhigh`.
 - One round is one effort level for every role, in the order of O6: R1 `high`, R2 `medium`, R3
   `xhigh`. Mixed-effort combinations and mixed rreview panels are later rounds, after R3.
-- Configurations per round:
+- Configurations of the full matrix, which R1 and R2 each run:
 
   | Engine | Roles and models | Configurations |
   | --- | --- | --- |
@@ -365,8 +365,8 @@ measure a different task from the engines, which all read the repository.
   model for the whole panel; the coordinator runs on Claude Code; the judge runs on Codex, because
   rreview refuses a coordinator and judge of the same family.
 - At 10 core tasks and one attempt, one round of all 33 configurations is 330 trials. R1 and R2 run
-  all 33; R3 runs only the configurations on the quality-against-cost Pareto front after R1 and R2
-  (O6).
+  all 33; R3 runs only the engine and role-model combinations on the quality-against-cost Pareto
+  front after R1 and R2, each once at `xhigh` (O6).
 
 **Alternative considered:** a full cartesian product of models, efforts and roles in one run. It
 does not fit any budget the maintainer is willing to spend.
@@ -457,6 +457,10 @@ marked so in place. O2 and O4 are open.
     level for every role (D13). Mixed-effort and mixed rreview panels come after R3, as D13 says.
   - R3 (`xhigh`) runs only the configurations on the quality-against-cost Pareto front after R1 and
     R2, not all 33 (a round lists its own configurations, spec `engine-configurations`, Rounds).
+    R3 takes the engine and role-model combinations on the front and runs each at `xhigh`, once
+    even if both R1 and R2 put it on the front; its configuration ids differ from those of R1 and
+    R2 because the effort is part of the settings (spec `engine-configurations`, Screening round
+    selected from the front).
   - Budget rule: a round's budget per provider is the `rbench plan` estimate for that round (trial
     count × token medians from the smoke stage) × 1.2. After the smoke stage the coordinator brings
     the numbers per round to the maintainer, who approves them before the round runs. `rbench plan`

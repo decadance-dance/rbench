@@ -152,7 +152,7 @@ medians when a smoke run exists.
 A matrix SHALL be split into rounds, in the order of their importance. Each round SHALL list its
 configurations and its token budget per provider, and a run executes one round (see run-ledger,
 Round budget). Planning SHALL refuse a round whose token estimate exceeds its budget for any
-provider, naming the round, the provider, the estimate and the budget.
+provider.
 
 #### Scenario: Plan of one round
 - **WHEN** the operator plans a round
@@ -161,8 +161,7 @@ provider, naming the round, the provider, the estimate and the budget.
 
 #### Scenario: Round over budget
 - **WHEN** the operator plans a round whose Codex token estimate exceeds its Codex budget
-- **THEN** planning refuses the round, naming the round, the provider, the estimate and the budget,
-  and nothing runs
+- **THEN** planning refuses the round and nothing runs
 
 ### Requirement: Stages
 The benchmark SHALL provide three stages as matrix files:
@@ -170,8 +169,9 @@ The benchmark SHALL provide three stages as matrix files:
 - **screening:** the core tasks, one attempt;
 - **full:** all tasks, three attempts, for configurations the maintainer selects.
 
-Screening SHALL only select the configurations for the full stage. The full stage SHALL run fresh
-attempts and SHALL NOT count screening trials in its scores.
+Screening SHALL only select configurations, for the full stage or a later screening round (see
+Screening round selected from the front). The full stage SHALL run fresh attempts and SHALL NOT
+count screening trials in its scores.
 
 #### Scenario: Full stage attempts
 - **WHEN** the full stage runs
@@ -180,3 +180,13 @@ attempts and SHALL NOT count screening trials in its scores.
 #### Scenario: Screening trials kept out of the full stage
 - **WHEN** a configuration selected from screening runs in the full stage
 - **THEN** its full-stage scores use only full-stage trials, even where screening ran the same task
+
+### Requirement: Screening round selected from the front
+A screening round MAY run only configurations selected from earlier rounds. Such a round SHALL take
+the engine and role-model combinations on the quality-against-cost Pareto front of the earlier
+rounds and run each once at its own effort, even when several earlier rounds put the same
+combination on the front.
+
+#### Scenario: Combination on the front at two efforts
+- **WHEN** one engine and role-model combination is on the Pareto front at both `high` and `medium`
+- **THEN** the `xhigh` round runs it once, as a configuration with its own id
