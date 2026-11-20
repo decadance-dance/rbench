@@ -8,7 +8,9 @@ repository (spec trial-isolation, Scrubbed repository):
 
 The bundle holds those two branches and the objects they reach, nothing else: no remotes, tags,
 reflog or earlier history, as none of these travel in a bundle. Both commits have a fixed author,
-committer, date and message, so the same base and head give the same commit ids.
+committer, date and message, and every delta is recomputed from those two commits, so the same
+base and head give the same commit ids and, with the same git version, the same bundle bytes,
+however the source packed its objects.
 
 Git runs with no system or user configuration and no inherited `GIT_*` variables, so the
 operator's settings (URL rewrites, identities, hooks) cannot change what is fetched or built.
@@ -21,7 +23,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from rbench.tasks.license import check_license, is_license_file
+from rbench.tasks.license import LicenseError, read_license
 from rbench.tasks.loader import COMMIT, TASK_SETS
 
 # The sets whose archives are published, so their source license must allow redistribution.
@@ -40,14 +42,14 @@ class ArchiveError(ValueError):
 class SourceArchive:
     """A built archive: the bundle, its SHA-256 and the license read at the reviewed head.
 
-    `license` is the license id and `license_files` the root license files, which the `reviewed`
-    tree keeps; a hidden task skips the check, so both are empty for it.
+    `license` is the SPDX id and `license_file` the path of the license file, which the `reviewed`
+    tree keeps; a hidden task skips the check, so both are None for it.
     """
 
     path: Path
     sha256: str
     license: str | None
-    license_files: tuple[str, ...]
+    license_file: str | None
 
 
 def build_archive(
@@ -55,9 +57,9 @@ def build_archive(
 ) -> SourceArchive:
     """Fetch `base` and `head` of `repo` from `source` (a git URL or path) and bundle them to `out`.
 
-    For the `reviewbench` and `ours` sets the license at `head` is checked first; a refused license
-    raises `LicenseError` and writes nothing. Any other failure raises `ArchiveError`. `out` is
-    replaced only by a complete bundle.
+    For the `reviewbench` and `ours` sets the license of `repo` at `head` is checked first, through
+    `gh` (`read_license`); a refused license raises `LicenseError` and writes nothing. Any other
+    failure raises `ArchiveError`. `out` is replaced only by a complete bundle.
     """
     if task_set not in TASK_SETS:
         raise ArchiveError(f"{repo}: unknown task set {task_set!r}")
@@ -68,6 +70,8 @@ def build_archive(
         raise ArchiveError(f"{repo}: source {source!r} looks like an option, not a repository")
     if len(base) != len(head):
         raise ArchiveError(f"{repo}: base and head use different object formats")
+
+    found = read_license(repo, head) if task_set in LICENSED_SETS else None
 
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -80,35 +84,24 @@ def build_archive(
             if git("cat-file", "-t", commit, check=False) != "commit":
                 raise ArchiveError(f"{repo}: {name} {commit} is not a commit in {source}")
 
-        license_id, license_files = None, ()
-        if task_set in LICENSED_SETS:
-            files = _root_license_files(git, head)
-            license_id = check_license(repo, files)
-            license_files = tuple(sorted(files))
+        if found and git("cat-file", "-t", f"{head}:{found.path}", check=False) != "blob":
+            raise LicenseError(f"{repo}: license file {found.path} is not in the reviewed tree")
 
         base_commit = git("commit-tree", f"{base}^{{tree}}", "-m", "base")
         reviewed = git("commit-tree", f"{head}^{{tree}}", "-p", base_commit, "-m", "reviewed")
         git("update-ref", "refs/heads/base", base_commit)
         git("update-ref", "refs/heads/reviewed", reviewed)
+        # Recompute every delta from the two commits alone, single-threaded, so the bundle bytes do
+        # not depend on how the source happened to pack its objects.
+        git("repack", "-a", "-d", "-f", "-q", "--window=10", "--depth=50")
         bundle = Path(tmp) / "source.bundle"
         git("bundle", "create", "--quiet", str(bundle), "refs/heads/base", "refs/heads/reviewed")
         with bundle.open("rb") as f:
             sha256 = hashlib.file_digest(f, "sha256").hexdigest()
         os.replace(bundle, out)
-    return SourceArchive(out, sha256, license_id, license_files)
-
-
-def _root_license_files(git: "_Git", head: str) -> dict[str, str]:
-    files = {}
-    for entry in git("ls-tree", "-z", head).split("\0"):
-        if not entry:
-            continue
-        meta, name = entry.split("\t", 1)
-        mode, kind, obj = meta.split()
-        # Regular files only: a symlink's blob is its target path, not the license text.
-        if kind == "blob" and mode in ("100644", "100755") and is_license_file(name):
-            files[name] = git("cat-file", "blob", obj)
-    return files
+    if found is None:
+        return SourceArchive(out, sha256, None, None)
+    return SourceArchive(out, sha256, found.id, found.path)
 
 
 class _Git:
@@ -120,6 +113,9 @@ class _Git:
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "pack.threads",
+            "GIT_CONFIG_VALUE_0": "1",
             "GIT_AUTHOR_NAME": IDENTITY,
             "GIT_AUTHOR_EMAIL": EMAIL,
             "GIT_AUTHOR_DATE": DATE,
