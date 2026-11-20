@@ -10,15 +10,17 @@ paired comparisons for regression checks.
 
 ### Requirement: Matching findings to ground truth
 A pinned judge SHALL match each trial's findings to ground-truth items:
-- a match means the same underlying issue;
-- location is context only;
+- a match means the same underlying issue, and counts the same whether the finding names its root
+  cause or a symptom;
+- only items in the finding's file are compared; within it, location is context only;
 - one finding can match several items, and the reverse.
 
 Every score SHALL record the judge model, its effort, the matcher version (pinned to a
 ReviewBench commit) and the judge prompt hash.
 
 #### Scenario: Same issue, different line
-- **WHEN** a finding describes a ground-truth item's issue but points a few lines away
+- **WHEN** a finding describes a ground-truth item's issue but points a few lines away in the same
+  file
 - **THEN** the judge matches them
 
 #### Scenario: Same area, different failure
@@ -26,15 +28,26 @@ ReviewBench commit) and the judge prompt hash.
   failure
 - **THEN** the judge does not match them
 
+#### Scenario: Same issue, different file
+- **WHEN** a finding describes a ground-truth item's issue at a caller in another file, and the item
+  is in the callee's file
+- **THEN** they are not matched, and the item is a recall miss unless another finding matches it
+
 ### Requirement: Labels for unmatched findings
 The judge SHALL label every finding that matches no ground-truth item as one of:
-- `valid` (a real issue missing from ground truth);
+- `valid` (a real issue that matches no ground-truth item);
 - `false`;
 - `nit`.
 
 #### Scenario: Real issue outside ground truth
 - **WHEN** an unmatched finding describes a real defect
 - **THEN** it is labelled `valid` and counts toward augmented precision
+
+#### Scenario: Real issue reported in a different file
+- **WHEN** a finding in a caller's file correctly describes a defect, and the only ground-truth item
+  for that issue is in the callee's file, another file
+- **THEN** the finding is labelled `valid` and counts toward augmented precision, and the item is a
+  recall miss unless another finding of the trial matches it, such as one in the callee's file
 
 ### Requirement: Judge isolation and caching
 - The judge SHALL be blind to the engine and configuration that produced the findings.
