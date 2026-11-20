@@ -1,15 +1,17 @@
 import pytest
 
 from rbench.engines.declaration import (
+    EFFORTS,
     DeclarationError,
     Delivery,
     Setting,
     load_engine,
 )
-from rbench.engines.pins import FloatingRefError, check_ref, model_cli
+from rbench.engines.pins import MODELS, FloatingRefError, check_ref, model_cli
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 DIGEST = "sha256:" + "ab" * 32
+WHERE = "engine 'demo'"
 
 # A synthetic engine with a Claude role (flags), a Codex role (config.toml) and a role whose CLI
 # follows the model.
@@ -50,10 +52,10 @@ def test_flag_delivery_adds_shim_flags_per_cli(tmp_path):
     engine = load(tmp_path)
 
     assert engine.delivery("coordinator", Setting("claude-sonnet-5-5", "max")) == Delivery(
-        flags=("--model", "claude-sonnet-5-5", "--effort", "max")
+        "claude", flags=("--model", "claude-sonnet-5-5", "--effort", "max")
     )
     assert engine.delivery("reviewer", Setting("gpt-6.2-sol", "high")) == Delivery(
-        flags=("-m", "gpt-6.2-sol", "-c", 'model_reasoning_effort="high"')
+        "codex", flags=("-m", "gpt-6.2-sol", "-c", 'model_reasoning_effort="high"')
     )
 
 
@@ -61,21 +63,21 @@ def test_config_delivery_writes_codex_config_keys_and_no_flags(tmp_path):
     engine = load(tmp_path)
 
     assert engine.delivery("panel", Setting("gpt-6.2-astra", "xhigh")) == Delivery(
-        config=(("model", "gpt-6.2-astra"), ("model_reasoning_effort", "xhigh"))
+        "codex", config=(("model", "gpt-6.2-astra"), ("model_reasoning_effort", "xhigh"))
     )
 
 
-def test_role_without_cli_follows_the_models_provider(tmp_path):
+def test_role_without_cli_follows_the_models_cli(tmp_path):
     engine = load(tmp_path)
 
-    assert engine.cli_for("reviewer", "claude-fable-5-2") == "claude"
-    assert engine.cli_for("reviewer", "gpt-6.2-sol") == "codex"
+    assert engine.delivery("reviewer", Setting("claude-fable-5-2", "high")).cli == "claude"
+    assert engine.delivery("reviewer", Setting("gpt-6.2-sol", "high")).cli == "codex"
 
 
-def test_model_of_the_other_provider_is_rejected_for_a_fixed_cli(tmp_path):
+def test_model_of_the_other_cli_is_rejected_for_a_fixed_cli(tmp_path):
     engine = load(tmp_path)
 
-    with pytest.raises(DeclarationError, match="'coordinator' runs on claude"):
+    with pytest.raises(DeclarationError, match="'coordinator': runs on claude"):
         engine.delivery("coordinator", Setting("gpt-6.2-sol", "high"))
 
 
@@ -108,7 +110,7 @@ def test_role_without_a_default_is_rejected(tmp_path):
 
 
 def test_default_needing_an_unpinned_cli_is_rejected(tmp_path):
-    with pytest.raises(DeclarationError, match="'reviewer' needs a pinned codex CLI"):
+    with pytest.raises(DeclarationError, match="'reviewer': default: .* needs a pinned codex CLI"):
         load(
             tmp_path,
             **{
@@ -119,6 +121,38 @@ def test_default_needing_an_unpinned_cli_is_rejected(tmp_path):
         )
 
 
+@pytest.mark.parametrize("cli, effort", [("claude", "ultra"), ("claude", "banana")])
+def test_effort_the_cli_does_not_accept_is_rejected_in_a_declaration(tmp_path, cli, effort):
+    with pytest.raises(DeclarationError) as error:
+        load(tmp_path, **{'effort = "high"': f'effort = "{effort}"'})
+
+    message = str(error.value)
+    assert "engine.toml: engine 'demo': role 'coordinator': default:" in message
+    assert f"effort {effort!r} is not one {cli} accepts" in message
+
+
+@pytest.mark.parametrize(
+    "role, model", [("coordinator", "claude-opus-5-5"), ("panel", "gpt-6.2-sol")]
+)
+@pytest.mark.parametrize("effort", ["banana", "", "minimal", "HIGH", 3])
+def test_effort_the_cli_does_not_accept_is_rejected_on_override(tmp_path, role, model, effort):
+    engine = load(tmp_path)
+
+    with pytest.raises(DeclarationError, match=f"role '{role}': effort"):
+        engine.delivery(role, Setting(model, effort))
+
+
+def test_every_effort_each_cli_accepts_is_delivered(tmp_path):
+    engine = load(tmp_path)
+
+    for effort in EFFORTS["claude"]:
+        assert (
+            engine.delivery("coordinator", Setting("claude-opus-5-5", effort)).flags[-1] == effort
+        )
+    for effort in EFFORTS["codex"]:
+        assert engine.delivery("panel", Setting("gpt-6.2-sol", effort)).config[-1][1] == effort
+
+
 @pytest.mark.parametrize("key", ["unknown_key = 1\n", "[extra]\n"])
 def test_unknown_keys_are_rejected(tmp_path, key):
     with pytest.raises(DeclarationError, match="unknown"):
@@ -126,73 +160,93 @@ def test_unknown_keys_are_rejected(tmp_path, key):
 
 
 def test_invalid_toml_names_the_file(tmp_path):
-    with pytest.raises(DeclarationError, match="engine.toml: not valid TOML"):
+    with pytest.raises(DeclarationError, match="engine.toml: not a valid UTF-8 TOML file"):
         load(tmp_path, "name = ")
+
+
+def test_undecodable_file_is_rejected_naming_the_file(tmp_path):
+    path = tmp_path / "engine.toml"
+    path.write_bytes(b'name = "\xff"\n')
+
+    with pytest.raises(DeclarationError, match="engine.toml: not a valid UTF-8 TOML file"):
+        load_engine(path)
 
 
 def test_engine_pinned_by_its_cli_version(tmp_path):
     engine = load(tmp_path, **{f'kind = "git", ref = "{COMMIT}"': 'kind = "cli", ref = "codex"'})
 
     assert engine.version == "0.167.0"
-    with pytest.raises(DeclarationError, match="pin names CLI 'npm'"):
+    with pytest.raises(DeclarationError, match="pin.ref names CLI 'npm'"):
         load(tmp_path, **{f'kind = "git", ref = "{COMMIT}"': 'kind = "cli", ref = "npm"'})
 
 
 @pytest.mark.parametrize(
     "kind, ref",
-    [("git", COMMIT), ("git", "v1.4.0"), ("git", "1.4.0-rc.1"), ("version", "0.14.0")]
+    [("git", COMMIT), ("git", "refs/tags/v1.4.0"), ("git", "refs/tags/release-2026-11-21")]
+    + [("git", "refs/tags/team/v2"), ("version", "0.14.0"), ("version", "1.2.3+build.7")]
+    + [("version", "1.0.0-rc.1+exp.sha.5114f85"), ("version", "2.1.316")]
     + [("sha256", "ab" * 32), ("image", f"rbench/demo@{DIGEST}")]
-    + [("image", f"rbench/demo:1.0@{DIGEST}")],
+    + [("image", f"rbench/demo:1.0@{DIGEST}"), ("image", f"runner:latest@{DIGEST}")]
+    + [("image", f"registry.example/latest-tools/runner@{DIGEST}")],
 )
 def test_exact_refs_are_accepted(kind, ref):
-    assert check_ref("demo", kind, ref) == ref
+    assert check_ref(WHERE, kind, ref) == ref
 
 
 @pytest.mark.parametrize(
     "kind, ref",
-    [("git", "main"), ("git", "HEAD"), ("git", "latest"), ("git", "v1"), ("git", COMMIT[:7])]
-    + [("git", "feature/x"), ("version", "^0.14.0"), ("version", "~0.14"), ("version", "0.14")]
+    # A version-shaped name may be a branch; a tag needs its namespace.
+    [("git", "v1.2.3"), ("git", "release-2026-11-21"), ("git", "main"), ("git", "HEAD")]
+    + [("git", "latest"), ("git", COMMIT[:7]), ("git", "feature/x"), ("git", "refs/heads/main")]
+    + [("git", "refs/tags/latest"), ("git", "refs/tags/"), ("git", "refs/tags/a..b")]
+    + [("git", "refs/tags/v1.lock"), ("git", "refs/tags/v1/"), ("git", "refs/tags/a b")]
+    + [("version", "^0.14.0"), ("version", "~0.14"), ("version", "0.14"), ("version", "v1.2.3")]
     + [("version", ">=0.14.0"), ("version", "0.x"), ("version", "latest"), ("version", "*")]
-    + [("version", "1.0.0-latest"), ("version", 14), ("sha256", "abc")]
-    + [("image", "rbench/demo:latest"), ("image", "rbench/demo:1.0"), ("image", "rbench/demo")],
+    + [("version", "01.2.3"), ("version", "1.2.3 - 1.4.0"), ("version", 14)]
+    + [("sha256", "abc"), ("image", "rbench/demo:latest"), ("image", "rbench/demo:1.0")]
+    + [("image", "rbench/demo"), ("image", "rbench/demo@sha256:abc")],
 )
 def test_floating_refs_are_rejected_naming_engine_and_ref(kind, ref):
     with pytest.raises(FloatingRefError) as error:
-        check_ref("demo", kind, ref)
+        check_ref(WHERE, kind, ref)
 
-    assert "engine 'demo'" in str(error.value)
+    assert WHERE in str(error.value)
     assert repr(ref) in str(error.value)
 
 
 @pytest.mark.parametrize(
     "model, cli",
-    [("claude-opus-5-5", "claude"), ("claude-haiku-4-5-20251001", "claude")]
-    + [("gpt-6.2-sol", "codex"), ("gpt-5", "codex")],
+    # Every model design D13 screens, and the O1 judge and second judge.
+    [("claude-fable-5-2", "claude"), ("claude-opus-5-5", "claude"), ("claude-sonnet-5-5", "claude")]
+    + [("gpt-6.2-sol", "codex"), ("gpt-6.2-astra", "codex")],
 )
-def test_full_model_ids_pick_their_cli(model, cli):
-    assert model_cli("demo", model) == cli
+def test_listed_full_model_ids_map_to_their_cli(model, cli):
+    assert model_cli(WHERE, model) == cli == MODELS[model]
 
 
 @pytest.mark.parametrize(
     "model",
     ["opus", "sonnet", "fable", "opus[1m]", "claude-opus-5", "claude-opus-latest"]
-    + ["gpt-5-chat-latest", "default", "", None],
+    + ["claude-sonnet-4-5", "gpt-5", "gpt-4o-2024-08-06", "gpt-5-chat-latest", "default", ""]
+    + [None, ["claude-opus-5-5"]],
 )
-def test_model_aliases_are_rejected_asking_for_the_full_id(model):
+def test_model_aliases_and_unlisted_ids_are_rejected_asking_for_the_full_id(model):
     with pytest.raises(FloatingRefError, match="give the full model id") as error:
-        model_cli("demo", model)
+        model_cli(WHERE, model)
 
-    assert "engine 'demo'" in str(error.value) and repr(model) in str(error.value)
+    assert WHERE in str(error.value) and repr(model) in str(error.value)
+    assert "models.toml" in str(error.value)
 
 
-def test_floating_refs_in_a_declaration_are_rejected_naming_engine_and_ref(tmp_path):
+def test_floating_refs_in_a_declaration_name_file_engine_field_and_ref(tmp_path):
+    prefix = "engine.toml: engine 'demo': "
     cases = {
-        f'ref = "{COMMIT}"': ('ref = "main"', "engine ref 'main'"),
-        'claude = "2.1.316"': ('claude = "latest"', "claude CLI version 'latest'"),
-        'codex = "0.167.0"': ('codex = "^0.167"', "codex CLI version '^0.167'"),
-        '"claude-opus-5-5"': ('"opus"', "model 'opus'"),
+        f'ref = "{COMMIT}"': ('ref = "main"', "pin.ref 'main'"),
+        'claude = "2.1.316"': ('claude = "latest"', "cli.claude 'latest'"),
+        'codex = "0.167.0"': ('codex = "^0.167"', "cli.codex '^0.167'"),
+        '"claude-opus-5-5"': ('"opus"', "role 'coordinator': default: model 'opus'"),
     }
     for old, (new, named) in cases.items():
-        with pytest.raises(FloatingRefError, match="engine 'demo'") as error:
+        with pytest.raises(FloatingRefError) as error:
             load(tmp_path, **{old: new})
-        assert named in str(error.value)
+        assert prefix in str(error.value) and named in str(error.value)

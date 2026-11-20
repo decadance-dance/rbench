@@ -2,58 +2,66 @@
 
 Planning rejects a floating reference: a branch name, `latest`, a version range or a model alias.
 Each check accepts only the exact form, so every other form counts as floating, listed or not.
+`where` prefixes every error; it names the engine and, where known, the file and the field.
 """
 
 import re
+import tomllib
+from pathlib import Path
 
-_VERSION = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?"
+# SemVer 2.0, from semver.org: pre-release and build metadata allowed; ranges and wildcards not.
+_SEMVER = (
+    r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+    r"(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?"
+    r"(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?"
+)
+# A tag in git's tag namespace. The spelling cannot tell a tag from a branch of the same name, so a
+# tag must be given as `refs/tags/<name>`; planning resolves it to its commit.
+_TAG = r"refs/tags/(?!.*(?:\.\.|//|/\.|@\{|\.lock(?:/|$)))[^\s~^:?*\[\\./][^\s~^:?*\[\\]*(?<![./])"
 
 # kind: (exact form, what to ask for instead)
 EXACT = {
     "git": (
-        re.compile(rf"[0-9a-f]{{40}}|v?{_VERSION}"),
-        "a full 40-character commit SHA or a version tag such as v1.2.3",
+        re.compile(rf"[0-9a-f]{{40}}|{_TAG}"),
+        "a full 40-character commit SHA or a tag as refs/tags/<name>",
     ),
-    "version": (re.compile(_VERSION), "an exact version such as 1.2.3"),
+    "version": (re.compile(_SEMVER), "an exact SemVer version such as 1.2.3"),
     "sha256": (re.compile(r"[0-9a-f]{64}"), "a SHA-256 digest of 64 lowercase hex characters"),
+    # A tag next to the digest is allowed: the digest decides which image runs.
     "image": (
         re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}"),
         "an image referenced by digest, <name>@sha256:<64 hex>",
     ),
 }
 
-# limit: only Claude and OpenAI GPT ids are known; another provider's models need a pattern here.
-_MODEL_CLI = (
-    ("claude", re.compile(r"claude-[a-z]+-\d+-\d+(?:-\d{8})?")),
-    ("codex", re.compile(r"gpt-\d+(?:\.\d+)*(?:-[a-z0-9]+)*")),
-)
+MODELS_FILE = Path(__file__).with_name("models.toml")
+# Full model id -> the CLI that runs it.
+MODELS: dict[str, str] = tomllib.loads(MODELS_FILE.read_text(encoding="utf-8"))["models"]
 
 
 class FloatingRefError(ValueError):
     """A reference that does not name one exact engine, CLI, image or model."""
 
 
-def _floating(value: object) -> bool:
-    return not isinstance(value, str) or "latest" in value.lower()
+def _floating_tag(ref: str) -> bool:
+    return ref.startswith("refs/tags/") and ref.rsplit("/", 1)[-1].lower() == "latest"
 
 
-def check_ref(engine: str, kind: str, ref: object, what: str | None = None) -> str:
-    """Return `ref` if it is exact for `kind` (a key of `EXACT`); raise naming the engine and ref."""
+def check_ref(where: str, kind: str, ref: object, field: str | None = None) -> str:
+    """Return `ref` if it is exact for `kind` (a key of `EXACT`); raise naming `where` and `ref`."""
     pattern, want = EXACT[kind]
-    if _floating(ref) or not pattern.fullmatch(ref):
+    if not (isinstance(ref, str) and pattern.fullmatch(ref)) or _floating_tag(ref):
         raise FloatingRefError(
-            f"engine {engine!r}: {what or kind} {ref!r} is a floating reference; use {want}"
+            f"{where}: {field or kind} {ref!r} is a floating reference; use {want}"
         )
     return ref
 
 
-def model_cli(engine: str, model: object) -> str:
-    """Return the CLI that runs `model` (`claude` or `codex`); reject an alias or unknown id."""
-    if not _floating(model):
-        for cli, pattern in _MODEL_CLI:
-            if pattern.fullmatch(model):
-                return cli
+def model_cli(where: str, model: object) -> str:
+    """Return the CLI that runs `model`; reject an alias or any id not in `MODELS`."""
+    if isinstance(model, str) and model in MODELS:
+        return MODELS[model]
     raise FloatingRefError(
-        f"engine {engine!r}: model {model!r} is an alias or not a full model id;"
-        " give the full model id, such as claude-opus-5-5 or gpt-6.2-sol"
+        f"{where}: model {model!r} is an alias or not a known full model id; give the full model"
+        f" id, or add it to {MODELS_FILE.parent.name}/{MODELS_FILE.name} in the rbench package"
     )

@@ -3,19 +3,24 @@
 A declaration is a TOML file:
 
     name = "example"
-    pin = { kind = "git", ref = "v1.2.3" }  # git, version, sha256, or cli (ref names the CLI)
+    pin = { kind = "git", ref = "refs/tags/v1.2.3" }
 
     [cli]  # exact versions of the CLIs installed in the engine's image
     claude = "2.1.316"
     codex = "0.167.0"
 
     [roles.coordinator]
-    cli = "claude"     # omitted: the model's provider picks the CLI
+    cli = "claude"     # omitted: the model's CLI (models.toml) picks it
     delivery = "flag"  # flag: the shim adds model and effort flags;
                        # config: the adapter writes them into the trial's config.toml
     default = { model = "claude-opus-5-5", effort = "high" }
 
 The roles' defaults together are the engine's default configuration.
+
+Pin kinds: `git` (a commit, or a tag that planning resolves to its commit), `version`, `sha256`
+(a prompt hash) and `cli` (`ref` names the CLI whose version pins the engine). The loader checks
+that the ref is exact for the declared kind; which kind an engine must use (spec Engine adapters:
+rreview by commit or tag, code-review by the Claude Code version, ...) is checked by its adapter.
 """
 
 import re
@@ -27,13 +32,20 @@ from rbench.engines.pins import check_ref, model_cli
 
 CLIS = ("claude", "codex")
 DELIVERIES = ("flag", "config")
+# The effort values each CLI accepts, checked against:
+# - Claude Code 2.1.316: `claude --help`, `--effort <level>`;
+# - Codex CLI 0.167.0: the `supported_reasoning_levels` of `codex debug models --bundled`.
+# Whether a model honors the effort is recorded per session (spec: Applied model and effort).
+EFFORTS = {
+    "claude": ("low", "medium", "high", "xhigh", "max"),
+    "codex": ("low", "medium", "high", "xhigh", "max", "ultra"),
+}
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 _ROLE = re.compile(r"[a-z][a-z0-9_-]*")
-_EFFORT = re.compile(r"[a-z]+")
 
 
 class DeclarationError(ValueError):
-    """A malformed engine declaration."""
+    """A malformed engine declaration or setting."""
 
 
 @dataclass(frozen=True)
@@ -46,6 +58,7 @@ class Setting:
 class Delivery:
     """How a role's model and effort reach its CLI session."""
 
+    cli: str
     flags: tuple[str, ...] = ()  # added by the shim
     config: tuple[tuple[str, str], ...] = ()  # (key, value) for the trial's config.toml
 
@@ -53,7 +66,7 @@ class Delivery:
 @dataclass(frozen=True)
 class Role:
     name: str
-    cli: str | None  # None: picked per model by its provider
+    cli: str | None  # None: the model's CLI
     delivery: str
     default: Setting
 
@@ -75,37 +88,28 @@ class Engine:
         """The declared default of every role (a matrix entry with `default: true`)."""
         return {name: role.default for name, role in self.roles.items()}
 
-    def delivery(self, role: str, setting: Setting) -> Delivery:
-        """Map `setting` to the shim flags or config.toml keys that carry it to `role`'s CLI."""
-        cli = self.cli_for(role, setting.model)
-        if not (isinstance(setting.effort, str) and _EFFORT.fullmatch(setting.effort)):
-            raise DeclarationError(
-                f"engine {self.name!r}: role {role!r}: bad effort {setting.effort!r}"
-            )
-        if self.roles[role].delivery == "config":
-            return Delivery(
-                config=(("model", setting.model), ("model_reasoning_effort", setting.effort))
-            )
-        if cli == "claude":
-            return Delivery(flags=("--model", setting.model, "--effort", setting.effort))
-        return Delivery(
-            flags=("-m", setting.model, "-c", f'model_reasoning_effort="{setting.effort}"')
-        )
-
-    def cli_for(self, role: str, model: str) -> str:
-        """The CLI that runs `model` in `role`; reject an alias, a model the role's CLI cannot
-        run, or a CLI the engine does not pin."""
+    def delivery(self, role: str, setting: Setting, where: str | None = None) -> Delivery:
+        """Check `setting` for `role` and map it to the shim flags or the config.toml keys that
+        carry it to the role's CLI. `where` prefixes errors (default: the engine and role)."""
         if role not in self.roles:
             raise DeclarationError(f"engine {self.name!r}: no role {role!r}")
-        cli = model_cli(self.name, model)
+        where = where or f"engine {self.name!r}: role {role!r}"
+        model, effort = setting.model, setting.effort
+        cli = model_cli(where, model)
         declared = self.roles[role].cli
         if declared is not None and declared != cli:
-            raise DeclarationError(
-                f"engine {self.name!r}: role {role!r} runs on {declared}, model {model!r} on {cli}"
-            )
+            raise DeclarationError(f"{where}: runs on {declared}, model {model!r} on {cli}")
         if cli not in self.clis:
-            raise DeclarationError(f"engine {self.name!r}: role {role!r} needs a pinned {cli} CLI")
-        return cli
+            raise DeclarationError(f"{where}: model {model!r} needs a pinned {cli} CLI")
+        if not (isinstance(effort, str) and effort in EFFORTS[cli]):
+            raise DeclarationError(
+                f"{where}: effort {effort!r} is not one {cli} accepts: {', '.join(EFFORTS[cli])}"
+            )
+        if self.roles[role].delivery == "config":
+            return Delivery(cli, config=(("model", model), ("model_reasoning_effort", effort)))
+        if cli == "claude":
+            return Delivery(cli, flags=("--model", model, "--effort", effort))
+        return Delivery(cli, flags=("-m", model, "-c", f'model_reasoning_effort="{effort}"'))
 
 
 def _table(
@@ -121,26 +125,26 @@ def _table(
 
 
 def parse_engine(data: object, source: str) -> Engine:
-    """Validate a parsed declaration; `source` names it in errors."""
+    """Validate a parsed declaration; `source` (its file) prefixes every error."""
     data = _table(data, source, {"name", "pin", "cli", "roles"})
     name = data["name"]
     if not (isinstance(name, str) and _NAME.fullmatch(name)):
-        raise DeclarationError(f"{source}: bad engine name {name!r}")
+        raise DeclarationError(f"{source}: name: bad engine name {name!r}")
     where = f"{source}: engine {name!r}"
 
     clis = _table(data["cli"], f"{where}: cli", set(), frozenset(CLIS))
     for cli, version in clis.items():
-        check_ref(name, "version", version, f"{cli} CLI version")
+        check_ref(where, "version", version, f"cli.{cli}")
 
     pin = _table(data["pin"], f"{where}: pin", {"kind", "ref"})
     kind, ref = pin["kind"], pin["ref"]
     if kind == "cli":
         if not isinstance(ref, str) or ref not in clis:
-            raise DeclarationError(f"{where}: pin names CLI {ref!r}, which [cli] does not pin")
+            raise DeclarationError(f"{where}: pin.ref names CLI {ref!r}, which [cli] does not pin")
     elif kind in ("git", "version", "sha256"):
-        check_ref(name, kind, ref, "engine ref")
+        check_ref(where, kind, ref, "pin.ref")
     else:
-        raise DeclarationError(f"{where}: unknown pin kind {kind!r}")
+        raise DeclarationError(f"{where}: pin.kind: unknown pin kind {kind!r}")
 
     roles = data["roles"]
     if not (isinstance(roles, dict) and roles):
@@ -149,11 +153,11 @@ def parse_engine(data: object, source: str) -> Engine:
     for role_name, raw in roles.items():
         at = f"{where}: role {role_name!r}"
         if not _ROLE.fullmatch(role_name):
-            raise DeclarationError(f"{where}: bad role name {role_name!r}")
+            raise DeclarationError(f"{at}: bad role name")
         raw = _table(raw, at, {"delivery", "default"}, frozenset({"cli"}))
         cli, delivery = raw.get("cli"), raw["delivery"]
         if cli is not None and cli not in CLIS:
-            raise DeclarationError(f"{at}: unknown cli {cli!r}")
+            raise DeclarationError(f"{at}: cli: unknown cli {cli!r}")
         if delivery not in DELIVERIES:
             raise DeclarationError(f"{at}: delivery must be flag or config, got {delivery!r}")
         if delivery == "config" and cli != "codex":
@@ -161,7 +165,7 @@ def parse_engine(data: object, source: str) -> Engine:
             raise DeclarationError(f"{at}: config delivery needs cli = 'codex'")
         default = _table(raw["default"], f"{at}: default", {"model", "effort"})
         engine.roles[role_name] = Role(role_name, cli, delivery, Setting(**default))
-        engine.delivery(role_name, engine.roles[role_name].default)
+        engine.delivery(role_name, engine.roles[role_name].default, f"{at}: default")
     return engine
 
 
@@ -169,6 +173,6 @@ def load_engine(path: Path) -> Engine:
     """Read and validate the declaration at `path`."""
     try:
         data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as e:
-        raise DeclarationError(f"{path}: not valid TOML: {e}") from e
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise DeclarationError(f"{path}: not a valid UTF-8 TOML file: {e}") from e
     return parse_engine(data, str(path))
