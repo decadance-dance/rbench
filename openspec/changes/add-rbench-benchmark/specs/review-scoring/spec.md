@@ -10,8 +10,9 @@ paired comparisons for regression checks.
 
 ### Requirement: Matching findings to ground truth
 A pinned judge SHALL match each trial's findings to ground-truth items:
-- a match means the same underlying issue;
-- location is context only;
+- a match means the same underlying issue, and counts the same whether the finding names its root
+  cause or a symptom;
+- only items in the finding's file are compared; within it, location is context only;
 - one finding can match several items, and the reverse.
 
 Every score SHALL record the judge model, its effort, the matcher version (pinned to a
@@ -25,6 +26,11 @@ ReviewBench commit) and the judge prompt hash.
 - **WHEN** a finding points at the same code as a ground-truth item but describes a different
   failure
 - **THEN** the judge does not match them
+
+#### Scenario: Same issue, different file
+- **WHEN** a finding describes a ground-truth item's issue but points at a different file, such as
+  a caller of the changed code
+- **THEN** they are not matched
 
 ### Requirement: Labels for unmatched findings
 The judge SHALL label every finding that matches no ground-truth item as one of:
