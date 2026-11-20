@@ -1,0 +1,30 @@
+[project]
+name = "rbench"
+version = "0.0.0"
+description = "A hermetic, resumable benchmark for AI code-review engines"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+rbench = "rbench.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+# The fake CLIs for tests are Python without a .py suffix.
+extend-include = ["tests/fixtures/bin/fake"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["live: needs Docker, real claude or codex logins or the network; run with RBENCH_LIVE=1"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.6",
+]
