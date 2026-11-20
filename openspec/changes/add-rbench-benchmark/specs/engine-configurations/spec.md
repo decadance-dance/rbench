@@ -151,12 +151,18 @@ medians when a smoke run exists.
 ### Requirement: Rounds
 A matrix SHALL be split into rounds, in the order of their importance. Each round SHALL list its
 configurations and its token budget per provider, and a run executes one round (see run-ledger,
-Round budget).
+Round budget). Planning SHALL refuse a round whose token estimate exceeds its budget for any
+provider, naming the round, the provider, the estimate and the budget.
 
 #### Scenario: Plan of one round
 - **WHEN** the operator plans a round
 - **THEN** the trial count and token estimate of that round alone are printed and compared with its
   budget
+
+#### Scenario: Round over budget
+- **WHEN** the operator plans a round whose Codex token estimate exceeds its Codex budget
+- **THEN** planning refuses the round, naming the round, the provider, the estimate and the budget,
+  and nothing runs
 
 ### Requirement: Stages
 The benchmark SHALL provide three stages as matrix files:
