@@ -285,31 +285,57 @@ def _read_object(task_dir: Path, path: Path) -> dict:
     if not path.is_file():
         raise TaskError(f"task {task_dir}: missing file {path.name}")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_keys)
-    except _RepeatedKey as e:
-        raise TaskError(f"task {task_dir}: {path.name}: {e}") from e
+        data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_JsonObject.build)
+        repeated = _repeated_key(data)
     # ValueError covers malformed JSON, bad UTF-8 and Python's integer-digit limit.
     except (OSError, ValueError, RecursionError) as e:
         raise TaskError(f"task {task_dir}: cannot read {path.name}: {e}") from e
+    # Raised outside the handler, so no exception with file contents is chained to it.
+    if repeated:
+        raise TaskError(f"task {task_dir}: {path.name}: {repeated}")
     if not isinstance(data, dict):
         raise TaskError(f"task {task_dir}: {path.name} must hold a JSON object")
     return data
 
 
-class _RepeatedKey(ValueError):
-    pass
+class _JsonObject(dict):
+    """A JSON object that remembers its first repeated key, which `json` would silently overwrite."""
+
+    repeated: str | None = None
+
+    @classmethod
+    def build(cls, pairs: list[tuple[str, object]]) -> "_JsonObject":
+        data = cls()
+        for key, value in pairs:
+            if key in data and data.repeated is None:
+                data.repeated = key
+            data[key] = value
+        return data
 
 
-def _unique_keys(pairs: list[tuple[str, object]]) -> dict:
-    """Build a JSON object, rejecting a repeated key that `json` would silently overwrite."""
-    data: dict = {}
-    for key, value in pairs:
-        if key in data:
-            ids = [v for k, v in pairs if k == "id" and isinstance(v, str)]
-            where = f" in the object with id {ids[0]!r}" if ids else ""
-            raise _RepeatedKey(f"key {key!r} is repeated{where}")
-        data[key] = value
-    return data
+KNOWN_KEYS = TASK_KEYS | GROUND_TRUTH_KEYS | ITEM_KEYS | ITEM_OPTIONAL_KEYS
+
+
+def _repeated_key(value: object, where: str = "") -> str | None:
+    """Describe the first repeated key, in document order, by its position only.
+
+    Only field names this format defines are quoted: any other key, and every value, may hold a
+    canary, which must not reach a message.
+    """
+    if isinstance(value, _JsonObject):
+        if value.repeated is not None:
+            key = repr(value.repeated) if value.repeated in KNOWN_KEYS else "a key"
+            return f"{where or 'top level'}: {key} is repeated"
+        for key, child in value.items():
+            name = repr(key) if key in KNOWN_KEYS else "an unknown key"
+            if found := _repeated_key(child, f"{where}: {name}" if where else name):
+                return found
+    elif isinstance(value, list):
+        for i, child in enumerate(value):
+            name = f"item {i}" if where == "'items'" else f"{where}[{i}]"
+            if found := _repeated_key(child, name):
+                return found
+    return None
 
 
 def _check_keys(data: dict, required: set[str], optional: set[str], label: str) -> None:

@@ -374,16 +374,26 @@ def test_missing_set_directory_fails(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "file,text,match",
     [
-        (TASK_FILE, '{"id": "t-1", "id": "t-1"}', r"task.json: key 'id' is repeated"),
+        (TASK_FILE, '{"id": "t-1", "id": "t-1"}', r"task.json: top level: 'id' is repeated"),
         (
             GROUND_TRUTH_FILE,
             '{"canary": "a", "canary": "b", "items": []}',
-            r"ground_truth.json: key 'canary' is repeated",
+            r"ground_truth.json: top level: 'canary' is repeated",
         ),
         (
             GROUND_TRUTH_FILE,
             '{"canary": "a", "items": [{"id": "i9", "severity": "high", "severity": "must"}]}',
-            r"ground_truth.json: key 'severity' is repeated in the object with id 'i9'",
+            r"ground_truth.json: item 0: 'severity' is repeated",
+        ),
+        (
+            GROUND_TRUTH_FILE,
+            '{"canary": "a", "items": [{"id": "i1"}, {"id": "", "severity": "a", "severity": "b"}]}',
+            r"ground_truth.json: item 1: 'severity' is repeated",
+        ),
+        (
+            GROUND_TRUTH_FILE,
+            '{"canary": "a", "items": [{"producer": {"x": 1, "x": 2}}]}',
+            r"ground_truth.json: item 0: 'producer': a key is repeated",
         ),
     ],
 )
@@ -407,3 +417,23 @@ def test_undecodable_ground_truth_names_task_and_file(tmp_path: Path, content: b
     (task_dir / GROUND_TRUTH_FILE).write_bytes(content)
     with pytest.raises(TaskError, match=rf"t-1: cannot read {GROUND_TRUTH_FILE}"):
         load_tasks(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        '{{"id": {m}, "value": 1, "value": 2}}',
+        "{{{m}: 1, {m}: 2}}",
+        '{{"x": {{{m}: {{"a": 1, "a": 2}}}}}}',
+        '[{m}, {{"a": 1, "a": 2}}]',
+    ],
+)
+def test_repeated_key_errors_do_not_echo_contents(tmp_path: Path, shape: str) -> None:
+    marker = json.dumps(canary(HIDDEN))
+    text = f'{{"canary": {shape.format(m=marker)}, "items": []}}'
+    write_task(tmp_path, HID, "hidden", gt=False)
+    (tmp_path / HID / GROUND_TRUTH_FILE).write_text(text)
+    with pytest.raises(TaskError, match=r"ground_truth.json: 'canary'.* is repeated") as error:
+        load_tasks(tmp_path, hidden_canary_prefix=HIDDEN)
+    for exc in (error.value, error.value.__cause__, error.value.__context__):
+        assert HIDDEN not in str(exc)
