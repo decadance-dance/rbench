@@ -8,7 +8,8 @@ attempts = 1
 
 [[rounds]]
 name = "defaults"
-# Placeholder until decision O6 (issue #16) sets the budget per round.
+# Not approved yet: the maintainer sets each budget from the round's plan estimate (decision O6,
+# issue #16). A round cannot run on an undecided budget.
 budget = { claude = "undecided", codex = "undecided" }
 
 # Every declared engine's default, so the stage covers each engine as its adapter declares it.

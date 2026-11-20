@@ -210,11 +210,31 @@ def test_id_is_a_readable_name_and_a_settings_hash():
 
     name, digest = one.id.rsplit("-", 1)
     assert name == "plain-claude-opus-5-5-high"
-    assert digest == one.hash[:12] and len(digest) == 12
+    assert digest == one.hash and len(digest) == 64
     assert panel.id.startswith(
         "panel-coordinator-claude-opus-5-5-high-judge-gpt-6.2-sol-medium-"
         "reviewers-gpt-6.2-sol-high-"
     )
+
+
+def test_settings_that_share_a_short_hash_prefix_get_different_ids():
+    # These two versions give settings hashes with the same first 12 hex digits.
+    def only_config(build):
+        engine = parse_engine(
+            {
+                "name": "panel",
+                "pin": {"kind": "version", "ref": f"1.2.3+build{build}"},
+                "cli": {"codex": "0.167.0"},
+                "roles": {"reviewer": flag("gpt-6.2-sol", "high")},
+            },
+            "engine.toml",
+        )
+        (config,) = load_matrix(MATRICES / "smoke.toml", {"panel": engine}).rounds[0].configurations
+        return config
+
+    a, b = only_config(4723561), only_config(14928273)
+    assert a.hash[:12] == b.hash[:12]
+    assert a.id != b.id
 
 
 def test_same_settings_give_the_same_id_across_matrix_files(tmp_path):
@@ -319,7 +339,9 @@ def test_stage_fixes_tasks_and_attempts():
         matrix({"engine": "plain", "default": True}, stage="smoke")
     with pytest.raises(MatrixError, match="attempts: the screening stage needs 1, got True"):
         matrix({"engine": "plain", "default": True}, attempts=True)
-    with pytest.raises(MatrixError, match="unknown stage 'final'"):
+    with pytest.raises(
+        MatrixError, match="stage: expected one of smoke, screening, full, got 'final'"
+    ):
         matrix({"engine": "plain", "default": True}, stage="final")
 
 
@@ -363,13 +385,65 @@ def test_each_matrix_file_is_named_after_its_stage():
         assert tomllib.loads(path.read_text())["stage"] == path.stem
 
 
-def test_full_stage_never_reuses_trials_of_another_stage():
-    assert not can_reuse("screening", "full")
-    assert not can_reuse("smoke", "full")
-    assert can_reuse("full", "full")
-    assert can_reuse("smoke", "screening")
-    with pytest.raises(MatrixError, match="unknown stage"):
-        can_reuse("screening", "final")
+def test_full_stage_never_reuses_trials_of_an_earlier_run():
+    assert not can_reuse("full")
+    assert can_reuse("screening")
+    assert can_reuse("smoke")
+    with pytest.raises(MatrixError, match="unknown stage 'final'"):
+        can_reuse("final")
+    with pytest.raises(MatrixError, match=r"unknown stage \['full'\]"):
+        can_reuse(["full"])
+
+
+def test_task_selection_must_not_be_empty():
+    smoke = load_matrix(MATRICES / "smoke.toml", engines())
+    with pytest.raises(MatrixError, match="the smoke stage selects core tasks, but there are none"):
+        smoke.select_tasks([], ["a1"])
+
+
+def test_smoke_stage_needs_a_round_with_every_engine_default():
+    with pytest.raises(MatrixError, match="rounds: the smoke stage needs a round"):
+        parse_matrix(
+            {"stage": "smoke", "tasks": "core", "max_tasks": 1, "attempts": 1, "rounds": []},
+            "smoke.toml",
+            engines(),
+        )
+    with pytest.raises(MatrixError, match="round 'r1': .*every engine's default; missing panel"):
+        matrix({"engine": "plain", "default": True}, stage="smoke", max_tasks=1)
+
+
+@pytest.mark.parametrize(
+    ("top", "entry", "message"),
+    [
+        (
+            {"stage": ["screening"]},
+            {"engine": "plain", "default": True},
+            r"m.toml: stage: expected",
+        ),
+        (
+            {},
+            {"engine": {"name": "plain"}, "default": True},
+            r"m.toml: round 'r1': entry 1: engine: expected an engine name",
+        ),
+        ({}, {"engine": ["plain"], "default": True}, r"entry 1: engine: expected an engine name"),
+    ],
+)
+def test_non_scalar_selectors_are_rejected_with_their_location(top, entry, message):
+    with pytest.raises(MatrixError, match=message):
+        matrix(entry, **top)
+
+
+def test_budget_for_refuses_an_undecided_or_absent_budget():
+    (round_,) = matrix(
+        {"engine": "plain", "default": True}, budget={"claude": 1000, "codex": UNDECIDED}
+    ).rounds
+
+    assert round_.budget_for("claude") == 1000
+    with pytest.raises(MatrixError, match="round 'r1': the codex budget is still 'undecided'"):
+        round_.budget_for("codex")
+    (no_codex,) = matrix({"engine": "plain", "default": True}, budget={"claude": 5}).rounds
+    with pytest.raises(MatrixError, match="round 'r1': no budget for codex"):
+        no_codex.budget_for("codex")
 
 
 def test_unreadable_matrix_names_the_file(tmp_path):

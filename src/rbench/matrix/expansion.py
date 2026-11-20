@@ -43,7 +43,8 @@ from rbench.engines.declaration import CLIS, Engine, Setting
 from rbench.engines.pins import MODELS
 
 ALL_ENGINES = "*"
-# A budget value that O6 (issue #16) has not decided yet.
+# A budget the maintainer has not approved yet; decision O6 (issue #16) sets each from the
+# round's plan estimate.
 UNDECIDED = "undecided"
 # stage: (tasks, max_tasks, attempts), as spec Stages defines them.
 STAGES = {
@@ -72,11 +73,19 @@ class Configuration:
     id: str = field(init=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "id", f"{self.name}-{self.hash[:12]}")
+        object.__setattr__(self, "id", f"{self.name}-{self.hash}")
 
     @property
     def settings(self) -> dict:
-        """The full settings the id hashes: the engine, its exact version and every role."""
+        """The full settings the id hashes: the engine, its exact version and every role.
+
+        The id is only as exact as `version`. Before planning freezes ids or checks reuse:
+        - a git tag pin (`refs/tags/<name>`) must be resolved to its commit, so the engine passed
+          in carries the commit;
+        - for `plain`, the version is its prompt hash, and the findings schema hash and the Codex
+          model catalog hash (generated per CLI version, design D12) must join the settings too;
+          the `plain` adapter (issue #47) adds them.
+        """
         roles = {r: {"models": list(s.models), "effort": s.effort} for r, s in self.roles}
         return {"engine": self.engine, "version": self.version, "roles": roles}
 
@@ -105,8 +114,23 @@ class Configuration:
 @dataclass(frozen=True)
 class Round:
     name: str
-    budget: dict[str, int | None]  # provider -> tokens; None: not decided yet (O6)
+    budget: dict[str, int | None]  # provider -> tokens; None: listed as undecided
     configurations: tuple[Configuration, ...]
+
+    def budget_for(self, provider: str) -> int:
+        """The token budget for `provider`; planning a run or starting one goes through this.
+
+        Raises if the round lists no budget for it, or lists it as undecided: the maintainer
+        approves each number from the round's plan estimate (decision O6, issue #16).
+        """
+        if provider not in self.budget:
+            raise MatrixError(f"round {self.name!r}: no budget for {provider}")
+        if (tokens := self.budget[provider]) is None:
+            raise MatrixError(
+                f"round {self.name!r}: the {provider} budget is still {UNDECIDED!r};"
+                " set it in the matrix file before running this round"
+            )
+        return tokens
 
 
 @dataclass(frozen=True)
@@ -118,20 +142,27 @@ class Matrix:
     rounds: tuple[Round, ...]  # in the file's order, which is the order of importance
 
     def select_tasks(self, core: Sequence[str], all_tasks: Sequence[str]) -> list[str]:
-        """The task ids this matrix plans, from the core list or all tasks, in their order."""
-        return list(core if self.tasks == "core" else all_tasks)[: self.max_tasks]
+        """The task ids this matrix plans, from the core list or all tasks, in their order.
+        Raises when that list is empty."""
+        tasks = list(core if self.tasks == "core" else all_tasks)[: self.max_tasks]
+        if not tasks:
+            raise MatrixError(
+                f"the {self.stage} stage selects {self.tasks} tasks, but there are none"
+            )
+        return tasks
 
 
-def can_reuse(earlier_stage: str, stage: str) -> bool:
-    """Whether a run of `stage` may reuse done trials of a run of `earlier_stage`.
+def can_reuse(stage: str) -> bool:
+    """Whether a new run of `stage` may reuse done trials of an earlier run (spec run-ledger,
+    Reuse of earlier trials).
 
-    The full stage runs fresh attempts and never counts trials of another stage, so its scores
-    use only full-stage trials even where screening ran the same configuration and task.
+    The full stage runs fresh attempts (spec engine-configurations, Stages), so it never reuses
+    trials of an earlier run, screening or full; its scores count only its own trials. Resuming
+    the same full run keeps its done trials: that is resume, not reuse.
     """
-    for s in (earlier_stage, stage):
-        if s not in STAGES:
-            raise MatrixError(f"unknown stage {s!r}; expected one of {', '.join(STAGES)}")
-    return stage != "full" or earlier_stage == "full"
+    if not (isinstance(stage, str) and stage in STAGES):
+        raise MatrixError(f"unknown stage {stage!r}; expected one of {', '.join(STAGES)}")
+    return stage != "full"
 
 
 def _table(
@@ -167,6 +198,8 @@ def _default(engine: Engine) -> Configuration:
 def _expand(entry: object, where: str, engines: Mapping[str, Engine]) -> list[Configuration]:
     entry = _table(entry, where, {"engine"}, frozenset({"default", "roles"}))
     name, default = entry["engine"], entry.get("default", False)
+    if not isinstance(name, str):
+        raise MatrixError(f"{where}: engine: expected an engine name, got {name!r}")
     if default is not True and "default" in entry:
         raise MatrixError(f"{where}: default must be true when given, got {default!r}")
     if default == ("roles" in entry):
@@ -232,8 +265,8 @@ def parse_matrix(data: object, source: str, engines: Mapping[str, Engine]) -> Ma
     """
     data = _table(data, source, {"stage", "tasks", "attempts", "rounds"}, frozenset({"max_tasks"}))
     stage = data["stage"]
-    if stage not in STAGES:
-        raise MatrixError(f"{source}: stage: unknown stage {stage!r}")
+    if not (isinstance(stage, str) and stage in STAGES):
+        raise MatrixError(f"{source}: stage: expected one of {', '.join(STAGES)}, got {stage!r}")
     for key, want in zip(("tasks", "max_tasks", "attempts"), STAGES[stage], strict=True):
         got = data.get(key)
         if type(got) is not type(want) or got != want:
@@ -266,6 +299,16 @@ def parse_matrix(data: object, source: str, engines: Mapping[str, Engine]) -> Ma
         used = frozenset().union(*(c.providers for c in configurations))
         budget = _budget(raw["budget"], f"{at}: budget", used)
         rounds.append(Round(name, budget, tuple(configurations)))
+    if stage == "smoke":
+        # A smoke run that misses an engine would look complete while leaving it untested.
+        if not rounds:
+            raise MatrixError(f"{source}: rounds: the smoke stage needs a round")
+        for r in rounds:
+            if missing := engines.keys() - {c.engine for c in r.configurations}:
+                raise MatrixError(
+                    f"{source}: round {r.name!r}: the smoke stage runs every engine's default;"
+                    f" missing {', '.join(sorted(missing))}"
+                )
     tasks, max_tasks, attempts = STAGES[stage]
     return Matrix(stage, tasks, max_tasks, attempts, tuple(rounds))
 
