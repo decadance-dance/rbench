@@ -34,7 +34,8 @@ CLIS = ("claude", "codex")
 DELIVERIES = ("flag", "config")
 # The effort values each CLI accepts, checked against:
 # - Claude Code 2.1.316: `claude --help`, `--effort <level>`;
-# - Codex CLI 0.167.0: the `supported_reasoning_levels` of `codex debug models --bundled`.
+# - Codex CLI 0.167.0: the union of the `supported_reasoning_levels` its bundled catalog
+#   (`codex debug models --bundled`) advertises across models; its config schema takes any string.
 # Whether a model honors the effort is recorded per session (spec: Applied model and effort).
 EFFORTS = {
     "claude": ("low", "medium", "high", "xhigh", "max"),
@@ -142,7 +143,7 @@ def parse_engine(data: object, source: str) -> Engine:
         if not isinstance(ref, str) or ref not in clis:
             raise DeclarationError(f"{where}: pin.ref names CLI {ref!r}, which [cli] does not pin")
     elif kind in ("git", "version", "sha256"):
-        check_ref(where, kind, ref, "pin.ref")
+        ref = check_ref(where, kind, ref, "pin.ref")
     else:
         raise DeclarationError(f"{where}: pin.kind: unknown pin kind {kind!r}")
 

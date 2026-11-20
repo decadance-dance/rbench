@@ -11,25 +11,31 @@ from pathlib import Path
 
 # SemVer 2.0, from semver.org: pre-release and build metadata allowed; ranges and wildcards not.
 _SEMVER = (
-    r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
-    r"(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?"
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-(?:0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*)?"
     r"(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?"
 )
-# A tag in git's tag namespace. The spelling cannot tell a tag from a branch of the same name, so a
-# tag must be given as `refs/tags/<name>`; planning resolves it to its commit.
-_TAG = r"refs/tags/(?!.*(?:\.\.|//|/\.|@\{|\.lock(?:/|$)))[^\s~^:?*\[\\./][^\s~^:?*\[\\]*(?<![./])"
+_TAG_PREFIX = "refs/tags/"
+# limit: tag names are printable ASCII only, stricter than git, which also allows other bytes
+# that are not control characters; such a tag must be pinned by its commit instead.
+_TAG_CHARS = re.compile(r"[!-~]+", re.ASCII)
+_TAG_WANT = "a tag as refs/tags/<name> (printable ASCII, git ref-name rules)"
 
 # kind: (exact form, what to ask for instead)
 EXACT = {
     "git": (
-        re.compile(rf"[0-9a-f]{{40}}|{_TAG}"),
-        "a full 40-character commit SHA or a tag as refs/tags/<name>",
+        re.compile(r"[0-9a-fA-F]{40}", re.ASCII),
+        f"a full 40-character commit SHA or {_TAG_WANT}",
     ),
-    "version": (re.compile(_SEMVER), "an exact SemVer version such as 1.2.3"),
-    "sha256": (re.compile(r"[0-9a-f]{64}"), "a SHA-256 digest of 64 lowercase hex characters"),
+    "version": (re.compile(_SEMVER, re.ASCII), "an exact SemVer version such as 1.2.3"),
+    "sha256": (
+        re.compile(r"[0-9a-f]{64}", re.ASCII),
+        "a SHA-256 digest of 64 lowercase hex characters",
+    ),
     # A tag next to the digest is allowed: the digest decides which image runs.
     "image": (
-        re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}"),
+        re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}", re.ASCII),
         "an image referenced by digest, <name>@sha256:<64 hex>",
     ),
 }
@@ -43,18 +49,35 @@ class FloatingRefError(ValueError):
     """A reference that does not name one exact engine, CLI, image or model."""
 
 
-def _floating_tag(ref: str) -> bool:
-    return ref.startswith("refs/tags/") and ref.rsplit("/", 1)[-1].lower() == "latest"
+def _git_tag(ref: str) -> bool:
+    """A tag in git's tag namespace that `git check-ref-format` accepts, other than `latest`.
+
+    The spelling cannot tell a tag from a branch of the same name, so a tag must be given as
+    `refs/tags/<name>`; planning resolves it to its commit.
+    """
+    name = ref.removeprefix(_TAG_PREFIX)
+    return (
+        ref.startswith(_TAG_PREFIX)
+        and _TAG_CHARS.fullmatch(name) is not None
+        and not any(c in name for c in "~^:?*[\\")
+        and ".." not in name
+        and "@{" not in name
+        and not name.endswith((".", "/"))
+        and all(p and not p.startswith(".") and not p.endswith(".lock") for p in name.split("/"))
+        and name.rsplit("/", 1)[-1].lower() != "latest"
+    )
 
 
 def check_ref(where: str, kind: str, ref: object, field: str | None = None) -> str:
-    """Return `ref` if it is exact for `kind` (a key of `EXACT`); raise naming `where` and `ref`."""
+    """Return `ref` if it is exact for `kind` (a key of `EXACT`), a commit id in lowercase;
+    raise naming `where` and `ref`."""
     pattern, want = EXACT[kind]
-    if not (isinstance(ref, str) and pattern.fullmatch(ref)) or _floating_tag(ref):
-        raise FloatingRefError(
-            f"{where}: {field or kind} {ref!r} is a floating reference; use {want}"
-        )
-    return ref
+    if isinstance(ref, str):
+        if pattern.fullmatch(ref):
+            return ref.lower() if kind == "git" else ref
+        if kind == "git" and _git_tag(ref):
+            return ref
+    raise FloatingRefError(f"{where}: {field or kind} {ref!r} is a floating reference; use {want}")
 
 
 def model_cli(where: str, model: object) -> str:

@@ -200,9 +200,17 @@ def test_exact_refs_are_accepted(kind, ref):
     + [("git", "latest"), ("git", COMMIT[:7]), ("git", "feature/x"), ("git", "refs/heads/main")]
     + [("git", "refs/tags/latest"), ("git", "refs/tags/"), ("git", "refs/tags/a..b")]
     + [("git", "refs/tags/v1.lock"), ("git", "refs/tags/v1/"), ("git", "refs/tags/a b")]
+    # git check-ref-format rejects these.
+    + [("git", "refs/tags/bad" + chr(1) + "tag"), ("git", "refs/tags/del" + chr(127))]
+    + [("git", f"refs/tags/a{c}b") for c in "~^:?*[\\"]
+    + [("git", "refs/tags/.hidden"), ("git", "refs/tags/a/.b"), ("git", "refs/tags/a//b")]
+    + [("git", "refs/tags/a/b.lock/c"), ("git", "refs/tags/x@{1}"), ("git", "refs/tags/v1.")]
+    + [("git", COMMIT[:39]), ("git", COMMIT + "0"), ("git", "g" * 40)]
     + [("version", "^0.14.0"), ("version", "~0.14"), ("version", "0.14"), ("version", "v1.2.3")]
     + [("version", ">=0.14.0"), ("version", "0.x"), ("version", "latest"), ("version", "*")]
     + [("version", "01.2.3"), ("version", "1.2.3 - 1.4.0"), ("version", 14)]
+    # Arabic-Indic digits are digits to Unicode but not to SemVer.
+    + [("version", "1.2.3-1" + chr(0x660)), ("version", chr(0x661) + ".2.3")]
     + [("sha256", "abc"), ("image", "rbench/demo:latest"), ("image", "rbench/demo:1.0")]
     + [("image", "rbench/demo"), ("image", "rbench/demo@sha256:abc")],
 )
@@ -212,6 +220,18 @@ def test_floating_refs_are_rejected_naming_engine_and_ref(kind, ref):
 
     assert WHERE in str(error.value)
     assert repr(ref) in str(error.value)
+
+
+def test_commit_id_in_either_case_is_accepted_and_lowercased(tmp_path):
+    assert check_ref(WHERE, "git", COMMIT.upper()) == COMMIT
+
+    assert load(tmp_path, **{COMMIT: COMMIT.upper()}).pin_ref == COMMIT
+
+
+def test_non_ascii_tag_is_rejected_naming_the_ascii_limit():
+    # git itself accepts this tag; rbench restricts tags to printable ASCII.
+    with pytest.raises(FloatingRefError, match="printable ASCII"):
+        check_ref(WHERE, "git", "refs/tags/release" + chr(160) + "candidate")
 
 
 @pytest.mark.parametrize(
