@@ -1,0 +1,11 @@
+# Full model ids planning accepts, and the CLI that runs each (spec engine-configurations,
+# Matrix expansion: models are given by full id, an alias is rejected). An id that is not listed
+# here, such as the alias `opus`, is rejected; add a model's full id here to use it.
+# Source: design.md D13 (screening models) and O1 (judge and second judge).
+
+[models]
+"claude-fable-5-2" = "claude"
+"claude-opus-5-5" = "claude"
+"claude-sonnet-5-5" = "claude"
+"gpt-6.2-astra" = "codex"
+"gpt-6.2-sol" = "codex"
