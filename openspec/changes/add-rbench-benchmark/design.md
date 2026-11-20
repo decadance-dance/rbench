@@ -42,7 +42,7 @@ Constraints that shape the approach:
 - the findings and golden format;
 - the matcher (same underlying issue, many-to-many, grounded and augmented metrics).
 
-ReviewBench is pinned to a commit.
+ReviewBench is pinned to a commit; importing from a newer commit makes a new task-set version.
 
 **Alternatives considered:**
 - *Martian code-review bench (MIT, 50 PRs).* Optional later, as a second external set.
@@ -60,7 +60,8 @@ spec requires.
   allowlists the providers' API and auth hosts and logs every CONNECT. The host list comes from a
   logged smoke run and is fixed in `images/proxy/allowlist`.
 - Images are built per engine version and CLI versions, not per task. The scrubbed repository is
-  copied in with `docker cp` when the container is created, never mounted, and its hash is recorded.
+  unpacked from the task's archive (D11) and copied in with `docker cp` when the container is
+  created, never mounted.
 
 **Alternatives considered:**
 - *Anthropic's devcontainer firewall (iptables).* It allows GitHub and port 22, and resolves domains
@@ -72,25 +73,42 @@ spec requires.
 
 ### D4. Repository scrub
 **Choice.**
-- The repository is built on the host from the source repository: `base` is the PR's base tree,
-  and `reviewed` is the head tree squashed onto it.
+- The repository is built once, at import, from the source repository: `base` is the PR's base
+  tree, and `reviewed` is the head tree squashed onto it. It is stored as a git bundle (D11).
 - A fresh `git init` has no remotes, reflog, tags or packed objects.
-- A `gh` stub on `PATH` answers `pr view` and `pr diff` from `pr.json` and the repository, and fails
-  on anything else.
+- A `gh` stub on `PATH` answers `pr view` and `pr diff` from `pr.json` and the repository. It
+  reports the PR as `OPEN` with no comments or reviews, so engines that skip closed or reviewed PRs
+  still run. `gh pr comment` writes its body to the trial's raw output, which normalization reads
+  like any other engine output. Anything else fails.
 
-### D5. CLI shims enforce the hermetic policy
-**Choice.** Engines launch CLIs themselves, so `claude` and `codex` shims sit first on `PATH`. Each
-shim:
-- adds the policy flags: Claude `--strict-mcp-config` and denied `WebSearch`/`WebFetch`; Codex
-  `--ignore-user-config --ignore-rules --strict-config -c web_search="disabled"`;
-- logs the argv and session id;
-- execs the real binary.
+### D5. Managed configuration enforces the hermetic policy; shims log
+**Choice.**
+- The policy lives in each CLI's managed configuration inside the image:
+  `/etc/claude-code/managed-settings.json` for Claude Code, and `/etc/codex/managed_config.toml` or
+  `requirements.toml` for Codex (whichever the pinned Codex version enforces; spike item). An agent
+  with a shell can start the real binary by absolute path and skip any shim, but not the managed
+  configuration.
+- Engines launch CLIs themselves, so `claude` and `codex` shims still sit first on `PATH`. Each
+  shim:
+  - repeats the policy flags as a second layer: Claude `--strict-mcp-config` and denied
+    `WebSearch`/`WebFetch`; Codex `--ignore-rules --strict-config -c web_search="disabled"`;
+  - adds the model and effort flags for engines whose adapter passes them by flag;
+  - logs the argv and session id;
+  - execs the real binary.
+- The audit compares the sessions in the transcripts with the shim log; a session that bypassed the
+  shims marks the trial contaminated.
+- The Codex shim does not add `--ignore-user-config`. review-council 0.14.0 launches
+  `codex exec --sandbox read-only --skip-git-repo-check <prompt>` with no `-m`, and sets the Codex
+  model and effort only through `config.toml` (`model`, `model_reasoning_effort`). Ignoring the
+  config silently falls back to Codex's default model, which is the confound of the first 5-PR
+  comparison. Such adapters write the role's model and effort into the trial's `config.toml`.
 
-The shims never change prompt, model or effort.
+The shims never change the prompt.
 
-The trial has one `CLAUDE_CONFIG_DIR` and one `CODEX_HOME`. All processes share them, so every Codex
-process uses the one bind-mounted `auth.json`, and refresh-token rotation stays safe. The homes
-hold:
+The trial has one `CLAUDE_CONFIG_DIR` and one `CODEX_HOME`. All processes share them. Codex uses a
+login made only for the benchmark (its own `codex login`, so its own refresh-token chain), kept in a
+login home no other tool uses. Its `auth.json` is bind-mounted into the trial, and refreshed tokens
+go back only to that home. The trial homes hold:
 - the policy settings;
 - `ENABLE_CLAUDEAI_MCP_SERVERS=false`;
 - auto-memory and background tasks off, non-essential traffic off;
@@ -113,8 +131,13 @@ cannot run at all.
 
 ### D7. Token accounting from transcripts
 **Choice.** Usage is summed per session from the trial's transcripts:
-- Claude: per-message usage;
-- Codex: `turn.completed.usage`.
+- Claude: per-message usage, deduplicated by `message.id`, because the transcript repeats one
+  message's usage on every streamed chunk;
+- Codex: `turn.completed.usage`. `cached_input_tokens` is probably a subset of `input_tokens`; the
+  spike checks it, and uncached input is `input_tokens - cached_input_tokens` if so.
+
+The quality-against-cost plot uses uncached input plus output, per provider, with cache tokens
+shown apart: cache reads are cheap and would otherwise dominate the axis.
 
 The shim log gives the expected set of sessions. A Claude result event's `modelUsage` is the check,
 for runs where it is visible.
@@ -138,30 +161,126 @@ copies and inspection trivial.
 ### D9. Markdown normalization by a pinned extraction step
 **Choice.** Engines that output Markdown (review-council, `/code-review`, ponytail-review) are
 converted to findings by a pinned model with a versioned prompt. The step copies findings and does
-not judge them.
+not judge them. It runs hermetic, like the judge: the same container setup and shims, no tools.
 
 **Alternative considered:** ask each engine for JSON. That changes the engines being measured.
+
+`plain` is the exception: it is our own baseline, not an engine under test, so it asks for JSON
+directly (D12) and skips this step.
 
 ### D10. Staged matrix
 **Choice.** Smoke, then screening, then full, as in the `engine-configurations` spec. The full
 stage's configurations are picked by the maintainer from the screening Pareto front. A full
-cartesian product of models, efforts and roles would exhaust the budget before giving 5 attempts
+cartesian product of models, efforts and roles would exhaust the budget before giving 3 attempts
 anywhere.
+
+### D11. Source archives and task-set versions
+**Choice.**
+- Each task set has `tasks/<set>/manifest.json` with the set version, the per-task content hashes
+  and the changelog. A unit test recomputes the hashes, so CI fails on an edit without a new
+  version.
+- Archives of public sets are GitHub release assets, one release per set version.
+  `rbench tasks fetch` downloads them and checks each SHA-256 against the manifest.
+- Archives of hidden tasks live next to the tasks in the hidden directory.
+
+**Alternatives considered:**
+- *Bundles committed to git.* They bloat every clone, and history keeps old versions forever.
+- *Git LFS.* The free quota is small, and it adds a dependency for anyone who reruns a matrix.
+- *Fetch from the source repository on every trial.* Breaks when the repository disappears or
+  rewrites history, and the trial would need network access to it.
+
+### D12. `plain` through each CLI's own options
+**Choice.**
+- The prompt and schema live in `engines/plain/` (`prompt.md`, `findings.schema.json`).
+- Claude: `claude -p --tools Read,Grep,Glob,Bash --json-schema <schema>`.
+- Codex: `codex exec --output-schema <schema> -c web_search=disabled -c features.goals=false
+  -c features.view_image=false -c model_catalog_json=<catalog>`; the container is the sandbox
+  (as in D6).
+- Codex has no flag to drop its `apply_patch` edit tool: the tool comes from the model catalog's
+  `apply_patch_tool_type`. The benchmark's catalog is `codex debug models` at the pinned CLI
+  version, with that field set to null for every model in the matrix and nothing else changed. It
+  is generated per CLI version, and its hash is part of the configuration's settings.
+- Checked with Codex CLI 0.167.0 and Claude Code against a local endpoint that records requests:
+  - Codex by default sends `apply_patch`, `exec_command`, `write_stdin`, `view_image`,
+    `web_search`, the goal tools, `tool_search` and `request_user_input`. With the options above it
+    sends only `exec_command`, `write_stdin`, `tool_search` and `request_user_input`; the rest of
+    the request is unchanged.
+  - Claude with `--tools Read,Grep,Glob,Bash` sends only those four tools.
+- Model and effort come from the matrix, and the hermetic shims (D5) apply as for every engine.
+
+**Alternative considered:** give `plain` only the diff, with no tools. It is cheaper, but it would
+measure a different task from the engines, which all read the repository.
+
+### D13. Screening matrix
+**Choice.**
+- Models: `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5`, `gpt-6.2-sol`,
+  `gpt-6.2-astra`.
+- Efforts: `medium`, `high`, `xhigh`.
+- One round is one effort level for every role. Mixed-effort combinations and mixed rreview panels
+  are later rounds.
+- Configurations per round:
+
+  | Engine | Roles and models | Configurations |
+  | --- | --- | --- |
+  | `plain` | one reviewer, every model | 5 |
+  | `code-review` | Claude models | 3 |
+  | `codex-review` | GPT models | 2 |
+  | `ponytail-review` | Claude models on Claude Code, GPT models on Codex | 3 + 2 |
+  | `review-council` | Claude side × Codex side | 3 × 2 |
+  | `rreview` | panel × coordinator × judge | 2 × 3 × 2 |
+  | **Total** | | **33** |
+
+- review-council: the Claude side is the main session (orchestrator and judge) plus the subagents
+  `reviewer-claude`, `reviewer-security` and the Claude verifier, all `model: inherit`, so the
+  session's `--model` and `--effort` set them. The Codex side is the Codex reviewer and verifier,
+  set only through `config.toml`. The Google and Perplexity seats are disabled in
+  `.review-council/config.local.yml`.
+- rreview: the panel roles `intent_contracts`, `reliability` and `security` run on Codex with one
+  model for the whole panel; the coordinator runs on Claude Code; the judge runs on Codex, because
+  rreview refuses a coordinator and judge of the same family.
+- At 10 core tasks and one attempt, one round is 330 trials.
+
+**Alternative considered:** a full cartesian product of models, efforts and roles in one run. It
+does not fit any budget the maintainer is willing to spend.
+
+### D14. Rounds with budgets instead of spending the limits
+**Choice.** The maintainer does not want a run to use up the subscription limits; ideally no run
+hits one. The matrix is split into rounds by importance, each with a token budget per provider. The
+runner starts a trial only if its estimate fits, and stops at a soft threshold of the subscription
+window where the CLI reports its used share. Codex reports `rate_limits` in its events; whether
+Claude Code reports anything is a spike item. Checkpoint and resume stay as the safety net, and a
+limit stops the run by default; waiting for the reset is opt-in (`--wait`).
 
 ## Risks / Trade-offs
 
 - **[Claude OAuth token returns 401 in containers (reported upstream).]** → First spike item. If it
   fails, try the `sbx` microVM, then run Claude on a separate host user with the proxy as fallback.
 - **[Codex `auth.json` refresh races between processes.]** → One login file per trial, at most one
-  Codex trial per login. The spike runs several Codex processes in one trial.
+  Codex trial per login, and a login only the benchmark uses, so Orca and the operator's own Codex
+  never share its refresh-token chain. The spike runs several Codex processes in one trial.
+- **[`codex-review` may not run non-interactively.]** → Codex's built-in review is a TUI command;
+  the spike finds a non-interactive way to run it. Without one, `codex-review` leaves the matrix.
+- **[Claude Code may not report the used share of its subscription window.]** → The spike checks.
+  Without it, the soft threshold is not enforced for Claude, and the round budget is the only stop.
 - **[Shim flags conflict with an engine's own flags.]** → The spike runs each engine's default once
   with the shims and checks the argv log.
 - **[The judge prefers its own model family.]** → The judge is blind to the engine, and a second
   judge from the other family labels a sample (O1).
 - **[Ground truth for our PRs is incomplete or produced by an engine under test.]** → Augmented
-  precision, maintainer confirmation and producer marking (specs `review-tasks`, `review-scoring`).
+  precision, and each item's recorded producer and source (specs `review-tasks`,
+  `review-scoring`). How the ground truth is obtained is O5.
 - **[ReviewBench's matcher needs an API key.]** → Port its prompt (MIT) to run through the CLI, and
   record the deviation in the report.
+- **[Publishing source archives of third-party repositories.]** → The license check on import
+  (spec `review-tasks`, Source license). The allowed list starts with MIT, Apache-2.0, BSD-2-Clause,
+  BSD-3-Clause, ISC, MPL-2.0 and the GPL/LGPL/AGPL family, all of which allow redistribution of
+  source with the license kept.
+- **[Codex's base instructions still mention `apply_patch` after the tool is removed.]** → The
+  model may try to call it and get an error, or write files through the shell. Neither reaches the
+  findings. The smoke stage counts such calls in `plain` transcripts.
+- **[A remote model catalog may override `model_catalog_json` under a ChatGPT login.]** → The local
+  check used a custom provider, so the remote catalog was not fetched. The spike repeats the check
+  with the real login and reads the tool list from the session transcript.
 - **[ReviewBench tasks are public and likely memorized.]** → The report shows task sets apart; `ours`
   and `hidden` carry the weight of the engine decision.
 - **[Transcript usage counts differ from billed usage.]** → The spike compares them with
@@ -191,3 +310,9 @@ New repository; nothing to migrate. Rollout:
   - This changes the earlier choice of Harbor, so it needs a yes.
 - **O4. Calibration of the judge against human labels.** Proposal: the maintainer labels the 5
   calibration PRs once, and the report shows judge-human agreement on them.
+- **O5. Source of ground truth for `ours` and `hidden`.**
+  - Option A: mine historical PRs of active repositories with a human review culture: review
+    comments, plus follow-up commits that change the commented lines. Only PRs merged after the
+    models' training cutoffs, from repositories with permissive licenses.
+  - Option B: pool the findings of all engines on our PRs, and the maintainer confirms them.
+- **O6. Round details.** The order of the rounds, the budget per round and the soft threshold value.

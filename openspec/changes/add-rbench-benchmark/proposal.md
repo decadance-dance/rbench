@@ -3,8 +3,8 @@
 ## Why
 
 There is no trustworthy way to choose between AI code-review engines (rreview, review-council, Claude
-Code's `/code-review`, ponytail-review) or between models and effort levels inside them. A first
-5-PR comparison had three problems:
+Code's `/code-review`, Codex's `/review`, ponytail-review) or between models and effort levels
+inside them. A first 5-PR comparison had three problems:
 
 - It was confounded: two engines silently ran a different Codex model than intended.
 - Nothing prevented agents from reading the ground truth on the host.
@@ -22,8 +22,13 @@ regression check.
   - our own PRs on public repos;
   - a hidden set in a separate private repository. The hidden set is never published; only its
     aggregate scores are.
-- **Engine adapters** for rreview, review-council, `/code-review`, ponytail-review, and a `plain`
-  baseline that runs every model on equal terms.
+  - every task set is versioned, with a content hash per task, and every task's source is kept as
+    an archive, so a task never depends on its source repository after import. Public tasks come only from
+    repositories whose license allows redistribution.
+- **Engine adapters** for rreview, review-council, `/code-review`, Codex's `/review`,
+  ponytail-review on both CLIs, and a `plain`
+  baseline that runs every model on equal terms: one prompt, one role, the same tools and
+  structured output through either CLI. Engines, CLIs and ReviewBench are pinned to exact versions.
 - **A configuration matrix** with per-role model and effort settings, run in three stages: smoke,
   screening and full.
 - **Isolated, hermetic trials:**
@@ -33,13 +38,15 @@ regression check.
   - server-side web tools disabled;
   - clean CLI configuration, the same for every engine;
   - canaries and a post-trial audit.
-- **A run ledger** that checkpoints every trial. When a subscription limit runs out it pauses, and
-  it resumes after a crash or a limit stop.
+- **Rounds with budgets and a run ledger.** The matrix runs in rounds by importance, each with a
+  token budget per provider, and the runner stops at a soft threshold of the subscription window,
+  so a run should never use up a limit. The ledger checkpoints every trial; a stop at a budget, a
+  threshold or a limit exits with the resume command, and a run resumes after a stop or a crash.
 - **Scoring:**
   - recall by severity, grounded and augmented precision, false findings;
   - tokens per model, including cache;
   - wall time;
-  - variance across attempts;
+  - the spread of recall across attempts and the failure rate;
   - paired comparisons for regression checks.
 - **A self-contained HTML report** and a publication step that keeps hidden data out of the
   public repository.
@@ -56,8 +63,8 @@ regression check.
   configuration matrix and its expansion, and the run stages with their estimates.
 - `trial-isolation`: how one trial runs isolated and hermetic, how credentials reach it, and the
   audit that excludes contaminated trials.
-- `run-ledger`: checkpointed trial state, queue order, limit detection and pausing, resume,
-  retries and reuse of earlier results.
+- `run-ledger`: checkpointed trial state, queue order, round budgets, the soft threshold, limit
+  stops, resume, retries and reuse of earlier results.
 - `review-scoring`: matching findings to ground truth with a pinned judge, and the per-trial and
   per-configuration metrics with their uncertainty.
 - `benchmark-report`: the HTML report, its views, and what a published report may show about
@@ -70,7 +77,7 @@ None. The repository is new.
 ## Impact
 
 - **New repository** `decadance-dance/rbench`: Python CLI, Docker images, task data, matrices and
-  published results.
+  published results. Source archives of public tasks are its release assets.
 - **New private repository** `decadance-dance/rbench-private` for hidden tasks.
 - **rreview:** a new opt-in flag, in its own issue and PR.
 - **Runtime dependencies:**

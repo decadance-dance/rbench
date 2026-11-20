@@ -32,6 +32,8 @@ The report SHALL open with:
 The report SHALL show one row per configuration. Each row SHALL give:
 - the engine, and the model and effort per role;
 - recall by severity and augmented precision, each with its interval;
+- the standard deviation of recall across attempts;
+- the failure rate;
 - false findings per PR;
 - median tokens split by model;
 - median wall time;
@@ -44,8 +46,9 @@ Rows SHALL be sortable, and filterable by engine, model, effort and task set.
 - **THEN** every number in the leaderboard is recomputed for that set only
 
 ### Requirement: Quality against cost
-The report SHALL plot `must` recall against median total tokens per configuration, colored by
-engine, and SHALL mark the Pareto front.
+The report SHALL plot `must` recall against median uncached input plus output tokens per
+configuration, colored by engine, and SHALL mark the Pareto front. Each point SHALL show its tokens
+split by provider, and cache tokens apart.
 
 #### Scenario: Dominated configuration
 - **WHEN** a configuration has lower `must` recall and more tokens than another
@@ -74,7 +77,10 @@ For each task, the report SHALL show:
 
 ### Requirement: Run health
 The report SHALL list:
-- failed, interrupted and contaminated trials, with reasons;
+- failed, interrupted, contaminated and misconfigured trials, with reasons;
+- blocked configurations, with the requested and applied models;
+- refused connection attempts per trial;
+- the stop reason of the run: done, round budget, soft threshold or limit;
 - wasted tokens;
 - flags for incomplete token figures and for effort fallbacks.
 
