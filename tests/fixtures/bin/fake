@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""Fake `claude`, `codex`, `docker` and `gh` for tests; each name is a symlink to this file.
+
+Environment:
+  RBENCH_FAKE_LOG       file that gets one JSON line per call: {"tool", "argv", "stdin"}.
+  RBENCH_FAKE_SCENARIO  JSON object mapping a tool name to its scenario; a tool without one
+                        prints nothing and exits 0. Scenario keys, all optional:
+                          delay   seconds to sleep before answering
+                          stdout  text to print to stdout
+                          stderr  text to print to stderr (a rate-limit message goes here or in
+                                  stdout, as the real CLI prints it)
+                          exit    exit code, default 0
+                          crash   true: print what is given, then die by SIGKILL
+
+Stdin is read to the end unless it is a terminal: give the child input or DEVNULL.
+"""
+
+import json
+import os
+import signal
+import sys
+import time
+
+tool = os.path.basename(sys.argv[0])
+stdin = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
+
+log = os.environ.get("RBENCH_FAKE_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"tool": tool, "argv": sys.argv[1:], "stdin": stdin}) + "\n")
+
+scenario = json.loads(os.environ.get("RBENCH_FAKE_SCENARIO") or "{}").get(tool, {})
+time.sleep(scenario.get("delay", 0))
+sys.stdout.write(scenario.get("stdout", ""))
+sys.stderr.write(scenario.get("stderr", ""))
+sys.stdout.flush()
+sys.stderr.flush()
+if scenario.get("crash"):
+    os.kill(os.getpid(), signal.SIGKILL)
+sys.exit(scenario.get("exit", 0))
