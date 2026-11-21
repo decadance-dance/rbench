@@ -182,9 +182,40 @@ server or build step, and opens from disk as the spec requires.
 
 ### D3. Trial = one `docker compose` project: agent container + squid proxy
 **Choice.**
-- The agent container sits on an `internal: true` network. Its only route out is a squid proxy that
-  allowlists the providers' API and auth hosts and logs every CONNECT. The host list comes from a
-  logged smoke run and is fixed in `images/proxy/allowlist`.
+- Two networks. The agent container is only on an internal bridge (`internal: true`) in isolated
+  gateway mode (`com.docker.network.bridge.gateway_mode_ipv4: isolated`, so the bridge has no host
+  address). The proxy is on that bridge and on an ordinary one that reaches the internet. The
+  agent's only route out is the squid proxy, which allowlists the providers' API and auth hosts and
+  logs every CONNECT. The host list comes from a logged smoke run and is fixed in
+  `images/proxy/allowlist`.
+  - An internal bridge alone is not enough: in Docker's default gateway mode the bridge has a host
+    address, and the agent can reach any host service listening on it. Isolated mode removes that
+    address. Checked with Docker 29.4.1 (#21): a listener in the Docker host's network namespace
+    answered an agent on a default internal bridge at the gateway address, and an agent on an
+    isolated one reached no bridge address. On both, `host.docker.internal` and external names did
+    not resolve. A deployment without isolated mode needs equivalent host isolation.
+- The smoke run (#21, Claude Code 2.1.316, Codex CLI 0.171.0) fixed the allowlist at three hosts:
+  - `api.anthropic.com`: the Claude API. `CLAUDE_CODE_OAUTH_TOKEN` needs no refresh host.
+  - `chatgpt.com`: Codex's API and account calls under a ChatGPT login.
+  - `auth.openai.com`: Codex's token refresh. The run did not reach it, because its token was
+    fresh, but a trial does (#20).
+- Squid allows `CONNECT` to port 443 of exactly these hosts, with no subdomains, and denies
+  everything else, plain HTTP included. The ACL is `acl allowed dstdomain -n
+  "/etc/squid/allowlist"`. Without `-n`, squid matches a numeric destination by its reverse DNS
+  name, so `CONNECT <ip>:443` passes whenever the IP's PTR record names an allowed host. The
+  spike's enforcing configuration lacked `-n`. A docker-only check (#21) showed the difference:
+  with a test list naming `dns.google`, `CONNECT 8.8.8.8:443` tunnelled without `-n` and was
+  refused with it.
+- Both CLIs honour `HTTPS_PROXY`/`HTTP_PROXY`, set with an empty `NO_PROXY`. In the run, neither
+  resolved any name but the proxy's.
+- In the run, the proxy refused and logged three kinds of traffic, with no effect on either CLI's
+  result:
+  - Claude's telemetry (`http-intake.logs.us5.datadoghq.com`). With D5's non-essential-traffic
+    switches set, one call made no such attempt.
+  - Codex's metrics (`ab.chatgpt.com`).
+  - Codex's fetches from OpenAI file storage (`*.oaiusercontent.com`).
+- #37 checks, for the compose project it builds: a refused `CONNECT` to a numeric IP, no access to
+  a host service on the bridge, external DNS refused, and `github.com` refused and logged.
 - Images are built per engine version and CLI versions, not per task. The scrubbed repository is
   unpacked from the task's archive (D11) and copied in with `docker cp` when the container is
   created, never mounted.
@@ -247,7 +278,9 @@ The trial has one `CLAUDE_CONFIG_DIR` and one `CODEX_HOME`. All processes share 
 login made only for the benchmark (its own `codex login`, so its own refresh-token chain), kept in a
 login home no other tool uses. That login home is a dedicated credential directory. It holds
 `auth.json` and the files Codex makes next to it: `auth.json.lock` and transient `.auth-*` save
-files. It holds nothing unrelated; files left by `codex login` (logs, `tmp/`) are removed. It is
+files. It holds nothing unrelated; files left by `codex login` (logs, `tmp/`) are removed. The login
+home used in spike #21 still held `auth.lock`, `log/` and `tmp/`; #40 checks the mount's contents
+before trials start. It is
 mounted as a directory, read-write, into the trial, and the trial's `CODEX_HOME/auth.json` is a
 symlink to the `auth.json` in it. Mounting the file alone does not work: Codex 0.171.0 replaces `auth.json` by a
 temporary file and a rename in the target's directory, and a rename onto a mount point fails with
@@ -256,6 +289,7 @@ login home. Refreshed tokens therefore go back only to that home. Sessions, logs
 the trial's `CODEX_HOME` inside the container. The trial homes hold:
 - the policy settings;
 - `ENABLE_CLAUDEAI_MCP_SERVERS=false`;
+- Codex's ChatGPT apps off for every Codex engine (#104), verified before any Codex trial is scored;
 - auto-memory and background tasks off, non-essential traffic off;
 - telemetry, error reporting and the autoupdater off;
 - `enableWeakerNestedSandbox`;
@@ -432,18 +466,65 @@ anywhere.
 - The prompt and schema live in `engines/plain/` (`prompt.md`, `findings.schema.json`).
 - Claude: `claude -p --tools Read,Grep,Glob,Bash --json-schema <schema>`.
 - Codex: `codex exec --output-schema <schema> -c web_search=disabled -c features.goals=false
-  -c features.view_image=false -c model_catalog_json=<catalog>`; the container is the sandbox
-  (as in D6).
-- Codex has no flag to drop its `apply_patch` edit tool: the tool comes from the model catalog's
-  `apply_patch_tool_type`. The benchmark's catalog is `codex debug models` at the pinned CLI
-  version, with that field set to null for every model in the matrix and nothing else changed. It
-  is generated per CLI version, and its hash is part of the configuration's settings.
+  -c features.view_image=false -c features.image_generation=false -c features.apps=false
+  -c agents.enabled=false -c tools.experimental_request_user_input.enabled=false
+  -c model_catalog_json=<catalog>`; the container is the sandbox (as in D6).
+  - `agents.enabled=false` turns off the subagent tools. That holds because the trial's config
+    is clean: an explicit `features.multi_agent_v2=true` would take precedence over it.
+  - `features.apps=false` turns off the apps connectors and the plugin-install suggestion, which
+    needs apps.
+  - `tools.experimental_request_user_input.enabled=false` drops `request_user_input`, which
+    Codex otherwise advertises even when no one can answer it.
+  - The adapter (#47) checks these switches in the argv log.
+- Some tools come only from the model catalog, and Codex has no flag for them. The benchmark's
+  catalog is built from a frozen input: `codex debug models --bundled` of the pinned release,
+  the catalog shipped in that binary. Plain `codex debug models` fetches the remote catalog, which
+  can change under the same CLI version: in #26 it differed from the bundled one, for example in
+  `gpt-6.2-astra`'s default service tier. For each Codex model in the matrix (D13) the benchmark
+  overrides exactly these fields and changes nothing else:
+  - `apply_patch_tool_type = null`: no `apply_patch` edit tool;
+  - `tool_mode = "direct"`: tools are sent as plain functions. The catalog's `code_mode_only`
+    puts them behind a JavaScript `exec` runner, and a model's `tool_mode` beats the
+    `code_mode` features;
+  - `experimental_supported_tools = []`: no clock, sleep or asynchronous messaging tools.
+
+  The catalog is generated per CLI version. The hash of the transformed file that the trial opens
+  is part of the configuration's settings.
 - Checked with Codex CLI 0.167.0 and Claude Code against a local endpoint that records requests:
   - Codex by default sends `apply_patch`, `exec_command`, `write_stdin`, `view_image`,
-    `web_search`, the goal tools, `tool_search` and `request_user_input`. With the options above it
-    sends only `exec_command`, `write_stdin`, `tool_search` and `request_user_input`; the rest of
-    the request is unchanged.
+    `web_search`, the goal tools, `tool_search` and `request_user_input`. With the 0.167.0
+    options (only `apply_patch_tool_type` in the catalog, no `image_generation`, `apps`,
+    `agents` or `request_user_input` switches) it sent only `exec_command`, `write_stdin`,
+    `tool_search` and `request_user_input`; the rest of the request was unchanged.
   - Claude with `--tools Read,Grep,Glob,Bash` sends only those four tools.
+- Checked in spike #26 with Codex CLI 0.171.0, the benchmark's ChatGPT login, `gpt-6.2-astra`
+  at `low` effort and no D3 proxy. Both calls used a catalog built from the remote snapshot, not
+  from `--bundled`.
+  - The tool list was read from the request body that Codex's rollout trace records
+    (`CODEX_ROLLOUT_TRACE_ROOT`). The session rollout has no tool list in this version. Under
+    this login the tools travel in an `additional_tools` input item, not in a top-level `tools`
+    field.
+  - The remote catalog does not override `model_catalog_json`. When it is set, Codex uses that
+    catalog as a static one and never refreshes it, and no `apply_patch` was sent.
+  - The 0.171.0 catalog, remote and bundled alike, gives `gpt-6.2-sol` and `gpt-6.2-astra`
+    `tool_mode = "code_mode_only"`, multi-agent v2 and experimental tools. With only
+    `apply_patch_tool_type` nulled, Codex sent:
+    - the `exec` runner. Its description advertised nested `exec_command`, `write_stdin`, MCP
+      resource tools, `request_plugin_install`, a clock and `image_gen`, and said that more
+      deferred nested tools are listed only at run time;
+    - the subagent tools (`spawn_agent` and five more);
+    - `wait`, `sleep`, `request_user_input` and two asynchronous messaging tools.
+  - With the catalog fields above and the switches except the `request_user_input` one, it sent
+    only `exec_command`, `write_stdin` and `request_user_input`. `tool_search` is gone: Codex
+    offers it only when a deferred searchable tool exists, and with apps off there is none.
+  - The intended request, with `request_user_input` also off, is `exec_command` and
+    `write_stdin` only. That rests on the 0.171.0 source (the config gate's test in
+    `codex-rs/core/src/tools/spec_plan_tests.rs`), not on a live call; the smoke stage verifies
+    it.
+  - Not verified: `gpt-6.2-sol`'s request and base instructions (only its catalog fields were
+    read), other models' base instructions, the `--bundled` catalog and the run through the
+    proxy. The smoke stage reads the request-body tool list for both Codex matrix models through
+    the proxy (Risks).
 - Model and effort come from the matrix, and the hermetic shims (D5) apply as for every engine.
 
 **Alternative considered:** give `plain` only the diff, with no tools. It is cheaper, but it would
@@ -694,14 +775,17 @@ from the `rule`, the `maintainer` or both (`rule+maintainer`).
   reproduced. A `claude setup-token` token passed by `--env-file` as `CLAUDE_CODE_OAUTH_TOKEN`
   authenticates `claude -p` in a Linux container on Docker Desktop (Claude Code 2.1.316,
   linux/arm64) with an empty `CLAUDE_CONFIG_DIR`, also with D5's managed settings and shim flags.
-  D3 stands; the `sbx` and separate-user fallbacks are not needed. Credential source (decided): on
+  D3 stands; the `sbx` and separate-user fallbacks are not needed. #19 ran with the managed settings
+  and shim flags but no proxy. #21 ran `claude -p` with the same token through D3's enforcing proxy,
+  with and without D5's traffic switches but without the managed settings or shim flags. Credential
+  source (decided): on
   macOS the operator keeps the token in the Keychain (generic password, service
   `rbench-claude-oauth`). rbench reads it at trial start and passes it to `docker` by variable name
   only (`-e CLAUDE_CODE_OAUTH_TOKEN`, value in the child's environment), so the value never appears
   on an argv, in a file in the run dir or in an image (configuration or layer). The env file the
   spike used (`<env-file>`, outside the repository, mode 600) is a fallback for the spike only. Not
-  yet checked: whether the managed settings are enforced (the spike checked authentication only),
-  the run through the proxy (D3's smoke run) and token expiry over a long run.
+  yet checked: whether the managed settings are enforced (the spike checked authentication only)
+  and token expiry over a long run.
 - **[Codex `auth.json` refresh races between processes.]** → One login file per trial, at most one
   Codex trial per login, and a login only the benchmark uses, so Orca and the operator's own Codex
   never share its refresh-token chain. The spike (#20, Codex CLI 0.171.0) ran 3 concurrent
@@ -720,7 +804,8 @@ from the `rule`, the `maintainer` or both (`rule+maintainer`).
 - **[Headless `codex-review` execution and capture.]** → Confirmed in #22 with Codex CLI 0.171.0
   on Linux arm64 only. `codex exec review` ran without a TTY, used D5's directory-mounted login
   and returned one structured finding on the changed line of a synthetic two-commit repository.
-  The D3 proxy remains a smoke check.
+  A minimal `codex exec` call works through D3's enforcing proxy (#21); `codex exec review`
+  through it remains a smoke check.
 - **[The inner Linux sandbox may fail inside Docker.]** → In #22 it could not create a user
   namespace. In the smoke stage, check review-council, which launches Codex with
   `--sandbox read-only` (D5), and the Codex-side plugin review engine in D13. D6 uses the
@@ -751,10 +836,30 @@ from the `rule`, the `maintainer` or both (`rule+maintainer`).
   source with the license kept.
 - **[Codex's base instructions still mention `apply_patch` after the tool is removed.]** → The
   model may try to call it and get an error, or write files through the shell. Neither reaches the
-  findings. The smoke stage counts such calls in `plain` transcripts.
-- **[A remote model catalog may override `model_catalog_json` under a ChatGPT login.]** → The local
-  check used a custom provider, so the remote catalog was not fetched. The spike repeats the check
-  with the real login and reads the tool list from the session transcript.
+  findings. The smoke stage counts such calls in `plain` transcripts. In spike #26 (0.171.0,
+  `gpt-6.2-astra`) the request never mentioned `apply_patch`; other models may differ.
+- **[A remote model catalog may override `model_catalog_json` under a ChatGPT login.]** → Checked
+  in spike #26 with Codex CLI 0.171.0 and the real login: it does not. Codex fetched the remote
+  catalog for `codex debug models`, but a session with `model_catalog_json` used the local
+  catalog only (D12).
+- **[`plain`'s Codex tool list was observed for one model, without the proxy.]** → Spike #26 read
+  the request of `gpt-6.2-astra` at `low` effort only, outside the D3 proxy and with a catalog
+  built from the remote snapshot. The intended two-tool request is backed by the source only
+  (D12). The smoke stage (#60) runs `plain` for both Codex matrix models through the proxy with
+  the `--bundled` catalog. It reads the tool list from the request body in the rollout trace,
+  since neither the session rollout nor a transcript count of `apply_patch` attempts shows what
+  was offered. A CLI upgrade repeats this check.
+- **[GPT models run outside their native code mode in `plain`.]** → The pinned catalog makes
+  `gpt-6.2-*` code-mode-only, with subagent and image tools. `plain` overrides that (D12),
+  because spec `engine-configurations` gives `plain` the same file-reading and shell tools on
+  both CLIs. `plain` therefore measures each model with that minimal toolset. Each other engine
+  runs in its own harness, with its own prompts and settings, so a `plain` score compares with an
+  engine's score as minimal tools against that engine's harness. The report states this next to
+  the `plain` results on the leaderboard and the quality-against-cost plot (#66).
+- **[Codex engines other than `plain` keep the apps connectors under a ChatGPT login.]** →
+  `features.apps` is on by default and is turned off only for `plain` (D12). Turning it off for
+  every Codex engine (D5) is #104, a prerequisite for scoring Codex trials (see "Codex loads the
+  account's ChatGPT apps" below).
 - **[ReviewBench tasks are public and likely memorized.]** → The report shows task sets apart; `ours`
   and `hidden` carry the weight of the engine decision.
 - **[Transcript usage counts differ from CLI-reported usage.]** → The spike (#24) found the on-disk
@@ -765,6 +870,28 @@ from the `rule`, the `maintainer` or both (`rule+maintainer`).
 - **[Transcript paths and schemas change between CLI versions.]** → A CLI upgrade reruns smoke
   checks for D7's paths and usage records and D13's `ExitedReviewMode` item and `review_output`
   layout. A session with no usable source flags the trial's usage as incomplete.
+- **[The allowlist and refused traffic (#21).]** → The run fixed the list from one minimal call per
+  CLI. A path it did not exercise (a refresh, a tool call, review mode, another model) may need a
+  host it never saw:
+  - Such a path shows up as a refused attempt in run health; the call fails rather than leaks.
+  - A host is added only with a logged reason.
+  - In the one enforced Codex run, under the default settings, the proxy refused seven attempts:
+    one metrics call to `ab.chatgpt.com` and six fetches from `*.oaiusercontent.com`, whose purpose
+    was not identified. Other runs may differ. Refused attempts do not contaminate a trial (spec
+    `trial-isolation`), but they are noise in run health.
+  - Whether Codex's switches (OTel metrics, apps) stop this traffic, the storage fetches included,
+    is untested and open.
+  - Codex's token refresh through the proxy is unverified: the run's token was fresh, so
+    `auth.openai.com` is listed from #20 and the 0.171.0 source, not from a logged connection.
+  - No CLI ignored the proxy env. If a future version does, it gets no route at all, because the
+    agent's bridge is internal and isolated (D3), so it fails visibly instead of leaking.
+- **[Codex loads the account's ChatGPT apps.]** → Under a ChatGPT login, Codex 0.171.0 fetched the
+  account's apps (connectors) and cached their tools in the trial's `CODEX_HOME` (#21). They are
+  served through `chatgpt.com`, which the model call needs too. The proxy log shows the same
+  allowed host for both, so neither the allowlist nor the audit can tell them apart. #26 turned the
+  apps off for `plain` with `-c features.apps=false`; #104 does it for every Codex engine in D5's
+  managed policy. Verified apps disablement is a prerequisite: no Codex trial is scored before #104
+  shows it.
 - **[Codex rollouts carry the ChatGPT account id (`session_meta`).]** → Transcripts stay in the run
   directory and are never published; only aggregate scores leave it.
 
