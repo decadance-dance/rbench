@@ -258,6 +258,13 @@ server or build step, and opens from disk as the spec requires.
     executor (#55) gives each trial a name unique to the run and the trial on the Docker daemon,
     stable across its retries, and reuses a name only while it holds the run's lock. A trial id
     alone is unique only within its plan, so two runs could otherwise stop each other's trials.
+    The name is `rbench-` and the first 16 hex digits of the SHA-256 of the resolved run directory
+    and the trial id, so no task id reaches the daemon. `rbench run` takes the lock before the new
+    run directory is renamed into place; `run` and `resume` then list the daemon's compose projects
+    and remove every one named for a trial of the run before any trial starts.
+  - The engine runs under coreutils `timeout` inside the agent: on the limit, the engine's process
+    group gets TERM and, 30 seconds later, KILL, so the shims still log each CLI's exit before
+    the audit reads the log. The trial is then `failed` with reason `timeout`.
 
 **Alternatives considered:**
 - *Anthropic's devcontainer firewall (iptables).* It allows GitHub and port 22, and resolves domains

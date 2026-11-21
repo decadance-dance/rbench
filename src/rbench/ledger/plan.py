@@ -33,6 +33,7 @@ import tempfile
 import time
 import tomllib
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -633,12 +634,20 @@ def _reuse_trials(staging: Path, plan: Plan, source_dir: Path) -> None:
             raise
 
 
-def create_run(runs_dir: Path, run_id: str, plan: Plan, *, reuse: Path | None = None) -> Path:
+def create_run(
+    runs_dir: Path,
+    run_id: str,
+    plan: Plan,
+    *,
+    reuse: Path | None = None,
+    lock: ExitStack | None = None,
+) -> Path:
     """Create `runs_dir/run_id` with the plan, the lock file and all trial checkpoints.
 
     The directory is built under a temporary name and renamed into place, so a run directory
     either holds the whole plan and every trial, or does not exist. An existing run is refused.
     Plans with hidden tasks require Git to ignore both the staging and final directories.
+    With `lock`, the run lock is taken before the rename and stays held until `lock` closes.
     """
     runs_dir = Path(runs_dir)
     hidden = "hidden" in plan.task_sets
@@ -670,8 +679,15 @@ def create_run(runs_dir: Path, run_id: str, plan: Plan, *, reuse: Path | None = 
             set_state(trial_dir, "pending")
         if reuse is not None:
             _reuse_trials(tmp, plan, reuse)
-        # Fails if another runner created the same run meanwhile: the target is not empty.
-        os.rename(tmp, run_dir)
+        with ExitStack() as held:
+            if lock is not None:
+                from rbench.ledger.resume import run_lock  # resume imports this module
+
+                held.enter_context(run_lock(run_dir, staged=tmp))
+            # Fails if another runner created the same run meanwhile: the target is not empty.
+            os.rename(tmp, run_dir)
+            if lock is not None:
+                lock.enter_context(held.pop_all())
     except BaseException as e:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -772,6 +788,7 @@ def start_run(
     run_id: str | None = None,
     root: Path | None = None,
     reuse: Path | None = None,
+    lock: ExitStack | None = None,
 ) -> Path:
     """Load the inputs from disk, freeze the plan of one round and create its run directory.
 
@@ -811,4 +828,4 @@ def start_run(
     )
     if run_id is None:
         run_id = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{matrix.stage}-{round_name}"
-    return create_run(runs_dir, run_id, plan, reuse=reuse)
+    return create_run(runs_dir, run_id, plan, reuse=reuse, lock=lock)

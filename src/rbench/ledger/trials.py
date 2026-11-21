@@ -12,7 +12,8 @@ A trial directory holds:
                    {"engine": {"<model>": {"input", "output", "cache_read", "cache_creation"}},
                     "normalization": {"<model>": {...}},
                     "incomplete": {"engine": ["<reason>", ...], "normalization": [...]}}
-    raw/           engine output, transcripts and logs
+    raw/           engine output, transcripts and logs of the latest attempt
+    project/       the trial's compose file (`rbench.run.trial`), kept to remove leftovers
     audit.json     the contamination audit (`rbench.trial.audit`): {"contaminated": [<reason>],
                    "refused": [{"method", "target" (destination only), "result",
                    "count"}], "refused_omitted"},

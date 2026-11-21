@@ -50,7 +50,9 @@ checkout = test_ledger.checkout
 full_inputs = test_ledger.full_inputs
 
 
-def test_reuse_copies_done_results_and_leaves_other_trials_pending(checkout, capsys) -> None:
+def test_reuse_copies_done_results_and_leaves_other_trials_pending(
+    checkout, capsys, stub_executor
+) -> None:
     argv = cli_inputs(checkout)
     main([*argv, "--run-id", "earlier"])
     capsys.readouterr()
@@ -70,11 +72,10 @@ def test_reuse_copies_done_results_and_leaves_other_trials_pending(checkout, cap
     with run_lock(source):
         before = {p: p.read_bytes() for p in source.rglob("*") if p.is_file()}
         assert before[source / LOCK_FILE]
-        assert main([*argv, "--run-id", "later", "--reuse", str(source)]) == ExitCode.ERROR
+        assert main([*argv, "--run-id", "later", "--reuse", str(source)]) == ExitCode.OK
         assert {p: p.read_bytes() for p in source.rglob("*") if p.is_file()} == before
-    out, err = capsys.readouterr()
+    out, _ = capsys.readouterr()
     assert "runs/later: 5 trials pending" in out
-    assert "trial executor is not implemented yet" in err
 
     target = checkout / "runs" / "later"
     reused = target / TRIALS_DIR / done.name
