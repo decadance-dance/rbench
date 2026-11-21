@@ -298,8 +298,9 @@ server or build step, and opens from disk as the spec requires.
     finds candidates: two root rollouts after one launch in the same home both match. Also
     rejected: a per-launch `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`. It lands in
     `session_meta.originator` (checked offline). But it is an internal variable that names the
-    client to the provider, not a logging field, so setting it could change the request. Reading the id from `thread.started` or from the `session id:` line
-    on stderr would put the shim into the engine's stdio, and it depends on the output mode.
+    client to the provider, not a logging field, so setting it could change the request. Reading
+    the id from `thread.started` or from the `session id:` line on stderr would put the shim into
+    the engine's stdio, and it depends on the output mode.
 - The audit discovers transcripts on its own: every Claude transcript (`projects/**/*.jsonl`) and
   every Codex rollout anywhere in the trial container's writable filesystem, not only in the homes
   the shim log names. A session with no binding, a session bound to two launches, a hook record or
