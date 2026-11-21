@@ -16,7 +16,7 @@ finish, and `RunStopped` carries the error. An error after the trial's final sta
 project its attempt could not remove, keeps that state but stops the run the same way.
 
 A trial a limit interrupted stops the run too: from the moment the attempt detects it (the
-`limit` event, set before the trial's project is removed), no new trial starts; running ones
+`limit` latch, set before the trial's project is removed), no new trial starts; running ones
 finish, and `LimitReached` names the limits and any error that also stopped the run, which the
 operator fixes before resuming after the reset.
 """
@@ -39,7 +39,7 @@ from rbench.ledger.plan import (
 )
 from rbench.ledger.trials import read_status, read_wasted, set_state
 from rbench.run.adapters import ADAPTERS, Adapter
-from rbench.run.trial import PROJECT_DIR, RunContext, project_name, run_attempt
+from rbench.run.trial import PROJECT_DIR, Latch, RunContext, project_name, run_attempt
 from rbench.tasks.archive import ArchiveError
 from rbench.tasks.hidden import HiddenConfig, hidden_config
 from rbench.tasks.loader import Task
@@ -102,7 +102,7 @@ def execute(
     claude_concurrency: int = CLAUDE_CONCURRENCY,
     retries: int = RETRIES,
     log: Callable[[str], None] = print,
-    limit: threading.Event | None = None,
+    limit: Latch | None = None,
 ) -> dict[str, int]:
     """Run `queue` with `attempt` and return the count of each final state; raises `RunStopped`
     once running trials end when a trial could not be run, or `LimitReached` when a trial was
@@ -117,7 +117,7 @@ def execute(
     limits: list[str] = []
     guard = threading.Lock()
     if limit is None:
-        limit = threading.Event()
+        limit = Latch()
 
     def work(trial: PlannedTrial) -> str:
         name = label(plan, trial)
@@ -159,7 +159,11 @@ def execute(
                     earliest[group] = min(earliest.get(group, trial.attempt), trial.attempt)
                 for trial in list(pending):
                     need = slots(plan, trial)
-                    if trial.attempt == earliest[need] and all(free[p] > 0 for p in need):
+                    if trial.attempt != earliest[need] or not all(free[p] > 0 for p in need):
+                        continue
+                    with limit.lock:  # a limit detected during the scan wins over this start
+                        if limit.is_set():
+                            break
                         for p in need:
                             free[p] -= 1
                         pending.remove(trial)

@@ -167,7 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 # A run with hidden tasks keeps its directory out of the output: the resume command names it by
-# this shell variable, which the operator sets.
+# this shell variable, which the operator sets; the shell refuses to run it unset or empty.
 RUN_DIR_VARIABLE = "RUN_DIR"
 
 
@@ -186,7 +186,8 @@ def _resume_command(run_dir: Path, plan: Plan, args: argparse.Namespace) -> str:
             words.append(f"{flag}={value}")
     command = shlex.join([*words, "--"])
     if "hidden" in plan.task_sets:
-        return f'{command} "${RUN_DIR_VARIABLE}"'
+        need = f"set {RUN_DIR_VARIABLE} to the run directory"
+        return f'{command} "${{{RUN_DIR_VARIABLE}:?{need}}}"'
     return f"{command} {shlex.quote(str(run_dir))}"
 
 

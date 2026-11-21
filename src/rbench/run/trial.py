@@ -105,6 +105,23 @@ def login_lock(home: Path) -> Iterator[None]:
         os.close(fd)  # releases the lock
 
 
+class Latch:
+    """Set once a trial detects a limit. The executor holds `lock` while it decides to start a
+    trial and starts it, and `set` takes it too, so every trial starts either before the latch is
+    set or not at all."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self._set = False
+
+    def set(self) -> None:
+        with self.lock:
+            self._set = True
+
+    def is_set(self) -> bool:
+        return self._set
+
+
 @dataclass
 class RunContext:
     """What every trial of a run shares. `tasks` maps the plan's task ids to loaded tasks, and
@@ -125,7 +142,7 @@ class RunContext:
     timeout: float = TIMEOUT
     # Set as soon as a trial detects a limit, before its project is removed: the executor starts
     # no trial after it.
-    limit: threading.Event = field(default_factory=threading.Event)
+    limit: Latch = field(default_factory=Latch)
     configurations: dict[str, PlannedConfiguration] = field(init=False)
 
     def __post_init__(self) -> None:

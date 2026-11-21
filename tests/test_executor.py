@@ -44,7 +44,7 @@ from rbench.ledger.plan import IDENTITY_FILE, PlannedTrial, run_identity
 from rbench.ledger.resume import recover_trials
 from rbench.run import executor
 from rbench.run.adapters import ADAPTERS, EngineFailure, EngineTrial, NotEligible, Output, Plain
-from rbench.run.trial import project_name
+from rbench.run.trial import Latch, project_name
 from rbench.tasks.hidden import HiddenConfig
 from rbench.trial.compose import TrialProject
 from rbench.trial.hermetic import POLICY
@@ -377,7 +377,7 @@ def test_no_trial_starts_once_a_limit_is_detected_even_before_its_teardown_ends(
     run_dir = make_run(checkout, [OPUS, SONNET])
     plan = load_plan(run_dir)
     first, second = plan.trials[:2]
-    limit, teardown, started = threading.Event(), threading.Event(), []
+    limit, teardown, started = Latch(), threading.Event(), []
 
     def attempt(trial):
         started.append(trial.id)
@@ -394,6 +394,55 @@ def test_no_trial_starts_once_a_limit_is_detected_even_before_its_teardown_ends(
         threading.Timer(0.3, teardown.set).start()
         return "failed"
 
+    with pytest.raises(executor.LimitReached):
+        executor.execute(run_dir, plan, plan.trials, attempt, log=lambda _: None, limit=limit)
+
+    assert len(plan.trials) > 2 and sorted(started) == sorted([first.id, second.id])
+
+
+@pytest.mark.real_executor
+def test_a_limit_detected_while_the_queue_is_scanned_stops_the_next_start(checkout, monkeypatch):
+    run_dir = make_run(checkout, [OPUS, SONNET])
+    plan = load_plan(run_dir)
+    first, second = plan.trials[:2]
+    limit, started = Latch(), []
+    waiting, second_done, detect, teardown = (threading.Event() for _ in range(4))
+    real_wait, real_slots = executor.wait, executor.slots
+
+    def wait(*args, **kwargs):
+        waiting.set()  # the first scan is over
+        return real_wait(*args, **kwargs)
+
+    def slots(plan_, trial):
+        if second_done.is_set() and trial not in (first, second) and not detect.is_set():
+            # The scan after the second trial freed its slot: the first detects its limit now.
+            detect.set()
+            deadline = time.monotonic() + 5
+            while not limit.is_set() and time.monotonic() < deadline:
+                time.sleep(0.01)
+        return real_slots(plan_, trial)
+
+    def attempt(trial):
+        started.append(trial.id)
+        trial_dir = run_dir / TRIALS_DIR / trial.id
+        set_state(trial_dir, "running")
+        if trial == first:
+            assert detect.wait(5)
+            limit.set()
+            interrupt(trial_dir)
+            assert teardown.wait(5)  # held open past the scan
+            return "interrupted"
+        if trial == second:
+            assert waiting.wait(5)
+            set_state(trial_dir, "failed", "stand-in")
+            second_done.set()
+            threading.Timer(0.5, teardown.set).start()
+            return "failed"
+        set_state(trial_dir, "failed", "started after the limit")
+        return "failed"
+
+    monkeypatch.setattr(executor, "wait", wait)
+    monkeypatch.setattr(executor, "slots", slots)
     with pytest.raises(executor.LimitReached):
         executor.execute(run_dir, plan, plan.trials, attempt, log=lambda _: None, limit=limit)
 
@@ -438,12 +487,19 @@ def test_a_limit_exits_75_and_prints_the_exact_resume_command(checkout, monkeypa
     assert f"\nresume after the limit resets: {resume}\n" in err
 
 
-def shell_words(command: str, **variables: str) -> list[str]:
-    """The words `/bin/sh` makes of `command`, with `variables` set."""
+def shell(command: str, **variables: str) -> subprocess.CompletedProcess:
+    """`/bin/sh` printing the words it makes of `command`, with only `variables` set."""
     script = "".join(f"{k}={shlex.quote(v)}; " for k, v in variables.items())
     script += f"set -- {command}; printf '%s\\0' \"$@\""
-    done = subprocess.run(["/bin/sh", "-c", script], capture_output=True, check=True)
-    return done.stdout.decode().split("\0")[:-1]
+    env = {"PATH": os.environ["PATH"]}
+    argv = ["/bin/sh", "-c", script]
+    return subprocess.run(argv, check=False, capture_output=True, text=True, env=env)
+
+
+def shell_words(command: str, **variables: str) -> list[str]:
+    done = shell(command, **variables)
+    assert done.returncode == 0, done.stderr
+    return done.stdout.split("\0")[:-1]
 
 
 @pytest.mark.parametrize("hidden", [False, True])
@@ -469,6 +525,11 @@ def test_the_resume_command_survives_the_shell_and_the_parser(hidden):
     assert cli_module.build_parser().parse_args(words[1:]) == args
     defaults = cli_module.build_parser().parse_args(["resume", "r"])
     assert cli_module._resume_command(Path("r"), plan, defaults).startswith("rbench resume -- ")
+    if hidden:  # unset or empty, the shell refuses to run it rather than resume "."
+        for variables in ({}, {"RUN_DIR": ""}):
+            refused = shell(command, **variables)
+            assert refused.returncode != 0 and refused.stdout == ""
+            assert "set RUN_DIR to the run directory" in refused.stderr
 
 
 @pytest.mark.parametrize("command", ["run", "resume"])

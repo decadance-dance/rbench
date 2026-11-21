@@ -730,12 +730,14 @@ reset). The trial becomes `interrupted` and keeps its tokens as wasted. A contam
 contaminated; otherwise a limit wins over a timeout, a misconfiguration and the engine's result,
 since all of them can follow from it. By default the runner drains and exits 75. No trial starts
 from the moment an attempt detects the limit, before its project is removed; trials already
-started finish. An error in the same drain, such as that project failing to come down or another
+started finish. Setting the limit and deciding to start a trial take one lock, so every trial
+starts either before the limit was detected or not at all. An error in the same drain, such as that project failing to come down or another
 trial's infrastructure failure, keeps exit 75 and is reported next to the limit, to be fixed
 before resuming. The printed resume command is valid `/bin/sh` that the parser reads back: each
 option the runner was given that differs from the default as one quoted `--option=value`, then
 `--` and the quoted run directory. A run with hidden tasks keeps its directory out of the output,
-as everywhere else: the command reads it from `"$RUN_DIR"`, and the line says to set it. With
+as everywhere else: the command reads it from `"${RUN_DIR:?set RUN_DIR to the run directory}"`,
+so the shell refuses to run it with `RUN_DIR` unset or empty, and the line says to set it. With
 `--wait`, only the reporting provider pauses. A throttle that the CLI retries and
 recovers from is not a limit: the turn does not end on such a record.
 
