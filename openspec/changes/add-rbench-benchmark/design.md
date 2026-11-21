@@ -299,6 +299,11 @@ Codex: the rollout file under `$CODEX_HOME/sessions/`.
   `turn_context.model` only when it agrees with the effective model the CLI observed for the
   response; otherwise the trial's model attribution is flagged incomplete. The records come from
   the pinned source; the spike read only `token_count`, so their on-disk layout is a smoke check.
+- Built-in review (#22) produced two rollout files with two distinct model response records in
+  aggregate. In the smoke stage, check whether the `SubAgentSource::Review` thread's usage appears
+  in the parent rollout (identified in D13), the child rollout, or both. Verify that
+  `token_usage_record` counts each response once and whether the `token_count` fallback covers
+  the review thread.
 - Fallback when a rollout has no such records: its last `token_count` event's `total_token_usage`.
   `token_count` is a cumulative snapshot without a response id, and a rate-limit update can repeat
   it without a request, so it is used only when the thread starts from zero usage (not a fork), its
@@ -466,20 +471,22 @@ measure a different task from the engines, which all read the repository.
 - `codex-review` runs the built-in review from the `reviewed` checkout:
 
   ```sh
-  codex exec -m "$model" -c "model_reasoning_effort=$effort" --sandbox danger-full-access \
+  codex exec -m "$model" -c "review_model=\"$model\"" -c "model_reasoning_effort=\"$effort\"" \
+    --sandbox danger-full-access \
     --json -o "$review_text" review --base base
   ```
 
   The D5 shim supplies the hermetic flags. Inside Docker, the container is the sandbox (D6).
-  The inner Linux sandbox could not create a user namespace in the spike. The top-level
-  `codex review` also runs headless. The `exec review` form exposes both capture options and
-  reaches the same `review/start` handler as the TUI.
+  Set both model options because the review task gives `review_model` precedence over the
+  session model. The 0.171.0 help lists `codex review` as a headless command, and the pinned
+  source routes both headless forms and the TUI through `review/start`. The live spike exercised
+  `codex exec review`, which exposes both capture options.
 - Capture stdout JSONL and the final text file for diagnostics. The final
   `item.completed` event with `item.type = "agent_message"` contains the same rendered review as
-  `-o`. Keep session persistence on and normalize the structured findings from the parent rollout
-  in `$CODEX_HOME/sessions/`. Its `event_msg` record has `payload.type = "item_completed"`,
-  `payload.item.type = "ExitedReviewMode"`, and `payload.item.review_output` with the findings,
-  including each finding's priority and file/line range.
+  `-o`. Keep session persistence on. Use the session ID in the D5 shim log to select the
+  parent rollout in `$CODEX_HOME/sessions/` for findings normalization. Its `event_msg` record has
+  `payload.type = "item_completed"` and `payload.item.type = "ExitedReviewMode"`. The
+  `payload.item.review_output` holds the findings with priority and file/line ranges.
 - review-council: the Claude side is the main session (orchestrator and judge) plus the subagents
   `reviewer-claude`, `reviewer-security` and the Claude verifier, all `model: inherit`, so the
   session's `--model` and `--effort` set them. The Codex side is the Codex reviewer and verifier,
@@ -591,9 +598,13 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
   So rbench never copies `auth.json`. There is one login file in a directory-mounted login home,
   and Codex refreshes it in place.
 - **[Headless `codex-review` execution and capture.]** → Confirmed in #22 with Codex CLI 0.171.0
-  on Linux arm64. The D13 command ran without a TTY, used D5's directory-mounted login and returned
-  one structured finding on the changed line of a synthetic two-commit repository. The D3 proxy
-  remains a smoke check.
+  on Linux arm64 only. `codex exec review` ran without a TTY, used D5's directory-mounted login
+  and returned one structured finding on the changed line of a synthetic two-commit repository.
+  The D3 proxy remains a smoke check.
+- **[The inner Linux sandbox may fail inside Docker.]** → In #22 it could not create a user
+  namespace. In the smoke stage, check review-council, which launches Codex with
+  `--sandbox read-only` (D5), and the Codex-side plugin review engine in D13. D6 uses the
+  container as the sandbox for rreview.
 - **[Claude Code reports its used share only on stream-json stdout (spike #23).]** → The runner
   reads it from its own calls and a throttled probe (D14). When no reading is available, the soft
   threshold is not enforced for Claude for that check, the run log says so, and the round budget is
@@ -631,9 +642,9 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
   another model, a nonzero Codex `cache_write_input_tokens` and nonzero reasoning tokens were not
   seen; the smoke stage checks them. A mismatch against a covering snapshot uses `modelUsage` and
   flags the trial; without one the cross-check is unavailable (D7).
-- **[Transcript paths and schemas change between CLI versions.]** → D7's paths and records are those
-  of the pinned versions. A CLI upgrade reruns the smoke check; a session with no usable source flags
-  the trial's usage as incomplete.
+- **[Transcript paths and schemas change between CLI versions.]** → A CLI upgrade reruns smoke
+  checks for D7's paths and usage records and D13's `ExitedReviewMode` item and `review_output`
+  layout. A session with no usable source flags the trial's usage as incomplete.
 - **[Codex rollouts carry the ChatGPT account id (`session_meta`).]** → Transcripts stay in the run
   directory and are never published; only aggregate scores leave it.
 
