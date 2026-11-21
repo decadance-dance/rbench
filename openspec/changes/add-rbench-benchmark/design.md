@@ -859,6 +859,21 @@ measure a different task from the engines, which all read the repository.
   | `rreview` | panel × coordinator × judge | 2 × 3 × 2 |
   | **Total** | | **33** |
 
+- `code-review` runs Claude Code's built-in `/code-review` on the PR from the `reviewed` checkout
+  (#48). The command goes by stdin, `/code-review <PR number>\n`, to
+  `claude -p --permission-mode bypassPermissions --output-format json`, and the D5 shim adds the
+  model, the effort, the policy flags and the session id. The engine is pinned by the Claude Code
+  version (pin kind `cli`) and outputs Markdown: the result's `result` text goes through D9.
+  Checked offline with Claude Code 2.1.316, against a local recording endpoint with every other
+  connection denied and no model call:
+  - From stdin in `-p`, the command expands inline in the root session (no fork) to a prompt with
+    "Review target: `<n>`". That makes the review read the PR through the D4 `gh` stub.
+  - The request carries the session's `--model` and `--effort`. With no level typed after the
+    command, the review runs at the session's effort, so the adapter types none. A typed level
+    would also be saved in the home and reused by later reviews.
+  - With JSON output it reports in prose, not through its findings tool.
+  - An API error still ends with `subtype` `success` but an empty `modelUsage`, so a result with
+    no model usage fails the trial.
 - `codex-review` runs the built-in review from the `reviewed` checkout:
 
   ```sh
