@@ -366,6 +366,8 @@ else:  # a Codex session: hold a rollout open for appending
         meta["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": os.environ["FAKE_PARENT"]}}}
     os.write(fd, (json.dumps({"type": "session_meta", "payload": meta}) + "\\n").encode())
     time.sleep(0.4)
+    while not os.path.exists(os.environ.get("FAKE_WAIT", "/")):  # until the test releases it
+        time.sleep(0.05)
 sys.stdout.write(json.dumps(sys.argv[1:]))
 sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 """
@@ -408,14 +410,18 @@ def trial(tmp_path):
     hook = HOOK.format(**paths, python=os.path.realpath(sys.executable))
     env = os.environ | {"FAKE_HOME": str(home), "FAKE_HOOK": hook, "PYTHONDONTWRITEBYTECODE": "1"}
 
-    def launch(name: str, *argv: str, via_shim: bool = True, **extra: str):
+    def launch(name: str, *argv: str, via_shim: bool = True, background: bool = False, **extra):
         code = SHIM.format(**paths, cli=str(cli), name=name)
         cmd = [sys.executable, "-c", code, *argv] if via_shim else [str(cli), *argv]
+        if background:
+            return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, env=env | extra)
         return subprocess.run(
             cmd, check=False, capture_output=True, text=True, env=env | extra, timeout=30
         )
 
+    launch.collector = server
     yield launch, log, home, tmp_path
+    server.send_signal(signal.SIGCONT)
     server.terminate()
     server.wait()
 
@@ -617,3 +623,24 @@ def test_shim_dies_by_the_signal_that_killed_the_cli(stub, signum):
     result, _ = stub("claude", "-p", "hi", answers=("launch",), FAKE_SIGNAL=str(int(signum)))
 
     assert result.returncode == -signum and result.stderr == ""
+
+
+@linux
+@pytest.mark.parametrize("stop", [signal.SIGSTOP, signal.SIGTERM])  # stalled, then gone
+def test_a_launch_whose_exit_record_never_landed_is_reported(trial, stop):
+    launch, log, home, root = trial
+    release = root / "release"
+    shim_run = launch("codex", "exec", "-", background=True, FAKE_THREAD="t1", FAKE_EXIT="3",
+                      FAKE_WAIT=str(release))  # fmt: skip
+    records = wait_for_log(log, 4)
+    assert [r["kind"] for r in records] == ["launch", "child", "watch", "binding"]
+
+    launch.collector.send_signal(stop)  # after the binding, before the exit record
+    release.touch()
+
+    assert shim_run.wait(timeout=30) == 3  # the CLI's status reaches the engine
+    records = read_shim_log(log)
+    assert [r["kind"] for r in records] == ["launch", "child", "watch", "binding"]
+    assert unbound_sessions(records, transcripts_of(home, root)) == [
+        "Launch 1 (codex): no exit record in the shim log, so its records may be incomplete"
+    ]

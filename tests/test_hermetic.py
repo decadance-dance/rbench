@@ -157,6 +157,7 @@ def launch(n: int, pid: int, *argv: str, cli: str = "x") -> list[dict]:
     return [
         {"kind": "launch", "launch": n, "cli": cli, "argv": list(argv) or [str(n)]},
         {"kind": "child", "launch": n, "pid": pid, "start": pid * 10},
+        {"kind": "exit", "launch": n, "status": 0},
     ]
 
 

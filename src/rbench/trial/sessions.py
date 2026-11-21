@@ -119,8 +119,15 @@ def _find(value: object, key: str) -> str | None:
 
 def unbound_sessions(records: list[dict], transcripts: Path) -> list[str]:
     """Every session in `transcripts` (container paths below that directory) that does not bind
-    to exactly one origin launch, and every hook of a `claude` process no shim started."""
-    problems = []
+    to exactly one origin launch, every hook of a `claude` process no shim started, and every
+    launch whose exit the log does not hold, so that what it recorded may be incomplete (D5)."""
+    exited = {r["launch"] for r in records if r["kind"] == "exit"}
+    problems = [
+        f"Launch {r['launch']} ({r.get('cli')}): no exit record in the shim log, so its records "
+        "may be incomplete"
+        for r in records
+        if r["kind"] == "launch" and r["launch"] not in exited
+    ]
     children = _children(records)
 
     # Claude: session id -> origin launches.

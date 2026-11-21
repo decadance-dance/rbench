@@ -314,7 +314,8 @@ server or build step, and opens from disk as the spec requires.
   has a 10-second limit: a collector that does not accept the launch in time counts as absent.
   Once the CLI runs, a record lost to the limit leaves its sessions unbound, and a watcher still
   running 10 seconds after the CLI exits is killed, which leaves the rollouts it had not reported
-  unbound; the trial fails closed and the shim never hangs. The shims, the watcher, the
+  unbound; the trial fails closed and the shim never hangs. The shim still exits with the CLI's
+  status. The shims, the watcher, the
   collector and the hook are Python scripts on the image's Debian `python3`, because Node has no
   `SO_PEERCRED`.
 - Threat model of the audit (decided). The audit detects a CLI session started without the shims:
@@ -378,8 +379,9 @@ server or build step, and opens from disk as the spec requires.
   every Codex rollout anywhere in the trial container's writable filesystem, not only in the homes
   the shim log names. The runner lists the files `docker diff` reports as added or changed in the
   agent container and copies those out with `docker cp`, which reads them whatever their owner. Any of these marks the trial contaminated: a session with no origin launch,
-  a session with two origin launches, a hook record whose `claude` process no shim started, or a
-  child thread whose lineage does not reach a bound root.
+  a session with two origin launches, a hook record whose `claude` process no shim started, a
+  child thread whose lineage does not reach a bound root, or a launch with no exit record in the
+  log, whose other records may then be incomplete too.
 - An engine's own model and effort must equal the planned role's. The adapter builds the engine's
   options from the plan: rreview's `--role-model` and `--role-effort`, and `codex-review`'s `-m`,
   `review_model` and `model_reasoning_effort`. The audit reads the model and effort that applied to
