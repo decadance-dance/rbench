@@ -66,12 +66,16 @@ PLAIN_TWO_MODELS = {
 BUDGET = {"claude": 1000, "codex": 2000}
 FINDING = {"file": "a.py", "start_line": 1, "end_line": 2, "message": "Off by one."}
 COUNTS = {"input": 3, "output": 2, "cache_read": 0, "cache_creation": 0}
-USAGE = {"engine": {"claude-opus-5-5": COUNTS}, "normalization": {}}
+USAGE = {
+    "engine": {"claude-opus-5-5": COUNTS},
+    "normalization": {},
+    "incomplete": {"engine": [], "normalization": []},
+}
 
 
 def usage(**models) -> dict:
     """Engine usage of `models` (model id -> counts), no normalization step."""
-    return {"engine": models, "normalization": {}}
+    return USAGE | {"engine": models}
 
 
 def task_sets(root: Path) -> list:
@@ -685,12 +689,28 @@ def test_result_file_that_does_not_match_done_is_rejected(tmp_path: Path) -> Non
         ([FINDING], usage(input=-1), r"engine usage of model 'input': expected exactly"),
         ([FINDING], usage(m=COUNTS | {"output": -1}), r"'m': output: expected a token count"),
         ([FINDING], usage(m=COUNTS | {"output": 1.5}), r"'m': output: expected a token count"),
-        ([FINDING], {"engine": {"": COUNTS}, "normalization": {}}, r"model '': expected a model"),
+        ([FINDING], usage(**{"": COUNTS}), r"model '': expected a model"),
         ([FINDING], USAGE | {"normalization": []}, r"usage\.normalization must be an object"),
         (
             [FINDING],
             USAGE | {"normalization": {"m": {"input": 1}}},
             r"normalization usage of model 'm': expected exactly",
+        ),
+        ([FINDING], USAGE | {"incomplete": []}, r"usage\.incomplete must be an object of exactly"),
+        (
+            [FINDING],
+            USAGE | {"incomplete": {"engine": []}},
+            r"usage\.incomplete must be an object of exactly engine, normalization",
+        ),
+        (
+            [FINDING],
+            USAGE | {"incomplete": {"engine": ["a reason", " "], "normalization": []}},
+            r"usage\.incomplete\.engine must be a list of reasons",
+        ),
+        (
+            [FINDING],
+            USAGE | {"incomplete": {"engine": [], "normalization": "a reason"}},
+            r"usage\.incomplete\.normalization must be a list of reasons",
         ),
     ],
 )
@@ -710,7 +730,10 @@ def test_invalid_results_are_rejected_whole(tmp_path: Path, findings, usage, mes
         (b"[{}]", b"{}", r"finding 0: expected the fields"),
         (
             b"[]",
-            b'{"engine": {"m": {"input": -1}}, "normalization": {}}',
+            (
+                b'{"engine": {"m": {"input": -1}}, "normalization": {},'
+                b' "incomplete": {"engine": [], "normalization": []}}'
+            ),
             r"engine usage of model 'm': expected exactly",
         ),
         (b'[{"file": "a", "file": "b"}]', b"{}", r"findings.json: not valid JSON"),

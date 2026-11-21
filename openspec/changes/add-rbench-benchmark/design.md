@@ -589,6 +589,23 @@ assistant message and belongs to the session's latest launch in the shim log (a 
 `modelUsage` is used and the trial is flagged. Without a covering snapshot, including when the
 latest launch wrote none, the cross-check is unavailable; it never replaces the message counts.
 
+As implemented (#58, `rbench.trial.usage`):
+- One trial's usage is counted from one collection (shim log and transcripts). The normalization
+  step runs in its own project and counts its own collection; `usage.json` keeps both apart, each
+  with its list of reasons for being incomplete (empty when complete).
+- The expected sessions are those of the session launches: the launches the shims added flags to.
+  Each must have a session in the log (a hook or a binding), and each such session must have usage.
+- A record is counted once across all transcripts of the trial (Claude by `message.id`, Codex by
+  thread, turn and response id), so a fork's copied history and a review thread's usage in both
+  rollouts count once. A repeat with other counters keeps the larger of each.
+- Codex `token_usage_record` is read as `payload.{thread_id, turn_id, response_id}` and its
+  per-response `payload.usage`, the layout of a local rollout of a nearby version; at the pin it is
+  still the smoke check above. The only effective-model signal read is a `model_reroute` event in
+  the rollout, which flags the trial.
+- The stdout fallback's verified model is the one model that every launch of the thread names on its
+  argv (`-m`, `--model`, `-c model=`); a model set only in `config.toml` flags the trial. The runner
+  passes the stdout it captured per launch; the shims never capture it.
+
 **Alternative considered:** capture each process's final result event. Engines own stdout, so it is
 not always visible.
 
