@@ -3,15 +3,24 @@ retries; design D3, D5, D7).
 
 `run_attempt` holds the Codex login when the trial uses Codex, marks the trial `running`, starts
 its compose project under the name `project_name` gives it, puts the task's repository in,
-prepares the hermetic homes, runs the engine's launch under a time limit, copies out the shim log,
-the transcripts and the proxy log, audits the trial while the agent still runs, records its final
-state and removes the project.
+prepares the hermetic homes, writes the launch's files between the adapter's checkout hooks, runs
+the adapter's setup commands and then the engine's launch under a time limit, copies out the shim
+log, the transcripts and the proxy log, audits the trial while the agent still runs, records its
+final state and removes the project.
+
+A Markdown engine's report then goes through the pinned normalization step (design D9) in a
+second, fresh compose project (`normalizer_name`) of the engine's image, with no repository. Its
+shim log and transcripts land in `raw/normalizer/`, its record in `raw/normalization.json`, and
+its tokens, from the step's `modelUsage`, in `usage.json` under `normalization`. The audit has
+already run: the step sees only the engine's report, through a model with no tools.
 
 The final state:
+- `misconfigured` when a checkout hook gives a reason, before the engine starts;
 - `contaminated` when the audit says so, whatever the engine did;
 - `failed` with reason `timeout` when the engine ran past its limit;
 - `misconfigured` when the shim log shows the launch did not run as built;
-- `failed` with the adapter's reason for an engine error, invalid output or a PR not eligible;
+- `failed` with the adapter's reason for an engine error, invalid output or a PR not eligible,
+  or because the normalization step failed (not retried: that would rerun the engine);
 - `done` with the findings and the usage otherwise.
 
 An infrastructure error (`TrialError`, an archive that fails its check, a launch that did not
@@ -30,8 +39,16 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rbench.engines.normalization import Normalization, NormalizationError, normalize
 from rbench.engines.plain import Launch
-from rbench.ledger.plan import TRIALS_DIR, Image, Plan, PlannedConfiguration, PlannedTrial
+from rbench.ledger.plan import (
+    TRIALS_DIR,
+    Image,
+    Plan,
+    PlannedConfiguration,
+    PlannedEngine,
+    PlannedTrial,
+)
 from rbench.ledger.trials import RAW_DIR, set_state, store_results
 from rbench.run.adapters import Adapter, EngineFailure, EngineTrial, Output
 from rbench.tasks.archive import archive_name
@@ -43,7 +60,7 @@ from rbench.trial.hermetic import LOG_FILE, TRANSCRIPTS_DIR, collect, prepare, s
 from rbench.trial.images import TrialError, docker
 from rbench.trial.repository import REPO_DIR, agent_runner, prepare_repository
 from rbench.trial.sessions import SessionError, read_shim_log
-from rbench.trial.usage import UsageError, count_usage, usage_record
+from rbench.trial.usage import Usage, UsageError, count_usage, usage_record
 
 # limit: the spec sets no number; one hour per trial. Make it a matrix setting when an engine
 # needs more.
@@ -54,6 +71,7 @@ KILL_AFTER = 30
 HOST_GRACE = 60.0
 DOWN_TRIES = 3
 PROJECT_DIR = "project"  # the trial's compose file, outside raw/ so it outlives an attempt
+NORMALIZER_DIR = "normalizer"  # the normalization step's compose file, and its output in raw/
 STDOUT_FILE = "stdout"
 STDERR_FILE = "stderr"
 ANSWER_FILE = "answer"
@@ -87,6 +105,19 @@ def project_name(identity: str, trial_id: str) -> str:
     and free of task ids."""
     key = f"{identity}\0{trial_id}".encode()
     return f"rbench-{hashlib.sha256(key).hexdigest()[:16]}"
+
+
+def normalizer_name(identity: str, trial_id: str) -> str:
+    """The compose project name of the trial's normalization step, like `project_name`."""
+    return project_name(identity, f"{trial_id}/{NORMALIZER_DIR}")
+
+
+def label(plan: Plan, trial: PlannedTrial) -> str:
+    """How messages name `trial`: by its position in a run with hidden tasks, whose ids are
+    hidden (spec review-tasks)."""
+    if "hidden" in plan.task_sets:
+        return f"trial {plan.trials.index(trial) + 1}"
+    return f"trial {trial.id}"
 
 
 @contextmanager
@@ -187,6 +218,10 @@ def _attempt(ctx: RunContext, trial: PlannedTrial) -> str:
         homes = adapter.homes(engine_trial)
         prepare(project, shim_settings(homes.by_flag), homes.codex_config, homes.claude_settings)
         launch = adapter.launch(engine_trial)
+        if problems := _checkout(adapter, project, launch):
+            set_state(trial_dir, "misconfigured", "; ".join(problems))
+            return "misconfigured"
+        _setup(project, adapter.setup(engine_trial))
         status, timed_out = _run_engine(ctx, project, launch, raw)
         answer = _copy_answer(project, launch, raw)
         records = _collect(project, Image(engine.image, engine.clis), raw)
@@ -211,10 +246,18 @@ def _attempt(ctx: RunContext, trial: PlannedTrial) -> str:
             return "misconfigured"
         output = Output(status, _read(raw / STDOUT_FILE), answer, records, raw / TRANSCRIPTS_DIR)
         try:
-            findings = adapter.result(engine_trial, launch, output)
+            normalized = Usage({}, [])
+            if engine.output == "markdown":
+                report = adapter.report(engine_trial, launch, output)
+                normalization = _normalize(ctx, trial, engine, report, raw)
+                findings, normalized = normalization.findings, Usage(normalization.usage, [])
+            else:
+                findings = adapter.result(engine_trial, launch, output)
             usage = count_usage(records, raw / TRANSCRIPTS_DIR, _codex_stdout(launch, records, raw))
-            record = usage_record(usage)
+            record = usage_record(usage, normalized)
             _check_unicode(findings, record)
+            if engine.output == "markdown":
+                normalization.write_record(raw)
         except EngineFailure as e:
             set_state(trial_dir, "failed", e.reason)
             return "failed"
@@ -224,6 +267,61 @@ def _attempt(ctx: RunContext, trial: PlannedTrial) -> str:
             return "failed"
         store_results(trial_dir, findings, record)
         return "done"
+    finally:
+        _down(project)
+
+
+def _checkout(adapter: Adapter, project: TrialProject, launch: Launch) -> list[str]:
+    """Write the launch's files between the adapter's checkout hooks, each called only when the
+    adapter defines it (design D13); the reasons that make the trial `misconfigured`, after which
+    nothing more is written."""
+    run = agent_runner(project, "the trial's agent")
+    if (check := getattr(adapter, "check_checkout", None)) and (problems := check(run)):
+        return problems
+    for path, content in sorted(launch.files.items()):
+        done = project.exec_agent(["sh", "-c", WRITE, "sh", path], stdin=content.decode())
+        if done.returncode != 0:
+            raise TrialError(f"trial project {project.name}: cannot write {path} in the agent")
+    prepare_checkout = getattr(adapter, "prepare_checkout", None)
+    return prepare_checkout(run) if prepare_checkout else []
+
+
+def _setup(project: TrialProject, commands: tuple[tuple[str, ...], ...]) -> None:
+    """Run the adapter's setup commands in the agent. They install what the image holds, offline,
+    so a failure is the image's: an infrastructure error, which never quotes their output."""
+    for n, argv in enumerate(commands, 1):
+        done = project.exec_agent(list(argv))
+        if done.returncode != 0:
+            raise TrialError(
+                f"trial project {project.name}: setup command {n} ({argv[0]}) exited"
+                f" {done.returncode} in the agent"
+            )
+
+
+def _normalize(
+    ctx: RunContext, trial: PlannedTrial, engine: PlannedEngine, report: str, raw: Path
+) -> Normalization:
+    """Copy the findings of the engine's Markdown `report` in a fresh normalizer project, which
+    is removed after; its shim log and transcripts are kept in `raw/normalizer/`. A normalization
+    error fails the trial."""
+    who = label(ctx.plan, trial).removeprefix("trial ")
+    if not report.strip():
+        return Normalization([], [], {})  # no model runs (design D9)
+    project = TrialProject.create(
+        ctx.run_dir / TRIALS_DIR / trial.id / NORMALIZER_DIR,
+        normalizer_name(ctx.identity, trial.id),
+        engine.image,
+        ctx.proxy_image,
+        claude_token=ctx.claude_token(),
+    )
+    try:
+        project.up()
+        try:
+            return normalize(project, report, who)
+        except NormalizationError as e:
+            raise EngineFailure(f"normalization failed: {e}") from None
+        finally:
+            _collect(project, Image(engine.image, engine.clis), raw / NORMALIZER_DIR)
     finally:
         _down(project)
 
@@ -262,12 +360,8 @@ def _down(project: TrialProject) -> None:
 def _run_engine(
     ctx: RunContext, project: TrialProject, launch: Launch, raw: Path
 ) -> tuple[int, bool]:
-    """Write the launch's files, run it in the repository under the time limit; return its exit
-    status and whether it ran out of time. Its stdout and stderr land in `raw`."""
-    for path, content in sorted(launch.files.items()):
-        done = project.exec_agent(["sh", "-c", WRITE, "sh", path], stdin=content.decode())
-        if done.returncode != 0:
-            raise TrialError(f"trial project {project.name}: cannot write {path} in the agent")
+    """Run the launch in the repository under the time limit; return its exit status and whether
+    it ran out of time. Its stdout and stderr land in `raw`."""
     argv = ["sh", "-c", RUN, "sh", REPO_DIR, f"{KILL_AFTER}s", f"{ctx.timeout:g}s", *launch.argv]
     wait = ctx.timeout + KILL_AFTER + HOST_GRACE
     done = project.exec_agent(argv, stdin=launch.stdin, timeout=wait)

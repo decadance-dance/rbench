@@ -791,6 +791,14 @@ not judge them. It runs hermetic, like the judge: the same container setup and s
   from `engine`. The fields of the result (`structured_output`, `modelUsage` and its
   `inputTokens`, `outputTokens`, `cacheReadInputTokens` and `cacheCreationInputTokens`) are those
   of Claude Code 2.1.316. The smoke stage checks them against a live call.
+- As implemented in the executor (#127, `rbench.run.trial`): the step runs once the engine's
+  trial is audited and its launch checked, with the report the adapter's `report` gives. Its
+  project is named from the run identity and the trial like the trial's own, so startup removes it
+  as a leftover too. Its shim log and transcripts land in `raw/normalizer/`, outside the audit,
+  which has already run: the step sees only the engine's report, with no tools and no repository.
+  The record goes to `raw/normalization.json`. A normalization error makes the trial `failed`
+  with reason `normalization failed: ...`, naming no report text; it is not retried, since a
+  retry would rerun the engine.
 
 **Alternative considered:** ask each engine for JSON. That changes the engines being measured.
 
@@ -1018,7 +1026,12 @@ measure a different task from the engines, which all read the repository.
     before writing any of `Launch.files`, the second after writing them and before the engine
     starts. Each returns the reasons that make the trial `misconfigured`; on any, the executor
     writes nothing more and does not start the engine. They must be idempotent and touch nothing
-    but the adapter's own paths.
+    but the adapter's own paths. An adapter without them gets neither call (#127).
+  - Adapter setup: an adapter may also give setup commands, which the executor runs in the agent
+    after the checkout hooks and before the launch (#127; `ponytail-review` on Codex installs its
+    plugin so). They install what the image holds, offline, so one that exits non-zero is an
+    image failure: an infrastructure error, retried, whose message names the command's position
+    and program but never its output.
   - `misconfigured`: the shim log shows a Codex session launch with its own model, effort or
     profile, or `--ignore-user-config` (config.toml then did not apply), a rewrite other than the
     sandbox, or a Claude session without the Claude side's `--model` and `--effort`; and a

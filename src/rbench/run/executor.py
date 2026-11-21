@@ -34,7 +34,15 @@ from rbench.ledger.plan import (
 )
 from rbench.ledger.trials import read_status, set_state
 from rbench.run.adapters import ADAPTERS, Adapter
-from rbench.run.trial import PROJECT_DIR, RunContext, project_name, run_attempt
+from rbench.run.trial import (
+    NORMALIZER_DIR,
+    PROJECT_DIR,
+    RunContext,
+    label,
+    normalizer_name,
+    project_name,
+    run_attempt,
+)
 from rbench.tasks.archive import ArchiveError
 from rbench.tasks.hidden import HiddenConfig, hidden_config
 from rbench.tasks.loader import Task
@@ -69,14 +77,6 @@ def slots(plan: Plan, trial: PlannedTrial) -> frozenset[str]:
     return frozenset(configuration.providers) | (
         {"claude"} if engine.output == "markdown" else set()
     )
-
-
-def label(plan: Plan, trial: PlannedTrial) -> str:
-    """How messages name `trial`: by its position in a run with hidden tasks, whose ids are
-    hidden (spec review-tasks)."""
-    if "hidden" in plan.task_sets:
-        return f"trial {plan.trials.index(trial) + 1}"
-    return f"trial {trial.id}"
 
 
 def execute(
@@ -196,7 +196,12 @@ def remove_leftovers(run_dir: Path, plan: Plan, proxy_image: str) -> list[str]:
     """Remove the compose projects this run's trials left on the Docker daemon, such as after a
     crash; call it holding the run lock. Returns the names removed."""
     identity = run_identity(run_dir)
-    names = {project_name(identity, t.id): t for t in plan.trials}
+    # Each trial's own project, and its normalization step's: name -> (trial, its directory).
+    names = {
+        name(identity, t.id): (t, directory)
+        for t in plan.trials
+        for name, directory in ((project_name, PROJECT_DIR), (normalizer_name, NORMALIZER_DIR))
+    }
     found = set()
     for query in (["ps", "--all"], ["network", "ls"]):
         out = docker(
@@ -210,10 +215,10 @@ def remove_leftovers(run_dir: Path, plan: Plan, proxy_image: str) -> list[str]:
         found |= set(out.split()) & names.keys()
     configurations = {c.id: c for c in plan.configurations}
     for name in sorted(found):
-        trial = names[name]
+        trial, directory = names[name]
         engine = plan.engines[configurations[trial.configuration].settings["engine"]]
-        directory = run_dir / TRIALS_DIR / trial.id / PROJECT_DIR
-        TrialProject.create(directory, name, engine.image, proxy_image).down()
+        path = run_dir / TRIALS_DIR / trial.id / directory
+        TrialProject.create(path, name, engine.image, proxy_image).down()
     return sorted(found)
 
 
