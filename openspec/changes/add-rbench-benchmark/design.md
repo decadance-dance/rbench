@@ -897,11 +897,12 @@ measure a different task from the engines, which all read the repository.
     (Codex); `panel` gives its one model and effort to the three lenses. The adapter runs
     `rreview reviewed --sandbox external --json` with `--role-agent`, `--role-model` and
     `--role-effort` for each of rreview's five roles, so rreview passes the model and effort to
-    every pass and the shim adds none. It refuses an effort rreview does not accept (Codex:
-    `minimal` to `xhigh`).
+    every pass and the shim adds none. Planning refuses, like the launch, an effort rreview does
+    not accept (Codex: `minimal` to `xhigh`) and a panel of more than one model.
   - Findings are the `findings` of `result.json` on stdout, at rreview's default gate (P0-P2,
     confidence at least 0.5), each with its label `P<n>`; dropped candidates are not findings.
-    Exit 2, a result off rreview's format, or one that does not say `sandbox: external` fails
+    Exit 2, a result off rreview 0.1.1's types and rules, `findings` that are not its default
+    gate applied to `ungated_findings`, or a result that does not say `sandbox: external` fails
     the trial.
 - At 10 core tasks and one attempt, one round of all 33 configurations is 330 trials. R1 and R2 run
   all 33; R3 runs only the engine and role-model combinations on the quality-against-cost Pareto
