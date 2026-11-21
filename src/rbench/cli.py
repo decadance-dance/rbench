@@ -11,6 +11,7 @@ from pathlib import Path
 
 from rbench.ledger import load_plan, start_run
 from rbench.plan import command as plan_command
+from rbench.tasks import release
 
 
 class ExitCode(IntEnum):
@@ -38,7 +39,10 @@ COMMANDS = [
 TASK_COMMANDS = [
     ("import", "import tasks into a task set"),
     ("fetch", "download task source archives and check them against the manifest"),
+    ("release", "publish a public set version's source archives as a GitHub release"),
 ]
+TASK_ARGUMENTS = {"fetch": release.add_fetch_arguments, "release": release.add_release_arguments}
+TASK_RUN = {"fetch": release.run_fetch, "release": release.run_release}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,7 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
         dest="task_command", metavar="<task-command>", required=True
     )
     for name, help_ in TASK_COMMANDS:
-        task_commands.add_parser(name, help=help_, description=help_, **common)
+        sub = task_commands.add_parser(name, help=help_, description=help_, **common)
+        if name in TASK_ARGUMENTS:
+            TASK_ARGUMENTS[name](sub)
 
     for name, help_ in COMMANDS:
         sub = commands.add_parser(name, help=help_, description=help_, **common)
@@ -122,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
         return plan_command.run(args)
     if args.command == "run":
         return _run(args)
+    if args.command == "tasks" and args.task_command in TASK_RUN:
+        return TASK_RUN[args.task_command](args)
     name = " ".join(filter(None, [args.command, getattr(args, "task_command", None)]))
     print(f"rbench {name}: not implemented yet", file=sys.stderr)
     return ExitCode.ERROR

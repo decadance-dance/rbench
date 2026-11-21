@@ -19,7 +19,7 @@ def test_records_argv_and_stdin(fake_bin, tool):
 
     assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
     assert fake_bin.calls() == [
-        {"tool": tool, "argv": ["-p", "two words"], "stdin": "the prompt\n"}
+        {"tool": tool, "argv": ["-p", "two words"], "stdin": "the prompt\n", "cwd": os.getcwd()}
     ]
 
 
