@@ -278,6 +278,10 @@ def _load_task(task_dir: Path, hidden_canary_prefix: str | None, entry: str = ""
             f"{where('id')}: the {HIDDEN_ID_PREFIX!r} id prefix is reserved for, and required in,"
             f" the hidden set; this task is in {task_set!r}"
         )
+    if task_id == HIDDEN_ID_PREFIX:
+        raise TaskError(
+            f"{where('id')}: a hidden task id needs characters after the {HIDDEN_ID_PREFIX!r} prefix"
+        )
     pr = meta["pr"]
     if type(pr) is not int or pr < 1:
         raise TaskError(f"{where('pr')} must be a positive integer, not {_show(pr)}")

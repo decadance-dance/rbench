@@ -82,13 +82,13 @@ class Needle:
 
 @dataclass(frozen=True)
 class Hidden:
-    """The needles, canaries before ids before the prefix, and the secret values to redact."""
+    """The needles, canaries before ids before the prefix, and the values to redact."""
 
     needles: list[Needle]
     secrets: list[str]
 
     def redact(self, text: str) -> str:
-        for secret in self.secrets:
+        for secret in sorted(self.secrets, key=len, reverse=True):
             text = text.replace(secret, REDACTED)
         return text
 
@@ -100,7 +100,9 @@ def hidden_values(environ: Mapping[str, str], cwd: Path) -> Hidden:
     needles = [Needle.of(t.canary, f"the canary of hidden task {t.id}") for t in tasks]
     needles += [Needle.of(t.id, f"hidden task id {t.id}") for t in tasks]
     needles.append(Needle.of(config.canary_prefix, "the hidden canary prefix"))
-    return Hidden(needles, [t.canary for t in tasks] + [config.canary_prefix])
+    return Hidden(
+        needles, [t.canary for t in tasks] + [t.id for t in tasks] + [config.canary_prefix]
+    )
 
 
 def _git(cwd: Path, *args: str, input: bytes | None = None) -> bytes:
@@ -108,8 +110,8 @@ def _git(cwd: Path, *args: str, input: bytes | None = None) -> bytes:
         ["git", "-C", str(cwd), *args], check=False, capture_output=True, input=input
     )
     if result.returncode != 0:
-        detail = result.stderr.decode(errors="replace").strip()
-        raise GuardError(f"git {args[0]} failed in {cwd}: {detail}")
+        # Git's message may quote a URL, a path or a ref that holds a hidden value.
+        raise GuardError(f"git {args[0]} failed with exit code {result.returncode}")
     return result.stdout
 
 
@@ -197,19 +199,47 @@ def _advertised(cwd: Path, remote: str) -> list[str]:
     return sorted(line.split()[0].decode() for line in check.splitlines() if b"missing" not in line)
 
 
-def _changes(cwd: Path, parent: str | None, commit: str) -> dict[bytes, tuple[str, str | None]]:
-    """{new path: (new blob, old blob or None)} for each path `commit` adds or modifies."""
+@dataclass(frozen=True)
+class Change:
+    """A path a commit adds or modifies against one parent."""
+
+    new_path: bool
+    mode: str
+    blob: str
+    old_blob: str | None
+
+
+def _changes(cwd: Path, parent: str | None, commit: str) -> dict[bytes, Change]:
+    """{path: change} for each path `commit` adds or modifies against `parent`."""
     args = [parent, commit] if parent else ["--root", commit]
     fields = _git(cwd, "diff-tree", "-r", "-z", "-M", "--no-commit-id", *args).split(b"\0")
     changes, i = {}, 0
     while i < len(fields) and fields[i]:
         src_mode, dst_mode, src_sha, dst_sha, status = fields[i].decode().lstrip(":").split()
         paths = 2 if status[0] in "RC" else 1
-        if status[0] != "D" and dst_mode != GITLINK:
+        if status[0] != "D":
             old = None if status[0] == "A" or src_mode == GITLINK else src_sha
-            changes[fields[i + paths]] = (dst_sha, old)
+            changes[fields[i + paths]] = Change(status[0] in "ARC", dst_mode, dst_sha, old)
         i += 1 + paths
     return changes
+
+
+HUNK = re.compile(rb"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+
+def _added_lines(cwd: Path, change: Change) -> set[int] | None:
+    """The 1-based lines of the new blob a -U0 diff from the old one adds; None for all lines."""
+    if change.old_blob is None:
+        return None
+    diff = _git(
+        cwd, "diff", "-U0", "--text", "--no-color", "--no-ext-diff", change.old_blob, change.blob
+    )
+    added = set()
+    for line in diff.splitlines():
+        if m := HUNK.match(line):
+            start, count = int(m[1]), 1 if m[2] is None else int(m[2])
+            added.update(range(start, start + count))
+    return added
 
 
 def _commit_texts(cwd: Path, commit: str) -> list[tuple[str, bytes]]:
@@ -222,36 +252,56 @@ def _commit_texts(cwd: Path, commit: str) -> list[tuple[str, bytes]]:
     per_parent = [_changes(cwd, p, commit) for p in parents or [None]]
     # A path the commit leaves as one parent has it adds nothing.
     paths = sorted(set.intersection(*(set(c) for c in per_parent)))
-    blobs = _objects(cwd, (sha for c in per_parent for p in paths for sha in c[p] if sha))
+    blobs = _objects(cwd, (c[p].blob for c in per_parent for p in paths if c[p].mode != GITLINK))
     for path in paths:
         name = os.fsdecode(path)
-        known = {line for c in per_parent if c[path][1] for line in blobs[c[path][1]].split(b"\n")}
-        added = [line for line in blobs[per_parent[0][path][0]].split(b"\n") if line not in known]
-        texts.append((f"commit {commit[:12]} path {name}", path))
-        texts.append((f"commit {commit[:12]} file {name}", b"\n".join(added)))
+        changes = [c[path] for c in per_parent]
+        if all(c.new_path for c in changes):
+            texts.append((f"commit {commit[:12]} path {name}", path))
+        if changes[0].mode == GITLINK:
+            continue  # a submodule's commit is not in this repository
+        lines = blobs[changes[0].blob].split(b"\n")
+        added = set(range(1, len(lines) + 1))
+        for change in changes:
+            new = _added_lines(cwd, change)
+            if new is not None:
+                added &= new
+        # Occurrences count, not values: a second copy of a published line is added too.
+        text = b"\n".join(lines[n - 1] for n in sorted(added) if n <= len(lines))
+        texts.append((f"commit {commit[:12]} file {name}", text))
     return texts
 
 
-def push_findings(ref_lines: Sequence[str], remote: str, hidden: Hidden, cwd: Path) -> list[str]:
-    """What the pushed refs add from the hidden directory, from git's pre-push stdin lines."""
+def push_findings(
+    ref_lines: Sequence[str], destination: str, hidden: Hidden, cwd: Path
+) -> list[str]:
+    """What the pushed refs add from the hidden directory, from git's pre-push stdin lines.
+
+    `destination` is the URL git pushes to, which may differ from the remote's fetch URL.
+    """
     pushes = []
     for line in ref_lines:
         if line.strip():
             _, local_sha, remote_ref, remote_sha = line.split()
-            if set(local_sha) != {"0"}:  # a deletion pushes no content
-                pushes.append((local_sha, remote_ref, remote_sha))
+            # A deletion pushes no content, an unchanged ref nothing new.
+            if set(local_sha) != {"0"} and local_sha != remote_sha:
+                pushes.append((local_sha, remote_ref))
     if not pushes:
         return []
     # What the destination advertises is already there; a stale tracking ref proves nothing.
-    exclude = [f"^{sha}" for sha in _advertised(cwd, remote)]
+    exclude = [f"^{sha}" for sha in _advertised(cwd, destination)]
     findings = []
-    for local_sha, remote_ref, remote_sha in pushes:
-        texts = [(f"the ref name {remote_ref}", remote_ref.encode())]
-        tag = local_sha
-        while local_sha != remote_sha and _git(cwd, "cat-file", "-t", tag).strip() == b"tag":
-            raw = _objects(cwd, [tag])[tag]
-            texts.append((f"the annotated tag {tag[:12]} for {remote_ref}", raw))
-            tag = raw.split(b"\n", 1)[0].split()[1].decode()
+    for local_sha, remote_ref in pushes:
+        ref = hidden.redact(remote_ref)
+        texts = [(f"the ref name {ref}", remote_ref.encode())]
+        target = local_sha
+        while (kind := _git(cwd, "cat-file", "-t", target).strip().decode()) == "tag":
+            raw = _objects(cwd, [target])[target]
+            texts.append((f"the annotated tag {target[:12]} for {ref}", raw))
+            target = raw.split(b"\n", 1)[0].split()[1].decode()
+        if kind != "commit":
+            findings.append(f"{ref} points at a {kind}; the guard scans only commits and tags")
+            continue
         stdin = "\n".join([local_sha, *exclude]) + "\n"
         commits = _git(cwd, "rev-list", "--stdin", input=stdin.encode()).decode().split()
         for commit in commits:
@@ -286,12 +336,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 return 0
             hidden = hidden_values(os.environ, cwd)
-            findings = push_findings(sys.stdin.read().splitlines(), args[1], hidden, cwd)
+            findings = push_findings(sys.stdin.read().splitlines(), args[2], hidden, cwd)
             for finding in findings:
                 print(f"pre-push: rejected: {finding}", file=sys.stderr)
             return 1 if findings else 0
-    except (GuardError, TaskError, OSError) as e:
+    except (GuardError, TaskError) as e:
         print(f"publication guard: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"publication guard: cannot read a file: {e.strerror}", file=sys.stderr)
         return 1
     print("usage: python -m rbench.tasks.guard public | pre-push <remote> <url>", file=sys.stderr)
     return 2

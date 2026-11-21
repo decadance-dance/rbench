@@ -235,7 +235,8 @@ def remote_head(repo: Path, ref: str = "refs/heads/main") -> str:
 
 def pre_push(monkeypatch, capsys, *lines: str) -> tuple[int, str]:
     monkeypatch.setattr(sys, "stdin", io.StringIO("".join(f"{line}\n" for line in lines)))
-    code = main(["pre-push", "origin", "unused"])
+    url = git(Path.cwd(), "remote", "get-url", "--push", "origin")
+    code = main(["pre-push", "origin", url])
     out = capsys.readouterr()
     assert out.out == ""
     return code, out.err
@@ -338,7 +339,7 @@ def test_pre_push_checks_messages_and_new_branch_names(pushing, monkeypatch, cap
     ref = f"refs/heads/feature/{HID}"
     code, err = pre_push(monkeypatch, capsys, f"{ref} {tip} {ref} {ZERO}")
     assert code == 1
-    assert f"the ref name {ref} adds hidden task id {HID}" in err
+    assert f"the ref name refs/heads/feature/<redacted> adds hidden task id {HID}" in err
     assert "message adds hidden task id" in err
 
 
@@ -369,7 +370,7 @@ def test_pre_push_checks_new_paths_only(pushing, monkeypatch, capsys):
     commit(repo, {f"tasks/{HID}/note.txt": "clean\n"})
     code, err = push_main(repo, monkeypatch, capsys)
     assert code == 1
-    assert f"path tasks/{HID}/note.txt adds hidden task id {HID}" in err
+    assert f"path tasks/<redacted>/note.txt adds hidden task id {HID}" in err
 
 
 def test_pre_push_scans_an_annotated_tag_message(pushing, monkeypatch, capsys):
@@ -425,3 +426,148 @@ def test_installed_hook_blocks_a_real_push(pushing, tmp_path):
     assert pushed.returncode != 0
     assert f"adds hidden task id {HID}" in pushed.stderr
     assert git(tmp_path / "remote.git", "rev-parse", "main") != git(repo, "rev-parse", "HEAD")
+
+
+# Round 2 repros
+
+
+def test_local_public_check_redacts_real_ids_in_paths(tmp_path, monkeypatch, capsys):
+    hidden, _ = synthetic_hidden(tmp_path)
+    repo = git_repo(tmp_path / "repo")
+    tracked(repo, {f"x{HID}.txt": "clean\n"})
+    assert public_findings(repo) == []  # a letter before the prefix: not an id for CI
+    monkeypatch.setenv(HIDDEN_DIR_ENV, str(hidden))
+    code, err = run_public(repo, monkeypatch, capsys)
+    assert code == 1
+    assert "x<redacted>.txt: the path holds a task id or value from the hidden directory" in err
+    assert HID not in err
+
+
+def test_pre_push_looks_up_the_push_url_not_the_fetch_url(pushing, tmp_path):
+    repo, hidden, _ = pushing
+    receiver = tmp_path / "receiver.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(receiver)], check=True)
+    commit(repo, {"b.txt": f"{HID}\n"})
+    git(repo, "push", "-q", "origin", "main")  # the fetch repository has it, the receiver not
+    git(repo, "remote", "set-url", "--push", "origin", str(receiver))
+    hook = repo / ".git" / "hooks" / "pre-push"
+    hook.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m rbench.tasks.guard pre-push "$@"\n')
+    hook.chmod(0o755)
+    env = {**os.environ, HIDDEN_DIR_ENV: str(hidden)}
+    pushed = subprocess.run(
+        ["git", "-C", str(repo), "push", "origin", "main"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert pushed.returncode != 0
+    assert f"adds hidden task id {HID}" in pushed.stderr
+    assert git(receiver, "for-each-ref") == ""
+
+
+def test_pre_push_git_failures_fail_closed_without_quoting_git(pushing, monkeypatch, capsys):
+    repo, _, _ = pushing
+    tip = commit(repo, {"b.txt": "x\n"})
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(f"refs/heads/main {tip} refs/heads/main {ZERO}\n")
+    )
+    missing = repo.parent / f"missing-{HIDDEN}.git"
+    code = main(["pre-push", "origin", str(missing)])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert err == "publication guard: git ls-remote failed with exit code 128\n"
+
+
+def test_pre_push_counts_a_second_copy_of_a_published_line(pushing, monkeypatch, capsys):
+    repo, _, _ = pushing
+    commit(repo, {"a.txt": f"base\n{HID}\n"})
+    git(repo, "push", "-q", "origin", "main")
+    commit(repo, {"a.txt": f"base\n{HID}\n{HID}\n"})
+    code, err = push_main(repo, monkeypatch, capsys)
+    assert code == 1
+    assert f"file a.txt adds hidden task id {HID}" in err
+
+
+def test_pre_push_counts_a_second_copy_added_by_a_merge(pushing, monkeypatch, capsys):
+    repo, _, _ = pushing
+    commit(repo, {"a.txt": f"{HID}\n"})
+    git(repo, "push", "-q", "origin", "main")
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-q", "-b", "side")
+    commit(repo, {"s.txt": "side\n"})
+    git(repo, "push", "-q", "origin", "side")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--no-ff", "--no-commit", "side")
+    tracked(repo, {"a.txt": f"{HID}\n{HID}\n"})
+    git(repo, "commit", "-q", "-m", "merge")
+    assert git(repo, "rev-parse", "HEAD^1") == base
+    code, err = push_main(repo, monkeypatch, capsys)
+    assert code == 1
+    assert f"file a.txt adds hidden task id {HID}" in err
+
+
+def test_pre_push_ignores_an_unchanged_published_path(pushing, monkeypatch, capsys):
+    repo, _, _ = pushing
+    commit(repo, {f"tasks/{HID}.txt": "one\n"})
+    git(repo, "push", "-q", "origin", "main")
+    commit(repo, {f"tasks/{HID}.txt": "one\ntwo\n"})
+    assert push_main(repo, monkeypatch, capsys) == (0, "")
+
+
+def test_pre_push_checks_a_new_gitlink_path(pushing, monkeypatch, capsys):
+    repo, _, canary = pushing
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "update-index", "--add", "--cacheinfo", f"160000,{base},plugin-{canary}")
+    commit(repo, {})
+    code, err = push_main(repo, monkeypatch, capsys)
+    assert code == 1
+    assert "path plugin-<redacted> adds the canary of hidden task" in err
+    assert canary not in err
+
+
+def test_pre_push_rejects_a_tag_on_a_blob(pushing, monkeypatch, capsys):
+    repo, _, canary = pushing
+    blob = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+        input=canary,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    git(repo, "tag", "-a", "blob-tag", "-m", "clean", blob)
+    tag = git(repo, "rev-parse", "blob-tag")
+    line = f"refs/tags/blob-tag {tag} refs/tags/blob-tag {ZERO}"
+    code, err = pre_push(monkeypatch, capsys, line)
+    assert code == 1
+    assert "refs/tags/blob-tag points at a blob; the guard scans only commits and tags" in err
+
+
+def test_bin_check_hides_other_steps_output_when_the_guard_fails(tmp_path):
+    """bin/check with a fake uv: every step runs, but after a guard failure none prints."""
+    root = tmp_path / "checkout"
+    (root / "bin").mkdir(parents=True)
+    (root / "pyproject.toml").write_text("")
+    check = root / "bin" / "check"
+    check.write_bytes((Path(__file__).resolve().parents[1] / "bin" / "check").read_bytes())
+    check.chmod(0o755)
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    log = tmp_path / "uv.log"
+    (fakes / "uv").write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{log}"\n'
+        'case "$*" in *rbench.tasks.guard*) echo "guard: redacted finding" >&2; exit "$GUARD";; esac\n'
+        f'echo "quoted {HID}"; echo "quoted {HID}" >&2; exit 1\n'
+    )
+    (fakes / "uv").chmod(0o755)
+    for guard, hidden_output in (("1", False), ("0", True)):
+        log.unlink(missing_ok=True)
+        env = {**os.environ, "PATH": f"{fakes}{os.pathsep}{os.environ['PATH']}", "GUARD": guard}
+        run = subprocess.run([str(check)], check=False, capture_output=True, text=True, env=env)
+        assert run.returncode == 1
+        assert len(log.read_text().splitlines()) == 4  # every step ran
+        assert (HID in run.stdout + run.stderr) is hidden_output
+        assert (
+            "failed, output hidden: uv run --locked pytest -q" in run.stderr
+        ) is not hidden_output
