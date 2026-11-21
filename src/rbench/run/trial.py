@@ -1,26 +1,32 @@
 """One attempt of one trial in a fresh sandbox (spec trial-isolation; spec run-ledger, Failures and
 retries; design D3, D5, D7).
 
-`run_attempt` marks the trial `running`, starts its compose project under the name
-`project_name` gives it, puts the task's repository in, prepares the hermetic homes, runs the
-engine's launch under a time limit, copies out the shim log, the transcripts and the proxy log,
-audits the trial while the agent still runs, records its final state and removes the project.
+`run_attempt` holds the Codex login when the trial uses Codex, marks the trial `running`, starts
+its compose project under the name `project_name` gives it, puts the task's repository in,
+prepares the hermetic homes, runs the engine's launch under a time limit, copies out the shim log,
+the transcripts and the proxy log, audits the trial while the agent still runs, records its final
+state and removes the project.
 
 The final state:
 - `contaminated` when the audit says so, whatever the engine did;
 - `failed` with reason `timeout` when the engine ran past its limit;
-- `failed` with the adapter's reason for an engine error, invalid output or a PR not eligible;
 - `misconfigured` when the shim log shows the launch did not run as built;
+- `failed` with the adapter's reason for an engine error, invalid output or a PR not eligible;
 - `done` with the findings and the usage otherwise.
 
-An infrastructure error (`TrialError`, an archive that fails its check) records nothing final: it
-propagates, and the executor retries the attempt from the start.
+An infrastructure error (`TrialError`, an archive that fails its check, a launch that did not
+complete in the agent) records nothing final: it propagates, and the executor retries the attempt
+from the start. Reasons recorded in the ledger never quote the engine's output.
 """
 
+import fcntl
 import hashlib
+import json
+import os
+import re
 import shutil
-import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,6 +35,7 @@ from rbench.ledger.plan import TRIALS_DIR, Image, Plan, PlannedConfiguration, Pl
 from rbench.ledger.trials import RAW_DIR, set_state, store_results
 from rbench.run.adapters import Adapter, EngineFailure, EngineTrial, Output
 from rbench.tasks.archive import archive_name
+from rbench.tasks.hidden import HiddenConfig
 from rbench.tasks.loader import Task
 from rbench.trial.audit import audit_trial, record_audit
 from rbench.trial.compose import TrialProject
@@ -43,6 +50,9 @@ from rbench.trial.usage import UsageError, count_usage, usage_record
 TIMEOUT = 3600.0
 # After the limit, `timeout` sends TERM to the engine's process group, then KILL this much later.
 KILL_AFTER = 30
+# How long past the limit and KILL_AFTER the host waits for `docker compose exec` to return.
+HOST_GRACE = 60.0
+DOWN_TRIES = 3
 PROJECT_DIR = "project"  # the trial's compose file, outside raw/ so it outlives an attempt
 STDOUT_FILE = "stdout"
 STDERR_FILE = "stderr"
@@ -51,13 +61,38 @@ PROXY_LOG_FILE = "proxy.log"
 # Writes stdin to "$1", creating its directory, as the agent's user.
 WRITE = 'mkdir -p "$(dirname "$1")" && cat > "$1"'
 REGULAR = '[ -f "$1" ] && [ ! -L "$1" ]'
+# Runs the engine in "$1" under `timeout -k "$2" "$3"` and ends stderr with its own line:
+# `rbench-launch <status> <seconds>`, the launch's exit status and its time inside the agent. Only
+# the last line counts, so an engine printing such a line earlier changes nothing; none means the
+# launch never completed in the agent, a Docker failure.
+MARK = "rbench-launch"
+RUN = (
+    'cd "$1" || exit; k=$2 l=$3; shift 3; t0=$(date +%s); timeout -k "$k" "$l" "$@"; s=$?;'
+    f' printf "\\n{MARK} %s %s\\n" "$s" "$(($(date +%s) - t0))" >&2; exit "$s"'
+)
+_LAUNCHED = re.compile(rf"{MARK} (\d+) (\d+)")
+# `timeout`'s status when the limit ended the engine: by TERM, or by KILL after KILL_AFTER.
+TIMED_OUT = (124, 128 + 9)
 
 
-def project_name(run_dir: Path, trial_id: str) -> str:
-    """The trial's compose project name: unique to the run (its resolved directory) and the trial
-    on the Docker daemon, the same for every attempt, and free of task ids."""
-    key = f"{Path(run_dir).resolve()}\0{trial_id}".encode()
+def project_name(identity: str, trial_id: str) -> str:
+    """The trial's compose project name: unique to the run (its persisted `identity`) and the
+    trial on the Docker daemon, the same for every attempt and wherever the run directory moves,
+    and free of task ids."""
+    key = f"{identity}\0{trial_id}".encode()
     return f"rbench-{hashlib.sha256(key).hexdigest()[:16]}"
+
+
+@contextmanager
+def login_lock(home: Path) -> Iterator[None]:
+    """Hold the Codex login home `home` exclusively, against every runner on this host: two trials
+    on one login would race its token refresh (design D5). Waits for the holder to finish."""
+    fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # releases the lock
 
 
 @dataclass
@@ -66,6 +101,7 @@ class RunContext:
     `all_tasks` is every loaded task, whose canaries the audit looks for."""
 
     run_dir: Path
+    identity: str
     plan: Plan
     engines_dir: Path
     tasks: Mapping[str, Task]
@@ -75,6 +111,7 @@ class RunContext:
     adapters: Mapping[str, Adapter]
     claude_token: Callable[[], str]
     codex_login: Path | None = None
+    hidden: HiddenConfig | None = None
     timeout: float = TIMEOUT
     configurations: dict[str, PlannedConfiguration] = field(init=False)
 
@@ -84,6 +121,15 @@ class RunContext:
 
 def run_attempt(ctx: RunContext, trial: PlannedTrial) -> str:
     """Run one attempt of `trial` and record its final state, which it returns."""
+    if "codex" not in ctx.configurations[trial.configuration].providers:
+        return _attempt(ctx, trial)
+    if ctx.codex_login is None:
+        raise TrialError("the trial uses Codex, but the run has no Codex login")
+    with login_lock(ctx.codex_login):
+        return _attempt(ctx, trial)
+
+
+def _attempt(ctx: RunContext, trial: PlannedTrial) -> str:
     trial_dir = ctx.run_dir / TRIALS_DIR / trial.id
     raw = trial_dir / RAW_DIR
     configuration = ctx.configurations[trial.configuration]
@@ -101,7 +147,7 @@ def run_attempt(ctx: RunContext, trial: PlannedTrial) -> str:
     clis = set(configuration.providers)
     project = TrialProject.create(
         trial_dir / PROJECT_DIR,
-        project_name(ctx.run_dir, trial.id),
+        project_name(ctx.identity, trial.id),
         engine.image,
         ctx.proxy_image,
         claude_token=ctx.claude_token() if "claude" in clis else None,
@@ -109,9 +155,7 @@ def run_attempt(ctx: RunContext, trial: PlannedTrial) -> str:
     )
     try:
         project.up()
-        repository = prepare_repository(
-            project, task, ctx.archives / archive_name(task.archive_sha256), trial_dir
-        )
+        repository = prepare_repository(project, task, _archive(ctx, task), trial_dir)
         engine_trial = EngineTrial(configuration.settings, engine, ctx.engines_dir, task.pr)
         homes = adapter.homes(engine_trial)
         prepare(project, shim_settings(homes.by_flag), homes.codex_config, homes.claude_settings)
@@ -142,16 +186,50 @@ def run_attempt(ctx: RunContext, trial: PlannedTrial) -> str:
         try:
             findings = adapter.result(engine_trial, launch, output)
             usage = count_usage(records, raw / TRANSCRIPTS_DIR, _codex_stdout(launch, records, raw))
+            record = usage_record(usage)
+            _check_unicode(findings, record)
         except EngineFailure as e:
             set_state(trial_dir, "failed", e.reason)
             return "failed"
-        except UsageError as e:
-            set_state(trial_dir, "failed", f"invalid output: {e}")
+        except UsageError:
+            # Its message quotes transcript paths, ids and models, all engine output.
+            set_state(trial_dir, "failed", "invalid output: the transcripts' usage is malformed")
             return "failed"
-        store_results(trial_dir, findings, usage_record(usage))
+        store_results(trial_dir, findings, record)
         return "done"
     finally:
-        project.down()
+        _down(project)
+
+
+def _archive(ctx: RunContext, task: Task) -> Path:
+    """The task's source archive: a hidden task's in the hidden directory, next to the task, and
+    a public task's in the archive directory (design D11)."""
+    name = archive_name(task.archive_sha256)
+    if task.set != "hidden":
+        return ctx.archives / name
+    if ctx.hidden is None:
+        raise ValueError("the run has hidden tasks but no hidden directory")
+    return ctx.hidden.inside(name)
+
+
+def _check_unicode(findings: list[dict], usage: dict) -> None:
+    """Refuse output the ledger cannot store as UTF-8, such as a lone surrogate a JSON escape
+    gave, as invalid output rather than a ledger write that stops the run."""
+    try:
+        json.dumps([findings, usage], ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        raise EngineFailure("invalid output: a string in it is not valid Unicode") from None
+
+
+def _down(project: TrialProject) -> None:
+    """Remove the project, trying `DOWN_TRIES` times; the last failure propagates."""
+    for n in range(1, DOWN_TRIES + 1):
+        try:
+            project.down()
+            return
+        except TrialError:
+            if n == DOWN_TRIES:
+                raise
 
 
 def _run_engine(
@@ -163,16 +241,21 @@ def _run_engine(
         done = project.exec_agent(["sh", "-c", WRITE, "sh", path], stdin=content.decode())
         if done.returncode != 0:
             raise TrialError(f"trial project {project.name}: cannot write {path} in the agent")
-    limit = f"{ctx.timeout:g}s"
-    argv = ["env", "-C", REPO_DIR, "timeout", "-k", f"{KILL_AFTER}s", limit, *launch.argv]
-    started = time.monotonic()
-    # limit: no host-side limit on the docker client itself; `timeout` ends the engine, and a
-    # docker call that hangs past it hangs the slot. Add one if that is ever seen.
-    done = project.exec_agent(argv, stdin=launch.stdin)
-    elapsed = time.monotonic() - started
+    argv = ["sh", "-c", RUN, "sh", REPO_DIR, f"{KILL_AFTER}s", f"{ctx.timeout:g}s", *launch.argv]
+    wait = ctx.timeout + KILL_AFTER + HOST_GRACE
+    done = project.exec_agent(argv, stdin=launch.stdin, timeout=wait)
     (raw / STDOUT_FILE).write_text(done.stdout, encoding="utf-8")
     (raw / STDERR_FILE).write_text(done.stderr, encoding="utf-8")
-    return done.returncode, elapsed >= ctx.timeout
+    last = done.stderr.rstrip("\n").rpartition("\n")[2]
+    if not (launched := _LAUNCHED.fullmatch(last)):
+        # Docker's own error, or the agent's: nothing of the engine is quoted.
+        raise TrialError(
+            f"trial project {project.name}: the engine's launch did not complete in the agent"
+            f" (docker exec exited {done.returncode})"
+        )
+    status, seconds = int(launched[1]), int(launched[2])
+    # `date +%s` counts whole seconds, so a limit reached shows at least its whole part.
+    return status, status in TIMED_OUT and seconds >= int(ctx.timeout)
 
 
 def _collect(project: TrialProject, image: Image, raw: Path) -> list[dict]:

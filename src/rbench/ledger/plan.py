@@ -4,6 +4,7 @@
 
     plan.json            the frozen plan, written once when the run is created
     ledger.lock          the run's lock file; taking it is resume's job
+    identity             random hex naming the run's compose projects (`run_identity`)
     trials/<trial-id>/   one per trial, pending or reused as done (see `rbench.ledger.trials`)
 
 The plan is one round of a matrix: its configurations, the version of every task set and the
@@ -28,6 +29,7 @@ import itertools
 import json
 import os
 import re
+import secrets
 import shutil
 import tempfile
 import time
@@ -78,6 +80,8 @@ from rbench.tasks.manifest import (
 PLAN_FORMAT = 1
 PLAN_FILE = "plan.json"
 LOCK_FILE = "ledger.lock"
+IDENTITY_FILE = "identity"
+_IDENTITY = re.compile(r"[0-9a-f]{32}")
 TRIALS_DIR = "trials"
 PUBLIC_SETS = ("reviewbench", "ours")
 PIN_KINDS = ("git", "version", "sha256", "cli")
@@ -671,6 +675,7 @@ def create_run(
             _check_hidden_run_dir(tmp)
         atomic_write(tmp / PLAN_FILE, dump_json(dataclasses.asdict(plan)))
         atomic_write(tmp / LOCK_FILE, b"")
+        atomic_write(tmp / IDENTITY_FILE, secrets.token_hex(16) + "\n")
         (tmp / TRIALS_DIR).mkdir(mode=0o700)
         for trial in plan.trials:
             trial_dir = tmp / TRIALS_DIR / trial.id
@@ -695,6 +700,23 @@ def create_run(
             raise LedgerError(f"cannot create the run with hidden tasks: {e.strerror}") from None
         raise
     return run_dir
+
+
+def run_identity(run_dir: Path) -> str:
+    """The run's identity, random and kept in the run directory, so neither another client using
+    the same path nor a move of the run changes what it names (design D3). A run created before
+    the file existed gets one now; call it holding the run lock, before the first trial starts."""
+    path = Path(run_dir) / IDENTITY_FILE
+    try:
+        identity = path.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        identity = secrets.token_hex(16)
+        atomic_write(path, identity + "\n")
+    except (OSError, UnicodeDecodeError) as e:
+        raise LedgerError(f"{path}: cannot read the run identity ({type(e).__name__})") from None
+    if not _IDENTITY.fullmatch(identity):
+        raise LedgerError(f"{path}: not a run identity; expected 32 hex digits")
+    return identity
 
 
 def load_plan(run_dir: Path) -> Plan:

@@ -170,11 +170,13 @@ class TrialProject:
             raise TrialError(f"{e}; removed what it created") from e
 
     def exec_agent(
-        self, argv: list[str], stdin: str | None = None
+        self, argv: list[str], stdin: str | None = None, timeout: float | None = None
     ) -> subprocess.CompletedProcess[str]:
         """Run `argv` in the agent container; its exit status is the caller's to judge.
 
-        Its output has the trial's Claude token redacted.
+        Its output has the trial's Claude token redacted. With `timeout`, a docker call still
+        running after that many seconds is killed and refused, so a stuck exec cannot hold the
+        trial's slot.
         """
         file = str(self.directory / COMPOSE_FILE)
         try:
@@ -188,7 +190,12 @@ class TrialProject:
                 input=stdin,
                 stdin=None if stdin is not None else subprocess.DEVNULL,
                 env=host_env(),
+                timeout=timeout,
             )
+        except subprocess.TimeoutExpired:
+            raise TrialError(
+                f"trial project {self.name}: docker exec did not return within {timeout:g}s"
+            ) from None
         except OSError as e:
             raise TrialError(
                 f"trial project {self.name}: cannot run docker: {e.strerror}"

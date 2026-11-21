@@ -8,10 +8,12 @@ stdout, the shim log, the transcripts and the proxy log. Every task, id and outp
 
 import dataclasses
 import json
+import os
 import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -33,11 +35,13 @@ from rbench.ledger import (
     set_state,
     start_run,
 )
-from rbench.ledger.plan import PlannedTrial
+from rbench.ledger.plan import IDENTITY_FILE, PlannedTrial, run_identity
 from rbench.ledger.resume import recover_trials
 from rbench.run import executor
 from rbench.run.adapters import ADAPTERS, EngineFailure, EngineTrial, NotEligible, Output, Plain
 from rbench.run.trial import project_name
+from rbench.tasks.hidden import HiddenConfig
+from rbench.trial.compose import TrialProject
 from rbench.trial.hermetic import POLICY
 from rbench.trial.images import TrialError
 from rbench.trial.repository import RepositoryState
@@ -52,16 +56,19 @@ ROLLOUT = "/home/node/.codex/sessions/2026/11/21/rollout-t1.jsonl"
 OBJECTS = 6
 COUNT_OBJECTS = f"count: 0\nsize: 0\nin-pack: {OBJECTS}\npacks: 1\nsize-pack: 1\n"
 COUNT_OBJECTS += "prune-packable: 0\ngarbage: 0\nsize-garbage: 0\n"
-ENGINE = "agent env -C /rbench/repo timeout"
+ENGINE = "agent sh -c " + trial_module.RUN
+CODEX = "gpt-6.2-sol"
+MARKER = "zz-synthetic-marker-41"
 CLAUDE_FLAGS = POLICY["claude"]["flags"]
 
 
-def make_run(root: Path, models: list[str]) -> Path:
+def make_run(root: Path, models: list[str], run_id: str = "r") -> Path:
     """A run of `plain` on `models` over the core tasks, created as `rbench run` creates it."""
-    argv = cli_inputs(root)
-    matrix = Path(argv[1])
-    text = matrix.read_text().replace(f'["{OPUS}", "{SONNET}"]', json.dumps(models))
-    matrix.write_text(text.replace("{ claude = 1000 }", "{ claude = 1000, codex = 1000 }"))
+    matrix = root / "matrices" / "m.toml"
+    if not matrix.exists():
+        cli_inputs(root)
+        text = matrix.read_text().replace(f'["{OPUS}", "{SONNET}"]', json.dumps(models))
+        matrix.write_text(text.replace("{ claude = 1000 }", "{ claude = 1000, codex = 1000 }"))
     return start_run(
         matrix,
         "r1",
@@ -69,7 +76,7 @@ def make_run(root: Path, models: list[str]) -> Path:
         engines_dir=root / "engines",
         tasks_root=root / "tasks",
         runs_dir=root / "runs",
-        run_id="r",
+        run_id=run_id,
     )
 
 
@@ -138,17 +145,52 @@ def test_trials_on_one_codex_login_run_one_after_the_other(checkout):
     assert overlap([s for s in attempts.spans if s[0] not in codex]) == 2  # Claude: default 2
 
 
+def completed_spread(run_dir: Path, plan: Plan, group: frozenset[str]) -> float:
+    """How far apart, in attempts, the configurations of a provider group are by their trials
+    the ledger holds as final."""
+    trials = [t for t in plan.trials if executor.slots(plan, t) == group]
+    done: dict[str, int] = {t.configuration: 0 for t in trials}
+    for t in trials:
+        if read_status(run_dir / TRIALS_DIR / t.id).state not in (
+            "pending",
+            "running",
+            "interrupted",
+        ):
+            done[t.configuration] += 1
+    tasks = len(plan.tasks)
+    return (max(done.values()) - min(done.values())) / tasks
+
+
 @pytest.mark.real_executor
-def test_a_run_stopped_at_40_percent_keeps_each_provider_group_within_one_attempt(checkout):
-    run_dir = make_run(checkout, [OPUS, SONNET, "gpt-6.2-sol"])
-    plan = with_attempts(run_dir, 3)
-    stop_at = plan.trials[int(len(plan.trials) * 0.4)]
+@pytest.mark.parametrize("one_task", [False, True])
+def test_a_run_stopped_at_40_percent_keeps_each_provider_group_within_one_attempt(
+    checkout, one_task
+):
+    # A trial stuck in its retries holds one slot while the other slot could run ahead; the
+    # ledger is checked whenever a trial starts, as a run killed at that moment would leave it.
+    run_dir = make_run(checkout, [OPUS, SONNET, CODEX])
+    plan = with_attempts(run_dir, 5 if one_task else 3)
+    if one_task:  # two Claude configurations (A, B), five attempts, two slots (review of #126)
+        plan = dataclasses.replace(
+            plan,
+            tasks=plan.tasks[:1],
+            trials=tuple(t for t in plan.trials if t.task == plan.tasks[0].id),
+        )
+    claude = [t for t in plan.trials if executor.slots(plan, t) == {"claude"}]
+    stop_at = claude[1] if one_task else plan.trials[int(len(plan.trials) * 0.4)]
     started: list[str] = []
+    spreads: list[float] = []
     ran = Attempts(run_dir, seconds=0.01)
+    lock = threading.Lock()
 
     def attempt(trial):
-        started.append(trial.id)
+        with lock:
+            started.append(trial.id)
+            for group in ({"claude"}, {"codex"}):
+                spreads.append(completed_spread(run_dir, plan, frozenset(group)))
         if trial == stop_at:
+            if started.count(trial.id) == 1:
+                time.sleep(0.5)  # stuck: the other slots stay free meanwhile
             raise TrialError("docker went away")
         return ran(trial)
 
@@ -158,48 +200,66 @@ def test_a_run_stopped_at_40_percent_keeps_each_provider_group_within_one_attemp
     assert started.count(stop_at.id) == 4  # the first try and 3 retries
     assert read_status(run_dir / TRIALS_DIR / stop_at.id).state == "interrupted"
     for group in ({"claude"}, {"codex"}):
+        spreads.append(completed_spread(run_dir, plan, frozenset(group)))
+    assert max(spreads) <= 1
+    for group in ({"claude"}, {"codex"}):
         trials = [t for t in plan.trials if executor.slots(plan, t) == group]
         ran_ = [t for t in trials if t.id in started]
         assert ran_ == trials[: len(ran_)]  # a prefix in plan order
-        attempts_done = {}
-        for c in {t.configuration for t in trials}:
-            done = [t for t in ran_ if t.configuration == c]
-            per_attempt = len(plan.tasks)
-            attempts_done[c] = len(done) / per_attempt
-        assert max(attempts_done.values()) - min(attempts_done.values()) <= 1
     assert len(started) < len(plan.trials) + 3  # nothing new started after the stop
 
 
 @pytest.mark.real_executor
-def test_an_infrastructure_error_is_retried_and_an_error_after_the_final_state_is_not(checkout):
+def test_an_infrastructure_error_is_retried(checkout):
     run_dir = make_run(checkout, [OPUS])
     plan = load_plan(run_dir)
-    first, second = plan.trials[:2]
-    tries = {first.id: 0, second.id: 0}
+    first = plan.trials[0]
+    tries = []
     lines: list[str] = []
 
     def attempt(trial):
-        tries[trial.id] += 1
+        tries.append(trial.id)
         trial_dir = run_dir / TRIALS_DIR / trial.id
         set_state(trial_dir, "running")
-        if trial == first and tries[trial.id] <= 2:
+        if len(tries) <= 2:
             raise TrialError("proxy did not become healthy")
-        if trial == second:
-            set_state(trial_dir, "failed", "timeout")
-            raise TrialError("removing the project failed")
         set_state(trial_dir, "failed", "engine error")
         return "failed"
 
-    counts = executor.execute(run_dir, plan, [first, second], attempt, log=lines.append)
+    counts = executor.execute(run_dir, plan, [first], attempt, log=lines.append)
 
-    assert tries == {first.id: 3, second.id: 1}
-    assert counts == {"failed": 2}
+    assert tries == [first.id] * 3
+    assert counts == {"failed": 1}
     assert (
         f"trial {first.id}: infrastructure error: proxy did not become healthy; retry 1 of 3"
         in lines
     )
     assert any("retry 2 of 3" in line for line in lines)
-    assert read_status(run_dir / TRIALS_DIR / second.id).reason == "timeout"
+
+
+@pytest.mark.real_executor
+def test_a_teardown_failure_keeps_the_final_state_and_stops_the_run(checkout):
+    run_dir = make_run(checkout, [CODEX])
+    plan = with_attempts(run_dir, 3)
+    tries = []
+
+    def attempt(trial):
+        tries.append(trial.id)
+        trial_dir = run_dir / TRIALS_DIR / trial.id
+        set_state(trial_dir, "running")
+        set_state(trial_dir, "failed", "timeout")
+        raise TrialError("removing trial project p failed")
+
+    with pytest.raises(executor.RunStopped, match="failed, then infrastructure error: removing"):
+        executor.execute(run_dir, plan, plan.trials, attempt, log=lambda _: None)
+
+    assert tries == [plan.trials[0].id]  # not rerun, and nothing new started
+    assert read_status(run_dir / TRIALS_DIR / tries[0]).reason == "timeout"
+    assert trials_left(run_dir, plan) == [t.id for t in plan.trials[1:]]
+
+
+def trials_left(run_dir: Path, plan: Plan) -> list[str]:
+    return [t.id for t in recover_trials(run_dir, plan)]
 
 
 @pytest.mark.real_executor
@@ -221,12 +281,39 @@ def test_an_error_the_attempt_cannot_record_stops_the_run_without_retry(checkout
 
 
 def test_project_names_are_unique_per_run_and_trial_and_hide_the_task(tmp_path):
-    a = project_name(tmp_path / "runs" / "a", "o-1--abc--1")
+    a = project_name("0" * 32, "o-1--abc--1")
 
-    assert a == project_name(tmp_path / "runs" / "x" / ".." / "a", "o-1--abc--1")
-    assert a != project_name(tmp_path / "runs" / "b", "o-1--abc--1")
-    assert a != project_name(tmp_path / "runs" / "a", "o-1--abc--2")
+    assert a == project_name("0" * 32, "o-1--abc--1")
+    assert a != project_name("1" * 32, "o-1--abc--1")
+    assert a != project_name("0" * 32, "o-1--abc--2")
     assert a.startswith("rbench-") and "o-1" not in a
+
+
+@pytest.mark.real_executor
+def test_project_names_follow_the_run_identity_not_its_path(checkout, fake_bin):
+    run_dir = make_run(checkout, [OPUS])
+    other = make_run(checkout, [OPUS], run_id="r2")
+    plan = load_plan(run_dir)
+    trial = plan.trials[1]
+    identity = (run_dir / IDENTITY_FILE).read_text().strip()
+    assert len(identity) == 32 and int(identity, 16) >= 0
+    mine = project_name(run_identity(run_dir), trial.id)
+    assert mine != project_name(run_identity(other), trial.id)  # same trial id, another run
+
+    moved = run_dir.rename(checkout / "elsewhere")
+    assert project_name(run_identity(moved), trial.id) == mine
+    listing = {"match": "--filter label=com.docker.compose.project", "stdout": f"{mine}\n"}
+    fake_bin.scenario("docker", replies=[listing])
+    assert executor.remove_leftovers(moved, plan, f"rbench-proxy@{PROXY_ID}") == [mine]
+
+
+def test_a_run_without_an_identity_gets_one_that_stays(tmp_path):
+    first = run_identity(tmp_path)
+
+    assert first == run_identity(tmp_path) == (tmp_path / IDENTITY_FILE).read_text().strip()
+    (tmp_path / IDENTITY_FILE).write_text("../x\n")
+    with pytest.raises(ValueError, match="not a run identity"):
+        run_identity(tmp_path)
 
 
 def test_run_holds_the_lock_from_creation_through_its_trials(checkout, monkeypatch):
@@ -304,13 +391,18 @@ def codex_trial(launch: plain.Launch) -> dict:
     }
 
 
+def launched(status: int = 0, seconds: int = 1) -> str:
+    """The line the launch wrapper ends the engine's stderr with in the agent."""
+    return f"engine noise\n{trial_module.MARK} {status} {seconds}\n"
+
+
 def docker_replies(trial: dict, *, engine: dict | None = None, extra: list | None = None) -> dict:
     copy = trial["copy"] | {"proxy:/var/log/squid/access.log": ""}
     return {
         "replies": [
             *(extra or []),
             {"match": "build --quiet --tag rbench-proxy", "stdout": PROXY_ID + "\n"},
-            {"match": ENGINE, "stdout": trial["stdout"]} | (engine or {}),
+            {"match": ENGINE, "stdout": trial["stdout"], "stderr": launched()} | (engine or {}),
             {"match": "count-objects", "stdout": COUNT_OBJECTS},
             {"match": "ps --quiet agent", "stdout": CONTAINER + "\n"},
             {"match": f"diff {CONTAINER}", "stdout": trial["diff"]},
@@ -371,19 +463,12 @@ def test_a_claude_trial_runs_in_its_project_and_stores_findings_and_usage(sandbo
         OPUS: {"input": 3, "output": 2, "cache_read": 0, "cache_creation": 0}
     }
     assert usage["incomplete"]["engine"] == []
-    name = project_name(trial_dir.parents[1], trial_dir.name)
+    name = project_name(run_identity(trial_dir.parents[1]), trial_dir.name)
     ups = docker_calls(fake_bin, "up --detach --wait")
     assert len(ups) == 1 and ups[0][ups[0].index("--project-name") + 1] == name
     (engine,) = docker_calls(fake_bin, ENGINE)
-    assert engine[engine.index("timeout") + 1 : engine.index("timeout") + 4] == [
-        "-k",
-        "30s",
-        "3600s",
-    ]
-    assert engine[engine.index("timeout") + 4 :] == [
-        "claude",
-        *engine[engine.index("claude") + 1 :],
-    ]
+    wrapper = engine.index(trial_module.RUN)
+    assert engine[wrapper + 1 : wrapper + 6] == ["sh", "/rbench/repo", "30s", "3600s", "claude"]
     up = next(c for c in fake_bin.calls() if "up" in c["argv"] and c["tool"] == "docker")
     assert TOKEN not in json.dumps(up["argv"])
     assert docker_calls(fake_bin, "down")[-1][2] == name  # removed after the trial
@@ -423,15 +508,75 @@ def test_only_a_codex_exec_json_launch_passes_its_stdout_to_usage(tmp_path):
 
 
 @pytest.mark.real_executor
-def test_a_timeout_fails_the_trial_and_resume_does_not_rerun_it(sandbox):
+@pytest.mark.parametrize("status", [124, 137])  # `timeout`'s TERM, then KILL
+def test_a_timeout_fails_the_trial_and_resume_does_not_rerun_it(sandbox, status):
     def replies(launch):
-        return docker_replies(claude_trial(launch), engine={"delay": 1.2, "exit": 124})
+        engine = {"exit": status, "stderr": launched(status, 1)}
+        return docker_replies(claude_trial(launch), engine=engine)
 
     trial_dir, counts, plan = sandbox([OPUS], replies, timeout=1.0)
 
     assert counts == {"failed": 1}
     assert read_status(trial_dir).reason == "timeout"
     assert trial_dir.name not in [t.id for t in recover_trials(trial_dir.parents[1], plan)]
+
+
+@pytest.mark.real_executor
+def test_time_in_docker_outside_the_agent_is_not_a_timeout(sandbox):
+    # 1.2 s on the host, but the wrapper saw the engine end well inside its 1 s limit.
+    def replies(launch):
+        return docker_replies(claude_trial(launch), engine={"delay": 1.2, "stderr": launched(0, 0)})
+
+    _, counts, _ = sandbox([OPUS], replies, timeout=1.0)
+
+    assert counts == {"done": 1}
+
+
+@pytest.mark.real_executor
+def test_an_engine_exiting_124_on_its_own_is_an_engine_error(sandbox):
+    def replies(launch):
+        engine = {"exit": 124, "stderr": launched(124, 0)}
+        return docker_replies(claude_trial(launch), engine=engine)
+
+    trial_dir, counts, _ = sandbox([OPUS], replies, timeout=5.0)
+
+    assert counts == {"failed": 1}
+    assert read_status(trial_dir).reason == "engine error: claude exited 124"
+
+
+@pytest.mark.real_executor
+def test_a_stuck_docker_exec_is_cut_off_and_retried(sandbox, fake_bin, monkeypatch):
+    monkeypatch.setattr(trial_module, "KILL_AFTER", 0)
+    monkeypatch.setattr(trial_module, "HOST_GRACE", 0.3)
+
+    def replies(launch):
+        return docker_replies(claude_trial(launch), engine={"delay": 5})
+
+    with pytest.raises(executor.RunStopped, match=r"did not return within 0\.5s.*after 3 retries"):
+        sandbox([OPUS], replies, timeout=0.2)
+
+    assert len(docker_calls(fake_bin, ENGINE)) == 4
+    assert docker_calls(fake_bin, " down ")  # each attempt still removed its project
+
+
+@pytest.mark.real_executor
+def test_a_docker_exec_failure_before_the_engine_is_retried(sandbox, fake_bin, checkout):
+    def replies(launch):
+        engine = {"exit": 1, "stderr": f"Error response from daemon: {MARKER}\n"}
+        return docker_replies(claude_trial(launch), engine=engine)
+
+    with pytest.raises(executor.RunStopped, match="did not complete in the agent") as stopped:
+        sandbox([OPUS], replies)
+
+    assert len(docker_calls(fake_bin, ENGINE)) == 4  # the first try and 3 retries
+    status = first_trial(checkout) / "status.json"
+    assert json.loads(status.read_text())["state"] == "interrupted"
+    assert MARKER not in str(stopped.value) and MARKER not in status.read_text()
+
+
+def first_trial(checkout: Path) -> Path:
+    run_dir = checkout / "runs" / "r"
+    return run_dir / TRIALS_DIR / load_plan(run_dir).trials[0].id
 
 
 @pytest.mark.real_executor
@@ -493,7 +638,7 @@ def test_a_start_that_keeps_failing_is_retried_three_times_then_stops(sandbox, f
 def test_startup_removes_only_this_runs_leftover_projects(checkout, fake_bin, monkeypatch):
     run_dir = make_run(checkout, [OPUS])
     plan = load_plan(run_dir)
-    mine = project_name(run_dir, plan.trials[1].id)
+    mine = project_name(run_identity(run_dir), plan.trials[1].id)
     listing = {"match": "--filter label=com.docker.compose.project", "stdout": f"other\n{mine}\n"}
     fake_bin.scenario("docker", replies=[listing])
 
@@ -562,3 +707,153 @@ def test_codex_review_is_registered_with_findings_from_its_root_rollout(tmp_path
         adapter.result(trial, launch, output(1, records=records, transcripts=tmp_path))
     with pytest.raises(EngineFailure, match=r"^invalid output: codex-review: expected one root"):
         adapter.result(trial, launch, output(0, transcripts=tmp_path))
+
+
+HOLD_LOGIN = """
+import sys, time
+from pathlib import Path
+from rbench.run.trial import login_lock
+with login_lock(Path(sys.argv[1])):
+    print("held", flush=True)
+    time.sleep(0.5)
+    Path(sys.argv[2]).write_text(repr(time.time()))
+"""
+
+
+@pytest.mark.real_executor
+def test_a_codex_trial_waits_while_another_runner_holds_its_login(sandbox, monkeypatch, tmp_path):
+    # Another run's runner, a separate process, holds the same login home.
+    login = Path(os.environ[executor.CODEX_LOGIN_ENV])
+    released = tmp_path / "released"
+    holder = subprocess.Popen(
+        [sys.executable, "-c", HOLD_LOGIN, str(login), str(released)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout is not None and holder.stdout.readline() == "held\n"
+    ups: list[float] = []
+    up = TrialProject.up
+
+    def recorded_up(self):
+        ups.append(time.time())
+        return up(self)
+
+    monkeypatch.setattr(TrialProject, "up", recorded_up)
+    _, counts, _ = sandbox([CODEX], lambda launch: docker_replies(codex_trial(launch)))
+
+    assert holder.wait(timeout=30) == 0
+    assert counts == {"done": 1}
+    assert ups and ups[0] >= float(released.read_text())
+
+
+@pytest.mark.real_executor
+def test_a_teardown_that_keeps_failing_is_retried_then_stops_the_run(sandbox, monkeypatch):
+    downs = []
+
+    def down(self):
+        downs.append(self.name)
+        if len(downs) > 1:  # the one `up` runs first succeeds
+            raise TrialError(f"removing trial project {self.name}: docker compose exited 1")
+
+    monkeypatch.setattr(TrialProject, "down", down)
+
+    with pytest.raises(executor.RunStopped, match="done, then infrastructure error: removing"):
+        sandbox([OPUS], lambda launch: docker_replies(claude_trial(launch)))
+
+    assert len(downs) == 1 + trial_module.DOWN_TRIES
+
+
+@pytest.mark.real_executor
+@pytest.mark.parametrize("model", [OPUS, CODEX])
+def test_the_result_is_checked_against_the_schema_the_trial_launched_with(checkout, model):
+    run_dir = make_run(checkout, [model])
+    plan = load_plan(run_dir)
+    settings = plan.configurations[0].settings
+    trial = EngineTrial(settings, plan.engines["plain"], checkout / "engines", 7)
+    launch = ADAPTERS["plain"].launch(trial)
+    # The schema file gains a severity after the launch was built from it.
+    schema = checkout / "engines" / "plain" / plain.SCHEMA_FILE
+    schema.write_text(schema.read_text().replace('"nit"]', '"nit", "blocker"]'))
+    answer = {"findings": [FINDING | {"severity": "blocker"}]}
+    if launch.cli == "claude":
+        stdout = {"type": "result", "subtype": "success", "is_error": False}
+        out = Output(0, json.dumps(stdout | {"structured_output": answer}), None, [], Path("t"))
+    else:
+        out = Output(0, "", json.dumps(answer), [], Path("t"))
+
+    with pytest.raises(EngineFailure, match="^invalid output: "):
+        ADAPTERS["plain"].result(trial, launch, out)
+
+
+@pytest.mark.real_executor
+def test_output_that_is_not_valid_unicode_fails_the_trial_without_stopping_the_run(sandbox):
+    def replies(launch):
+        trial = claude_trial(launch)
+        trial["stdout"] = trial["stdout"].replace("Off by one.", "Off by \\ud800 one.")
+        return docker_replies(trial)
+
+    trial_dir, counts, _ = sandbox([OPUS], replies)
+
+    assert counts == {"failed": 1}
+    assert read_status(trial_dir).reason == "invalid output: a string in it is not valid Unicode"
+
+
+@pytest.mark.real_executor
+def test_a_failing_count_objects_does_not_quote_the_agent(sandbox):
+    def replies(launch):
+        failing = {"match": "count-objects", "exit": 1, "stderr": f"fatal: {MARKER}\n"}
+        return docker_replies(claude_trial(launch), extra=[failing])
+
+    trial_dir, counts, _ = sandbox([OPUS], replies)
+
+    assert counts == {"contaminated": 1}
+    reason = read_status(trial_dir).reason
+    assert "git -C /rbench/repo count-objects exited 1" in reason
+    assert MARKER not in reason and MARKER not in (trial_dir / "audit.json").read_text()
+
+
+@pytest.mark.real_executor
+def test_malformed_usage_does_not_quote_the_transcript(sandbox):
+    def replies(launch):
+        trial = claude_trial(launch)
+        again = message(SESSION, "msg-1", f"claude-{MARKER}", 3, 2)  # same id, another model
+        trial["copy"][f"agent:{TRANSCRIPT}"] += json.dumps(again) + "\n"
+        return docker_replies(trial)
+
+    trial_dir, counts, _ = sandbox([OPUS], replies)
+
+    assert counts == {"failed": 1}
+    assert read_status(trial_dir).reason == "invalid output: the transcripts' usage is malformed"
+    assert MARKER not in (trial_dir / "status.json").read_text()
+
+
+@pytest.mark.real_executor
+def test_a_transcript_that_cannot_be_copied_is_not_named(sandbox, checkout):
+    path = f"/home/node/.claude/projects/-rbench-repo/{MARKER}.jsonl"
+
+    def replies(launch):
+        trial = claude_trial(launch)
+        trial["diff"] += f"A {path}\n"
+        failing = {"match": f"agent:{path}", "exit": 1, "stderr": f"no such file: {path}\n"}
+        return docker_replies(trial, extra=[failing])
+
+    with pytest.raises(executor.RunStopped, match="transcript 2 of 2") as stopped:
+        sandbox([OPUS], replies)
+
+    status = (first_trial(checkout) / "status.json").read_text()
+    assert MARKER not in str(stopped.value) and MARKER not in status
+
+
+def test_a_hidden_tasks_archive_is_found_in_the_hidden_directory(tmp_path):
+    name = trial_module.archive_name("a" * 64)
+    (tmp_path / "hidden").mkdir()
+    (tmp_path / "hidden" / name).write_bytes(b"synthetic")
+    hidden = HiddenConfig(tmp_path / "hidden", "synthetic-")
+    ctx = types.SimpleNamespace(archives=tmp_path / "cache", hidden=hidden)
+    public = types.SimpleNamespace(set="ours", archive_sha256="a" * 64)
+    secret = types.SimpleNamespace(set="hidden", archive_sha256="a" * 64)
+
+    assert trial_module._archive(ctx, public) == tmp_path / "cache" / name
+    assert trial_module._archive(ctx, secret) == tmp_path / "hidden" / name
+    with pytest.raises(ValueError, match="no hidden directory"):
+        trial_module._archive(types.SimpleNamespace(archives=tmp_path, hidden=None), secret)

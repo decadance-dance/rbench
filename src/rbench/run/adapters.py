@@ -8,6 +8,13 @@ An adapter is registered under its engine's name. For one trial the executor ask
 - `result`: the findings from the engine's output, or `EngineFailure` / `NotEligible`.
 
 Everything an adapter reads in `Output` is engine output: untrusted, and never quoted in an error.
+
+`NotEligible` is the path for an engine that refuses a PR (spec run-ledger, PR not eligible). No
+registered adapter raises it: `plain` and `codex-review` review whatever diff they get, rreview's
+exits are clean, gated or failed, and the trial's `gh` stub reports every PR as open with no
+reviews (design D4), so an engine that checks eligibility through `gh` still runs. `code-review`,
+which reads the PR through `gh` and answers in Markdown, is the engine expected to give that
+signal, through its adapter (#127).
 """
 
 import json
@@ -110,8 +117,12 @@ class Plain(Adapter):
         answer = output.stdout if launch.output is None else output.answer
         if answer is None:
             raise EngineFailure(f"invalid output: {launch.cli} wrote no final answer")
-        path = Path(trial.engines_dir) / plain.NAME / plain.SCHEMA_FILE
-        schema = json.loads(path.read_bytes())  # `launch` checked its hash against the plan
+        # The schema the trial launched with, whose hash `launch` checked against the plan; the
+        # file may have changed since.
+        if launch.cli == "claude":
+            schema = json.loads(launch.argv[launch.argv.index("--json-schema") + 1])
+        else:
+            schema = json.loads(launch.files[plain.SCHEMA_PATH])
         try:
             return plain.findings(launch, answer, schema)
         except plain.PlainOutputError as e:
