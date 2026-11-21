@@ -185,6 +185,19 @@ server or build step, and opens from disk as the spec requires.
 - The agent container sits on an `internal: true` network. Its only route out is a squid proxy that
   allowlists the providers' API and auth hosts and logs every CONNECT. The host list comes from a
   logged smoke run and is fixed in `images/proxy/allowlist`.
+- The smoke run (#21, Claude Code 2.1.316, Codex CLI 0.171.0) fixed the allowlist at three hosts:
+  - `api.anthropic.com`: the Claude API. `CLAUDE_CODE_OAUTH_TOKEN` needs no refresh host.
+  - `chatgpt.com`: Codex's API and account calls under a ChatGPT login.
+  - `auth.openai.com`: Codex's token refresh. The run did not reach it, because its token was
+    fresh, but a trial does (#20).
+- Squid allows `CONNECT` to port 443 of exactly these hosts, with no subdomains, and denies
+  everything else, plain HTTP included. Both CLIs honour `HTTPS_PROXY`/`HTTP_PROXY`, set with an
+  empty `NO_PROXY`. In the run, neither resolved any name but the proxy's.
+- The proxy refuses, and logs, three kinds of traffic, with no effect on either CLI's result:
+  - Claude's telemetry (`http-intake.logs.us5.datadoghq.com`). D5's non-essential-traffic switches
+    stop it at the source.
+  - Codex's metrics (`ab.chatgpt.com`).
+  - Codex's fetches from OpenAI file storage (`*.oaiusercontent.com`).
 - Images are built per engine version and CLI versions, not per task. The scrubbed repository is
   unpacked from the task's archive (D11) and copied in with `docker cp` when the container is
   created, never mounted.
@@ -574,14 +587,15 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
   reproduced. A `claude setup-token` token passed by `--env-file` as `CLAUDE_CODE_OAUTH_TOKEN`
   authenticates `claude -p` in a Linux container on Docker Desktop (Claude Code 2.1.316,
   linux/arm64) with an empty `CLAUDE_CONFIG_DIR`, also with D5's managed settings and shim flags.
-  D3 stands; the `sbx` and separate-user fallbacks are not needed. Credential source (decided): on
+  D3 stands; the `sbx` and separate-user fallbacks are not needed. The same call also works through
+  D3's enforcing proxy (#21). Credential source (decided): on
   macOS the operator keeps the token in the Keychain (generic password, service
   `rbench-claude-oauth`). rbench reads it at trial start and passes it to `docker` by variable name
   only (`-e CLAUDE_CODE_OAUTH_TOKEN`, value in the child's environment), so the value never appears
   on an argv, in a file in the run dir or in an image (configuration or layer). The env file the
   spike used (`<env-file>`, outside the repository, mode 600) is a fallback for the spike only. Not
-  yet checked: whether the managed settings are enforced (the spike checked authentication only),
-  the run through the proxy (D3's smoke run) and token expiry over a long run.
+  yet checked: whether the managed settings are enforced (the spike checked authentication only)
+  and token expiry over a long run.
 - **[Codex `auth.json` refresh races between processes.]** → One login file per trial, at most one
   Codex trial per login, and a login only the benchmark uses, so Orca and the operator's own Codex
   never share its refresh-token chain. The spike (#20, Codex CLI 0.171.0) ran 3 concurrent
@@ -600,7 +614,8 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
 - **[Headless `codex-review` execution and capture.]** → Confirmed in #22 with Codex CLI 0.171.0
   on Linux arm64 only. `codex exec review` ran without a TTY, used D5's directory-mounted login
   and returned one structured finding on the changed line of a synthetic two-commit repository.
-  The D3 proxy remains a smoke check.
+  Plain `codex exec` works through D3's enforcing proxy (#21); `codex exec review` through it
+  remains a smoke check.
 - **[The inner Linux sandbox may fail inside Docker.]** → In #22 it could not create a user
   namespace. In the smoke stage, check review-council, which launches Codex with
   `--sandbox read-only` (D5), and the Codex-side plugin review engine in D13. D6 uses the
@@ -645,6 +660,23 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
 - **[Transcript paths and schemas change between CLI versions.]** → A CLI upgrade reruns smoke
   checks for D7's paths and usage records and D13's `ExitedReviewMode` item and `review_output`
   layout. A session with no usable source flags the trial's usage as incomplete.
+- **[The allowlist and refused traffic (#21).]** → The run fixed the list from one minimal call per
+  CLI. A path it did not exercise (a refresh, a tool call, review mode, another model) may need a
+  host it never saw:
+  - Such a path shows up as a refused attempt in run health; the call fails rather than leaks.
+  - A host is added only with a logged reason.
+  - Under the default settings, every Codex process makes about seven refused attempts: one metrics
+    call to `ab.chatgpt.com` and six fetches from `*.oaiusercontent.com`, whose purpose was not
+    identified. Refused attempts do not contaminate a trial (spec `trial-isolation`), but they are
+    noise in run health.
+  - The Codex switches that would stop this traffic (OTel metrics, apps) are a smoke check for D5.
+  - No CLI ignored the proxy env. If a future version does, it gets no route at all, because the
+    agent network is internal, so it fails visibly instead of leaking.
+- **[Codex loads the account's ChatGPT apps.]** → Under a ChatGPT login, Codex 0.171.0 fetched the
+  account's apps (connectors) and cached their tools in the trial's `CODEX_HOME` (#21). They are
+  served through `chatgpt.com`, so the allowlist cannot block them. Turning them off belongs in D5's
+  hermetic configuration, like Claude's `ENABLE_CLAUDEAI_MCP_SERVERS=false`, and is a smoke check
+  until it is verified.
 - **[Codex rollouts carry the ChatGPT account id (`session_meta`).]** → Transcripts stay in the run
   directory and are never published; only aggregate scores leave it.
 
