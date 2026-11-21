@@ -158,9 +158,7 @@ def publish_release(
     archive_dir = Path(archive_dir)
     # Only hash-named basenames reach gh, run inside the archive directory: gh expands an asset
     # argument as a glob and splits it at '#', which a full path may contain.
-    assets = sorted(
-        {verify_archive(t, archive_dir / archive_name(t.archive_sha256)).name for t in tasks}
-    )
+    assets = sorted({_release_asset(t, archive_dir).name for t in tasks})
     tag = release_tag(task_set, version)
     target = _manifest_commit(set_dir)
     _gh(
@@ -198,6 +196,16 @@ def publish_release(
         cwd=archive_dir,
     )
     return tag
+
+
+def _release_asset(task: Task, archive_dir: Path) -> Path:
+    path = archive_dir / archive_name(task.archive_sha256)
+    if not path.exists():
+        raise ArchiveError(
+            f"{_label(task)}: {archive_dir} has no {path.name}; an archive from an older import,"
+            f" named <task-id>-<sha256>.bundle, must be imported again or renamed to {path.name}"
+        )
+    return verify_archive(task, path)
 
 
 def fetch_archives(
