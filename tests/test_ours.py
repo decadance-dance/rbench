@@ -46,6 +46,8 @@ TEN = "".join(f"line {n}\n" for n in range(1, 11))
 LINE_5 = "@@ -5,1 +5,1 @@\n-line 5\n+line five\n"
 FIX = "f" * 40
 MERGE = "e" * 40
+SIBLING = "c" * 40
+EARLY = "a" * 40
 
 
 def user(login: str, kind: str = "User") -> dict:
@@ -75,10 +77,24 @@ def changed(patch: str | None = LINE_5, path: str = "app.py", **kw) -> dict:
 
 
 def followup(
-    sha: str = FIX, *files: dict, merge: bool = False, when: str = FIXED, pages=None
+    sha: str = FIX,
+    *files: dict,
+    merge: bool = False,
+    when: str = FIXED,
+    pages=None,
+    parents: list[str] | None = None,
 ) -> dict:
-    """A commit after the reviewed head: its id, its files by page and whether it is a merge."""
-    return {"sha": sha, "pages": pages or [list(files)], "merge": merge, "when": when}
+    """A commit after the reviewed head: its id, its files by page and its parents.
+
+    By default its first parent is the commit listed before it, and a merge's second is the base.
+    """
+    return {
+        "sha": sha,
+        "pages": pages or [list(files)],
+        "merge": merge,
+        "when": when,
+        "parents": parents,
+    }
 
 
 @dataclass
@@ -96,6 +112,7 @@ class PR:
     followups: list = field(default_factory=lambda: [followup(FIX, changed())])
     in_history: bool = True  # False: the PR's commit list no longer has the reviewed head
     head: str = ""
+    tip: str | None = None  # the PR's head commit; by default its last listed commit
 
     @property
     def task_id(self) -> str:
@@ -131,14 +148,17 @@ class PR:
                 "parents": [{"sha": base}],
                 "commit": {"committer": {"date": HEAD_DATE}},
             }
-        ] + [
-            {
-                "sha": f["sha"],
-                "parents": [{"sha": self.head}, *([{"sha": base}] if f["merge"] else [])],
-                "commit": {"committer": {"date": f["when"]}},
-            }
-            for f in self.followups
         ]
+        for f in self.followups:
+            parents = f["parents"] or [commits[-1]["sha"], *([base] if f["merge"] else [])]
+            commits.append(
+                {
+                    "sha": f["sha"],
+                    "parents": [{"sha": p} for p in parents],
+                    "commit": {"committer": {"date": f["when"]}},
+                }
+            )
+        pull["head"] = {"sha": self.tip or commits[-1]["sha"]}
         edits = {
             "data": {
                 "repository": {
@@ -403,6 +423,70 @@ def test_lines_are_followed_across_a_merge_to_a_later_fix(w: World) -> None:
     assert [(i["id"], i["source"].split()[-1]) for i in w.items()] == [(f"{w.pr.task_id}#1", FIX)]
 
 
+def test_commit_off_the_first_parent_path_is_never_evidence(w: World) -> None:
+    # The review's repro: a sibling branch from the base edits its own line 6, which the reviewed
+    # head moved to 7; the PR merges it, and GitHub's merge patch is against the merge's first
+    # parent, so line 6 at the reviewed head stays until the real fix.
+    w.pr.comments = [comment(1, 6, "check this")]
+    w.pr.followups = [
+        followup(SIBLING, changed("@@ -6,1 +6,1 @@\n-line 6\n+six\n"), parents=[w.base]),
+        followup(MERGE, changed("@@ -7,1 +7,1 @@\n-line 6\n+six\n"), parents=[w.pr.head, SIBLING]),
+        followup(FIX, changed("@@ -6,1 +6,1 @@\n-line 5\n+line five\n")),
+    ]
+    w.answer()
+
+    w.run()
+
+    assert [i["source"].split()[-1] for i in w.items()] == [FIX]
+    assert not [c for c in w.fake.calls() if f"commits/{SIBLING}" in " ".join(c["argv"])]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"followups": [followup(FIX, changed(), parents=["0" * 40])]},  # not back to the head
+        {"tip": "9" * 40},  # the PR's head is not among its commits
+    ],
+)
+def test_unreachable_first_parent_path_is_a_named_skip(w: World, change: dict) -> None:
+    for key, value in change.items():
+        setattr(w.pr, key, value)
+    w.answer()
+
+    result = w.run()
+
+    reason = "the PR's head does not lead back to the reviewed head by first parents"
+    assert result.skipped == {w.pr.task_id: reason}
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        followup(MERGE, changed("@@ -5,0 +6,1 @@\n+x\n"), merge=True),
+        followup(EARLY, changed("@@ -5,0 +6,1 @@\n+x\n"), when="2026-08-02T09:00:00Z"),
+    ],
+)
+def test_insertion_right_after_the_lines_keeps_them_followed(w: World, first: dict) -> None:
+    # Neither a merge nor a commit made before the comment is evidence, so the line it leaves
+    # intact is still followed, and the later fix is credited.
+    w.pr.followups = [first, followup(FIX, changed())]
+    w.answer()
+
+    w.run()
+
+    assert [i["source"].split()[-1] for i in w.items()] == [FIX]
+
+
+def test_max_per_repo_may_only_narrow_the_cap(w: World, capsys) -> None:
+    with pytest.raises(TaskImportError, match="max_per_repo 4 is above the cap of 3"):
+        w.run(window=Window(repos=(NWO,), max_per_repo=4))
+    assert w.fake.calls() == []
+
+    argv = ["tasks", "import", "ours", "--repo", NWO, "--tasks", str(w.set_dir)]
+    assert main([*argv, "--archives", str(w.archives), "--max-per-repo", "4"]) == 1
+    assert "above the cap of 3" in capsys.readouterr().err
+
+
 def test_lines_are_followed_through_a_pure_rename(w: World) -> None:
     rename = changed(None, path="moved.py", status="renamed", previous_filename="app.py", changes=0)
     w.pr.followups = [followup("a" * 40, rename), followup(FIX, changed(path="moved.py"))]
@@ -620,14 +704,15 @@ def test_cli_imports_and_reports_failures(w: World, capsys) -> None:
 @pytest.mark.parametrize(
     ("patch", "expected"),
     [
-        ("@@ -5,1 +5,1 @@\n-a\n+b\n", None),  # replaces the line
-        ("@@ -4,3 +4,2 @@\n x\n-y\n z\n", None),  # deletes it
-        ("@@ -6,0 +7,1 @@\n+new\n", None),  # inserts right after the range
-        ("@@ -1,1 +1,3 @@\n a\n+b\n+c\n", (7, 8)),  # inserts above: the range moves down
-        ("@@ -1,2 +1,1 @@\n-a\n b\n", (4, 5)),  # deletes above: it moves up
-        ("@@ -4,1 +4,2 @@\n x\n+new\n", (6, 7)),  # inserts right above: it moves down
-        ("@@ -3,5 +3,5 @@\n a\n b\n c\n d\n e\n", (5, 6)),  # context only
-        ("@@ -9,1 +9,1 @@\n-a\n+b\n", (5, 6)),  # below the range
+        ("@@ -5,1 +5,1 @@\n-a\n+b\n", (None, True)),  # replaces the line
+        ("@@ -4,3 +4,2 @@\n x\n-y\n z\n", (None, True)),  # deletes it
+        ("@@ -6,0 +7,1 @@\n+new\n", ((5, 6), True)),  # inserts right after: kept, changed
+        ("@@ -5,0 +6,1 @@\n+new\n", ((5, 7), True)),  # inserts between: it grows, changed
+        ("@@ -1,1 +1,3 @@\n a\n+b\n+c\n", ((7, 8), False)),  # inserts above: the range moves down
+        ("@@ -1,2 +1,1 @@\n-a\n b\n", ((4, 5), False)),  # deletes above: it moves up
+        ("@@ -4,1 +4,2 @@\n x\n+new\n", ((6, 7), False)),  # inserts right above: it moves down
+        ("@@ -3,5 +3,5 @@\n a\n b\n c\n d\n e\n", ((5, 6), False)),  # context only
+        ("@@ -9,1 +9,1 @@\n-a\n+b\n", ((5, 6), False)),  # below the range
     ],
 )
 def test_touches_follows_lines_through_a_diff(patch: str, expected) -> None:

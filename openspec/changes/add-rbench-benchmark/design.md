@@ -850,8 +850,9 @@ Not taken:
 - `cli/cli` and `junegunn/fzf`: their review threads came mostly from bots.
 
 **PRs.** In each repository the candidates are the PRs opened and merged inside the window by a
-human author. They are taken in merge order until 3 of them make tasks. A PR makes a task when all
-of these hold:
+human author. They are taken in merge order until 3 of them make tasks; `--max-per-repo` may lower
+that cap, and a value above 3 is refused before anything is read. A PR makes a task when all of
+these hold:
 - it changes at most 1500 lines in at most 30 files;
 - it has at least one item (below);
 - its title and description pass D1's rule;
@@ -865,7 +866,8 @@ The *reviewed head* is the commit of the PR's first review that has inline comme
 a human other than the author. That is the state before the review's follow-ups, as ReviewBench's
 head is. The *base* is the merge base of the PR's base commit and the reviewed head. When the
 reviewed head is no longer among the PR's commits (the branch was rewritten after the review), the
-follow-ups cannot be ordered: the PR is skipped and the changelog names it.
+follow-ups cannot be ordered: the PR is skipped and the changelog names it. The same holds when the
+PR's head does not lead back to the reviewed head by first parents within the listed commits.
 
 **Reading of O5.** O5 takes ground truth from "review comments, plus follow-up commits that change
 the commented lines". This design makes that wording precise without changing it:
@@ -880,26 +882,29 @@ A comment becomes an item when all of these hold:
 - it opens its thread (it is not a reply);
 - it sits on the new side of the diff at the reviewed head, with a line range;
 - its author is a GitHub `User`, not a bot and not the PR's author;
-- a later non-merge commit of the PR, committed after the comment was posted, changes those lines.
-  Changing means it deletes or replaces one of them, or inserts lines between them or right after
-  the last one; a deleted file counts as a change.
+- a later non-merge commit on the PR's first-parent path (below), committed after the comment was
+  posted, changes those lines. Changing means it deletes or replaces one of them, or inserts lines
+  between them or right after the last one; a deleted file counts as a change.
 
-The lines are followed from the reviewed head through every later commit's diff, read on all its
-pages:
-- An edit above them moves them, and a pure rename (no content change) carries them to the new
-  path.
-- A merge commit's diff against the PR's previous commit (GitHub's diff of a merge) moves them too,
-  but a merge is never evidence: it brings in the base branch. If it changes the lines, they are
-  gone and the comment is not an item.
-- A commit whose committer date is not after the comment changes the lines before anyone could act
-  on the comment, so it is not evidence either, and the lines are gone. The committer date is no
-  later than the push, so this rule only errs toward dropping an item.
+The lines are followed from the reviewed head along the PR's *first-parent path*: the commits
+reached from the PR's head by first parents, back to the reviewed head. GitHub gives every
+commit's diff, a merge's too, against its first parent, so each diff on this path applies to the
+tree the previous one left. A commit off the path (one brought in by a merge) is never read and is
+never evidence: its diff describes another tree. Each diff on the path is read on all its pages:
+- An edit above the lines moves them, and a pure rename (no content change) carries them to the new
+  path. Inserting lines between them grows the range; inserting right after the last one keeps it.
+- Following the lines is separate from the evidence rule. A merge is never evidence, since it
+  brings in the base branch, and neither is a commit whose committer date is not after the comment,
+  since nobody could have acted on the comment yet; the committer date is no later than the push,
+  so this rule only errs toward dropping an item. When such a commit only moves the lines or
+  inserts next to them, they stay followed and a later commit can still be the evidence; when it
+  deletes or replaces one of them, they are gone and the comment is not an item.
 - A commit whose diff GitHub does not show (binary or too large) gives no evidence, and the lines
   are no longer followed.
 
 Comments on removed lines and comments on a whole file are not items, because the item format needs
-a line range in the reviewed tree. The GitHub API lists at most 250 commits of a PR; a longer PR is
-read only that far.
+a line range in the reviewed tree. The GitHub API lists at most 250 commits of a PR; when the PR's
+head is not among them, its first-parent path cannot be traced, so the PR is skipped and named.
 
 **Field mapping to spec `review-tasks`.**
 

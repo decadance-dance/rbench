@@ -8,14 +8,17 @@ human, are taken in merge order until `max_per_repo` of them make tasks. A PR ma
   inline comments; a head missing from the PR's commits (a rewritten branch) skips the PR;
 - at least one comment is acted on: a thread-opening comment by a human other than the author, on
   the new side of the diff at the reviewed head, whose lines a later non-merge commit, committed
-  after the comment, changes (`_touches`). The lines are followed through every commit in between,
-  merges and pure renames included. Each such comment is one ground-truth item, with the comment
-  and the commit as its source; a comment nobody acted on is not ground truth;
+  after the comment, changes (`_touches`). The lines are followed along the PR's first-parent
+  path from the reviewed head, merges and pure renames included, and only a commit on that path
+  is evidence; a PR whose path cannot be traced is skipped and named. Each such comment is one
+  ground-truth item, with the comment and the commit as its source; a comment nobody acted on is
+  not ground truth;
 - its title and description were in force while the reviewed head was its head (design D1), and
   its repository's license allows redistribution (spec review-tasks, Source license). Failing
   either skips it, and the changelog names it. Both are checked before the PR takes a place.
 
-The window may only be narrowed, and a private repository is refused before any PR is read.
+The window and the cap per repository may only be narrowed, and a private repository is refused
+before any PR is read.
 
 Severity follows the rule in `pre_label` unless a label sheet filled by the maintainer says
 otherwise: `write_label_sheet` writes one row per mined item, `import_ours(labels=...)` applies the
@@ -194,13 +197,15 @@ def category(path: str) -> str:
     return "other"
 
 
-def _touches(patch: str, start: int, end: int, label: str) -> tuple[int, int] | None:
+def _touches(patch: str, start: int, end: int, label: str) -> tuple[tuple[int, int] | None, bool]:
     """Follow lines `start`..`end` of a file through one commit's unified diff `patch`.
 
-    None when the commit deletes or replaces one of them, or inserts lines between them or right
-    after the last one; otherwise their new numbers.
+    Returns their new range and whether the commit changed them. The range is None when the
+    commit deletes or replaces one of them. Inserting lines between them grows the range;
+    inserting right after the last one keeps it; both change the lines.
     """
-    shift = 0
+    shift = grow = 0
+    changed = False
     old = None
     for line in patch.split("\n"):
         if line.startswith("@@"):
@@ -214,17 +219,17 @@ def _touches(patch: str, start: int, end: int, label: str) -> tuple[int, int] | 
             continue
         elif line.startswith("-"):
             if start <= old <= end:
-                return None
+                return None, True
             shift -= old < start
             old += 1
         elif line.startswith("+"):
             # `old` is the line the insertion lands before.
-            if start < old <= end + 1:
-                return None
+            changed |= start < old <= end + 1
+            grow += start < old <= end
             shift += old <= start
         else:
             old += 1
-    return start + shift, end + shift
+    return (start + shift, end + shift + grow), changed
 
 
 def _human(user: object) -> str | None:
@@ -291,9 +296,11 @@ def _mine(repo: str, number: int, language: str, window: Window) -> Mined | tupl
     try:
         author = _human(pull["user"])
         lines = pull["additions"] + pull["deletions"]
-        files, base_sha = pull["changed_files"], pull["base"]["sha"]
+        files, base_sha, tip = pull["changed_files"], pull["base"]["sha"], pull["head"]["sha"]
         if not (type(lines) is int and type(files) is int and COMMIT.fullmatch(base_sha)):
             raise TypeError("size or base is malformed")
+        if not (isinstance(tip, str) and COMMIT.fullmatch(tip)):
+            raise TypeError("head is malformed")
     except (KeyError, TypeError) as err:
         raise TaskImportError(f"{label}: malformed PR from GitHub: {err!r}") from None
     if author is None or lines > window.max_changed_lines or files > window.max_changed_files:
@@ -319,40 +326,44 @@ def _mine(repo: str, number: int, language: str, window: Window) -> Mined | tupl
     task_id = f"{repo.replace('/', '_')}_{number}-{head[:8]}".lower()
     if not TASK_ID.fullmatch(task_id) or task_id.startswith(HIDDEN_ID_PREFIX):
         raise TaskImportError(f"{label}: {task_id} is not a valid public task id")
-    shas = [c.sha for c in commits]
-    if head not in shas:
-        # The branch was rewritten after the review: the follow-ups cannot be ordered.
-        return task_id, "the reviewed head is not in the PR's commits"
-
     states = {r.id: r.state for r in reviews}
     open_ = {c.id: c for c in comments if c.candidate(head, author)}
+    if not open_:
+        return None
+    if head not in {c.sha for c in commits}:
+        # The branch was rewritten after the review: the follow-ups cannot be ordered.
+        return task_id, "the reviewed head is not in the PR's commits"
+    path = _first_parents(commits, head, tip)
+    if path is None:
+        return task_id, "the PR's head does not lead back to the reviewed head by first parents"
     tracked = {c.id: (c.path, c.start, c.end) for c in open_.values()}
     fixed: dict[int, str] = {}
-    for later in commits[shas.index(head) + 1 :]:
+    for later in path:
         if not tracked:
             break
         files = _commit_files(repo, later.sha, label)
-        for cid, (path, start, end) in list(tracked.items()):
-            if path not in files:
+        for cid, (name, start, end) in list(tracked.items()):
+            if name not in files:
                 continue
-            new_path, status, patch, changes = files[path]
+            new_name, status, patch, changes = files[name]
             if status == "removed":
-                moved = None
+                moved, touched = None, True
             elif patch is not None:
-                moved = _touches(patch, start, end, label)
+                moved, touched = _touches(patch, start, end, label)
             elif status == "renamed" and changes == 0:
-                moved = start, end
+                moved, touched = (start, end), False
             else:
                 del tracked[cid]  # GitHub shows no diff (binary, too large): no evidence
                 continue
-            if moved is not None:
-                tracked[cid] = (new_path, *moved)
-                continue
-            del tracked[cid]
             # A merge brings in the base branch, and a commit made before the comment cannot be
-            # an answer to it; either way the lines are gone, so nothing later is evidence.
-            if not later.merge and later.when > open_[cid].created:
+            # an answer to it: neither is evidence, and lines they leave in place stay followed.
+            if touched and not later.merge and later.when > open_[cid].created:
                 fixed[cid] = later.sha
+                del tracked[cid]
+            elif moved is None:
+                del tracked[cid]
+            else:
+                tracked[cid] = (new_name, *moved)
     if not fixed:
         return None
     items = tuple(
@@ -423,8 +434,31 @@ class Comment:
 @dataclass(frozen=True)
 class Commit:
     sha: str
-    merge: bool
+    parents: tuple[str, ...]
     when: datetime
+
+    @property
+    def merge(self) -> bool:
+        return len(self.parents) > 1
+
+
+def _first_parents(commits: list[Commit], head: str, tip: str) -> list[Commit] | None:
+    """The commits from `head` (excluded) to the PR's head `tip`, by first parents.
+
+    GitHub gives a commit's diff, a merge's too, against its first parent, so only this path
+    carries the reviewed lines; a commit off it never touched them. None when the PR's commits
+    do not lead from `tip` back to `head`.
+    """
+    by_sha = {c.sha: c for c in commits}
+    path = []
+    sha = tip
+    while sha != head:
+        commit = by_sha.pop(sha, None)  # popped, so malformed data cannot loop
+        if commit is None or not commit.parents:
+            return None
+        path.append(commit)
+        sha = commit.parents[0]
+    return path[::-1]
 
 
 def _review(raw: object, label: str) -> Review:
@@ -494,19 +528,22 @@ def _comment(raw: object, label: str) -> Comment:
 
 def _commit(raw: object, label: str) -> Commit:
     try:
-        sha, parents = raw["sha"], raw["parents"]
+        sha, parents = raw["sha"], tuple(p["sha"] for p in raw["parents"])
         when = _time(raw["commit"]["committer"]["date"])
-        if not (isinstance(sha, str) and COMMIT.fullmatch(sha) and isinstance(parents, list)):
-            raise TypeError("sha or parents")
+        if not (isinstance(sha, str) and COMMIT.fullmatch(sha)):
+            raise TypeError("sha")
+        if not all(isinstance(p, str) and COMMIT.fullmatch(p) for p in parents):
+            raise TypeError("parents")
     except (KeyError, TypeError, ValueError) as err:
         raise TaskImportError(f"{label}: malformed commit from GitHub: {err!r}") from None
-    return Commit(sha, len(parents) > 1, when)
+    return Commit(sha, parents, when)
 
 
 def _commit_files(repo: str, sha: str, label: str) -> dict[str, tuple[str, str, str | None, int]]:
     """The files one commit changes, every page: old path -> (new path, status, patch, changes).
 
-    A merge commit's files are its changes against its first parent, the PR's previous commit.
+    A merge commit's files are its changes against its first parent, the previous commit on the
+    PR's first-parent path.
     """
     pages = _gh(["api", "--paginate", "--slurp", f"repos/{repo}/commits/{sha}"], label)
     if not (isinstance(pages, list) and all(isinstance(p, dict) for p in pages)):
@@ -586,6 +623,11 @@ def _check_window(window: Window) -> None:
     limits = (window.max_per_repo, window.max_changed_lines, window.max_changed_files)
     if any(type(n) is not int or n < 1 for n in limits):
         raise TaskImportError("the window's limits must be positive integers")
+    if window.max_per_repo > MAX_PER_REPO:
+        raise TaskImportError(
+            f"max_per_repo {window.max_per_repo} is above the cap of {MAX_PER_REPO} tasks per"
+            " repository (design D15); it may only narrow it"
+        )
 
 
 def write_label_sheet(path: Path, window: Window = Window()) -> int:
