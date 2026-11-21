@@ -2,11 +2,13 @@
 """Fake `claude`, `codex`, `docker` and `gh` for tests; each name is a symlink to this file.
 
 Environment:
-  RBENCH_FAKE_LOG       file that gets one JSON line per call: {"tool", "argv", "stdin"}.
+  RBENCH_FAKE_LOG       file that gets one JSON line per call: {"tool", "argv", "stdin", "cwd"}.
   RBENCH_FAKE_SCENARIO  JSON object mapping a tool name to its scenario; a tool without one
                         prints nothing and exits 0. Scenario keys, all optional:
                           delay   seconds to sleep before answering
                           stdout  text to print to stdout
+                          stdout_for  object mapping an argument to the stdout of a call that
+                                  has it, in place of `stdout` (one asset per download)
                           stderr  text to print to stderr (a rate-limit message goes here or in
                                   stdout, as the real CLI prints it)
                           exit    exit code, default 0
@@ -30,13 +32,15 @@ stdin = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
 log = os.environ.get("RBENCH_FAKE_LOG")
 if log:
     with open(log, "a", encoding="utf-8") as f:
-        f.write(json.dumps({"tool": tool, "argv": sys.argv[1:], "stdin": stdin}) + "\n")
+        call = {"tool": tool, "argv": sys.argv[1:], "stdin": stdin, "cwd": os.getcwd()}
+        f.write(json.dumps(call) + "\n")
 
 scenario = json.loads(os.environ.get("RBENCH_FAKE_SCENARIO") or "{}").get(tool, {})
 joined = " ".join(sys.argv[1:])
 scenario = next((r for r in scenario.get("replies", []) if r["match"] in joined), scenario)
 time.sleep(scenario.get("delay", 0))
-sys.stdout.write(scenario.get("stdout", ""))
+by_arg = scenario.get("stdout_for", {})
+sys.stdout.write(next((by_arg[a] for a in sys.argv[1:] if a in by_arg), scenario.get("stdout", "")))
 sys.stderr.write(scenario.get("stderr", ""))
 sys.stdout.flush()
 sys.stderr.flush()
