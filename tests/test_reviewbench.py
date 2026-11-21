@@ -207,7 +207,8 @@ def world(tmp_path: Path, fake_bin: FakeBin, *prs: PR) -> World:
 def leftovers(w: World) -> list[str]:
     """Staging and previous-version directories an import left behind."""
     dirs = [*w.set_dir.parent.iterdir(), *w.archives.iterdir()]
-    return sorted(p.name for p in dirs if p.name.startswith("."))
+    # The lock file stays by design: removing it would race with the next importer.
+    return sorted(p.name for p in dirs if p.name.startswith(".") and not p.name.endswith(".lock"))
 
 
 def snapshot(*dirs: Path) -> dict[Path, bytes]:
@@ -640,3 +641,87 @@ def test_pin_must_be_a_commit(tmp_path: Path, fake_bin: FakeBin) -> None:
         w.run(commit=tree)
     with pytest.raises(ReviewBenchError, match=r"is not a full commit id"):
         w.run(commit="main")
+
+
+def test_failed_stage_rename_restores_the_installed_set(
+    tmp_path: Path, fake_bin: FakeBin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pr = PR("acme/widget", 7)
+    w = world(tmp_path, fake_bin, pr)
+    w.run()
+    before = snapshot(w.set_dir)
+    changed_golden(w, pr)
+    real = os.rename
+
+    def failing(src, dst) -> None:
+        if ".import-" in str(src) and Path(dst) == w.set_dir:
+            raise OSError("stage rename failed")
+        real(src, dst)
+
+    monkeypatch.setattr(os, "rename", failing)
+    with pytest.raises(OSError, match="stage rename failed"):
+        w.run()
+
+    assert snapshot(w.set_dir) == before
+    load_task_set(w.set_dir, "reviewbench")
+    assert leftovers(w) == []
+
+
+def test_overlapping_import_of_the_same_set_is_refused(
+    tmp_path: Path, fake_bin: FakeBin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pr = PR("acme/widget", 7)
+    w = world(tmp_path, fake_bin, pr)
+    w.run()
+    pr.findings = [finding(message="Finding of pin A.")]
+    pin_a = w.publish(note="pin A")
+    changed_golden(w, pr)
+    pin_b = w.commit
+    real = reviewbench._read_subset
+    refused = []
+
+    def paused(*args):
+        # Importer A has read version 1; importer B starts now with the other pin.
+        monkeypatch.setattr(reviewbench, "_read_subset", real)
+        with pytest.raises(ReviewBenchError, match="another import of") as err:
+            w.run(commit=pin_b)
+        refused.append(str(err.value))
+        return real(*args)
+
+    monkeypatch.setattr(reviewbench, "_read_subset", paused)
+    result = w.run(commit=pin_a)
+
+    assert refused and str(w.set_dir) in refused[0]
+    assert result.version == 2
+    assert manifest(w)["source"]["commit"] == pin_a
+    assert w.run(commit=pin_b).version == 3  # B runs once A has finished
+
+
+@pytest.mark.parametrize("where", ["same", "inside", "outside"])
+def test_overlapping_archive_and_set_dirs_are_refused(
+    tmp_path: Path, fake_bin: FakeBin, where: str
+) -> None:
+    pr = PR("acme/widget", 7)
+    w = world(tmp_path, fake_bin, pr)
+    archives = {
+        "same": w.set_dir,
+        "inside": w.set_dir / "archives",
+        "outside": w.set_dir.parent,
+    }[where]
+
+    with pytest.raises(ReviewBenchError, match="overlap") as err:
+        import_reviewbench(w.checkout, w.set_dir, archives, w.commit, mirror_base=w.mirrors)
+
+    assert str(w.set_dir) in str(err.value) and str(archives) in str(err.value)
+    assert not w.set_dir.exists() and fake_bin.calls() == []
+
+
+def test_golden_pr_number_must_be_an_integer(tmp_path: Path, fake_bin: FakeBin) -> None:
+    pr = PR("acme/widget", 7)
+    w = world(tmp_path, fake_bin, pr)
+    golden = pr.golden()
+    golden["pr"]["pr_number"] = 7.0
+    w.commit = commit(w.checkout, {f"golden/{pr.key}.json": json.dumps(golden)}, "float")
+
+    with pytest.raises(ReviewBenchError, match=rf"{pr.key}.*'pr': 'pr_number' must be an integer"):
+        w.run()

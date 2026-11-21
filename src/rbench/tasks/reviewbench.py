@@ -30,6 +30,7 @@ data and is validated whole; an error names the PR key and the finding's index.
 """
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -38,6 +39,8 @@ import shutil
 import subprocess
 import sys
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -166,6 +169,37 @@ def import_reviewbench(
     removed or skipped task with null.
     """
     set_dir, archive_dir = Path(set_dir), Path(archive_dir)
+    sets, archives = set_dir.resolve(), archive_dir.resolve()
+    if sets == archives or sets in archives.parents or archives in sets.parents:
+        raise ReviewBenchError(
+            f"the archive directory {archive_dir} and the set directory {set_dir} overlap;"
+            " the swap of a new version would move or delete the archives"
+        )
+    with _lock(set_dir):
+        return _import(checkout, set_dir, archive_dir, commit, subset, mirror_base)
+
+
+@contextmanager
+def _lock(set_dir: Path) -> Iterator[None]:
+    """Hold an exclusive lock on `set_dir` for one import; a second importer fails at once."""
+    set_dir.parent.mkdir(parents=True, exist_ok=True)
+    path = set_dir.parent / f".{set_dir.name}.lock"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ReviewBenchError(
+                f"another import of {set_dir} is running (it holds {path}); try again after it ends"
+            ) from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def _import(
+    checkout: Path, set_dir: Path, archive_dir: Path, commit: str, subset: str, mirror_base: str
+) -> ImportResult:
     _recover(set_dir)
     for stale in archive_dir.glob(".import-*"):
         shutil.rmtree(stale)  # archives a killed import staged; none is in use
@@ -280,7 +314,13 @@ def _swap(set_dir: Path, stage: Path) -> None:
     previous = set_dir.parent / f".{set_dir.name}.previous-{uuid.uuid4().hex}"
     if set_dir.exists():
         os.rename(set_dir, previous)
-    os.rename(stage, set_dir)
+    try:
+        os.rename(stage, set_dir)
+    except Exception:
+        # Put the installed version back now; `_recover` covers only a process that died here.
+        if previous.exists() and not set_dir.exists():
+            os.rename(previous, set_dir)
+        raise
     shutil.rmtree(previous, ignore_errors=True)
 
 
@@ -389,6 +429,8 @@ def _ground_truth(pr: PullRequest, blob: bytes) -> list[dict]:
     meta = data["pr"]
     if data["pr_key"] != pr.key or not isinstance(meta, dict) or meta.keys() != GOLDEN_PR_KEYS:
         raise ReviewBenchError(f"{label}: 'pr_key' or 'pr' does not describe this PR")
+    if type(meta["pr_number"]) is not int:
+        raise ReviewBenchError(f"{label}: 'pr': 'pr_number' must be an integer")
     if meta["repo"] not in (pr.nwo, f"https://github.com/{pr.nwo}") or (
         meta["pr_number"],
         meta["base"],

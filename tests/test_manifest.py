@@ -898,4 +898,22 @@ def test_changed_golden_needs_a_higher_version(tmp_path: Path) -> None:
             TaskError, match=r"tasks changed since the committed version 1 \(rb-1\)"
         ):
             check_version_history(base, moved)
-        check_version_history(base, replace(moved, version=2))
+        v2 = replace(moved, version=2)
+        named = ChangelogEntry(2, "New golden.", {"rb-1": entry.sha256})
+        check_version_history(base, replace(v2, changelog=(*base.changelog, named)))
+
+
+def test_changed_golden_must_be_named_in_the_new_changelog(tmp_path: Path) -> None:
+    set_dir = sourced_set(tmp_path)
+    base, _ = load_task_set(set_dir, "reviewbench")
+    unchanged = base.tasks["rb-2"].sha256
+
+    def bump(m: dict) -> None:
+        m["version"] = 2
+        m["tasks"]["rb-1"]["golden"]["sha256"] = "e" * 64
+        m["changelog"].append({"version": 2, "note": "Only rb-2.", "changed": {"rb-2": unchanged}})
+
+    edit(set_dir / MANIFEST_FILE, bump)
+    manifest, _ = load_task_set(set_dir, "reviewbench")
+    with pytest.raises(TaskError, match=r"\(rb-1\), but no changelog entry after it names them"):
+        check_version_history(base, manifest)

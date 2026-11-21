@@ -404,6 +404,14 @@ def check_version_history(base: Manifest | None, manifest: Manifest) -> None:
             " but 'version' is not higher; a changed task needs a new set version whose"
             " changelog entry names it"
         )
+    # Parsing ties a content hash to the changelog, not a golden file: check every change here.
+    appended = {t for entry in manifest.changelog[len(base.changelog) :] for t in entry.changed}
+    if unnamed := [task_id for task_id in changed if task_id not in appended]:
+        names = f"{len(unnamed)} tasks" if hidden else ", ".join(unnamed)
+        raise TaskError(
+            f"{label}: tasks changed since the committed version {base.version} ({names}),"
+            " but no changelog entry after it names them"
+        )
 
 
 def load_core_list(path: Path) -> CoreList:
