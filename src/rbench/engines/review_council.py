@@ -19,7 +19,8 @@ with `gh pr view`, which the trial's gh stub answers, so the argv holds nothing 
   turns the Google and Perplexity seats off, `config.yml` sets nothing and `learnings.md` is
   empty, so committed copies change neither the configuration nor the judge's suppressions. They
   replace committed copies in the work tree only, and git does not show them (`prepare_checkout`
-  and the trial home's git ignore file).
+  and the trial home's git ignore file). A committed symlink or directory in their way
+  (`check_checkout`), or an ignore rule that lets git show them, makes the trial `misconfigured`.
 
 The report is the session's last text that holds the pinned report heading, Markdown from that
 heading on, which the pinned normalization step copies into findings (design D9). A Codex
@@ -70,8 +71,8 @@ STATE = {
 }
 STATE_PATHS = tuple(f"{STATE_DIR}/{name}" for name in (CONFIG_FILE, *STATE))
 # Git's default core.excludesFile in the trial home: keeps the files out of `git status` while
-# the checkout does not track them. `prepare_checkout` hides the tracked ones.
-# limit: a committed .gitignore that negates these paths outranks this file.
+# the checkout does not track them. `prepare_checkout` hides the tracked ones, and refuses the
+# trial when a committed .gitignore that negates these paths (it outranks this file) shows one.
 GIT_IGNORE = "/home/node/.config/git/ignore"
 REPORT_HEADING = re.compile(r"^## Review Council Report[ \t]*$", re.MULTILINE)
 _MALFORMED = "claude: stdout holds a malformed, truncated or ambiguous stream-json event"
@@ -158,14 +159,47 @@ def launch(engines_dir: Path, settings: Mapping) -> Launch:
     return Launch("claude", argv, "", files, None)
 
 
-def prepare_checkout(run: Runner, repo: str = REPO_DIR) -> None:
-    """The adapter's checkout hook: run in the agent after `launch().files` are written and
-    before the engine starts. Marks the `.review-council/` files the checkout tracks
-    skip-worktree, so `git status` and `git diff` do not show that the launch replaced them.
-    Idempotent, and touches only those paths."""
+# Prints, per path, what the checkout holds there without following a symlink.
+_KINDS = (
+    'cd "$1" && shift && for p; do if [ -L "$p" ]; then echo link; elif [ -d "$p" ]; then'
+    ' echo dir; elif [ -e "$p" ]; then echo file; else echo none; fi; done'
+)
+_KIND_NAMES = {"link": "symlink", "dir": "directory", "file": "file"}
+
+
+def check_checkout(run: Runner, repo: str = REPO_DIR) -> list[str]:
+    """The adapter's pre-write checkout hook: run in the agent before `launch().files` are
+    written. A committed symlink at `.review-council` or at one of its files would send the
+    overlay's writes elsewhere in the checkout, and a directory there would block them, so either
+    makes the trial `misconfigured`; the reasons name the path only. Reads nothing else."""
+    paths = (STATE_DIR, *STATE_PATHS)
+    kinds = run(["sh", "-c", _KINDS, "sh", repo, *paths]).split()
+    allowed = {STATE_DIR: {"none", "dir"}} | {path: {"none", "file"} for path in STATE_PATHS}
+    return [
+        f"the checkout's {path} is a {_KIND_NAMES[kind]}, where the"
+        f" {NAME} overlay writes a {'directory' if path == STATE_DIR else 'file'}"
+        for path, kind in zip(paths, kinds, strict=True)
+        if kind not in allowed[path]
+    ]
+
+
+def prepare_checkout(run: Runner, repo: str = REPO_DIR) -> list[str]:
+    """The adapter's post-write checkout hook: run in the agent after `launch().files` are
+    written (once `check_checkout` found nothing) and before the engine starts. Marks the
+    `.review-council/` files the checkout tracks skip-worktree, so `git status` and `git diff`
+    do not show that the launch replaced them, and returns, as reasons for `misconfigured`, the
+    files git still shows (a committed ignore rule that negates the trial's). Idempotent, and
+    touches only those paths."""
     listed = run(["git", "-C", repo, "ls-files", "-z", "--", *STATE_PATHS])
     if tracked := [path for path in listed.split("\0") if path]:
         run(["git", "-C", repo, "update-index", "--skip-worktree", "--", *tracked])
+    status = ["git", "-C", repo, "status", "--porcelain", "-z", "--untracked-files=all", "--"]
+    shown = {entry[3:] for entry in run([*status, *STATE_PATHS]).split("\0") if entry}
+    return [
+        f"git status shows the {NAME} overlay's {path}; a committed ignore rule may expose it"
+        for path in STATE_PATHS
+        if path in shown
+    ]
 
 
 @functools.cache
@@ -289,13 +323,17 @@ def _events(stdout: str) -> list[dict]:
     events = []
     for line in lines[start:]:
         try:
-            event = json.loads(line, object_pairs_hook=no_repeated_keys)
+            event = json.loads(line, object_pairs_hook=no_repeated_keys, parse_constant=_refuse)
         except (ValueError, RecursionError):
             raise ReviewCouncilOutputError(_MALFORMED) from None
         if not (isinstance(event, dict) and isinstance(event.get("type"), str)):
             raise ReviewCouncilOutputError(_MALFORMED)
         events.append(event)
     return events
+
+
+def _refuse(constant: str) -> None:
+    raise ValueError(f"{constant} is not JSON")  # NaN and the infinities Python would accept
 
 
 def _texts(event: dict) -> list[str]:
@@ -341,8 +379,11 @@ def report(stdout: str) -> str:
         raise ReviewCouncilOutputError(_MALFORMED)
     texts = [t for e in events for t in _texts(e)] + [final]
     for text in reversed(texts):
-        if heading := REPORT_HEADING.search(text):
-            return text[heading.start() :]
+        # A heading with nothing after it is not a report, and does not hide an earlier one.
+        for heading in reversed(list(REPORT_HEADING.finditer(text))):
+            if text[heading.end() :].strip():
+                return text[heading.start() :]
     raise ReviewCouncilOutputError(
-        "claude: the session gave no council report (no '## Review Council Report' heading)"
+        "claude: the session gave no council report (no '## Review Council Report' heading with"
+        " a report after it)"
     )

@@ -210,25 +210,39 @@ def _checkout(tmp_path: Path, committed: dict[str, str]) -> tuple[Path, dict]:
     return repo, env
 
 
-def _write_launch_files(files: dict[str, bytes], repo: Path, env: dict) -> None:
-    """What the executor does with `Launch.files`, with the container's paths mapped here."""
-    for path, data in files.items():
+def _run(env: dict):
+    """A `Runner` here, as `repository.agent_runner` is in the agent."""
+    return lambda argv: (
+        subprocess.run(argv, env=env, capture_output=True, text=True, check=True).stdout
+    )
+
+
+def _overlay(repo: Path, env: dict) -> list[str]:
+    """What the executor does around `Launch.files`, with the container's paths mapped here:
+    the pre-write check, the writes (only when it found nothing), then the post-write hook."""
+    if problems := review_council.check_checkout(_run(env), str(repo)):
+        return problems
+    for path, data in review_council.launch(ENGINES, settings()).files.items():
         local = Path(path.replace("/rbench/repo", str(repo), 1).replace("/home/node", env["HOME"]))
         local.parent.mkdir(parents=True, exist_ok=True)
         local.write_bytes(data)
+    return review_council.prepare_checkout(_run(env), str(repo))
+
+
+def _commit_link(repo: Path, env: dict, path: str, target: str) -> None:
+    (repo / path).parent.mkdir(parents=True, exist_ok=True)
+    (repo / path).symlink_to(target)
+    _git(repo, "add", "-A", env=env)
+    _git(repo, "commit", "-q", "-m", "link", env=env)
 
 
 @pytest.mark.parametrize("committed", [COMMITTED, {}], ids=["committed-state", "no-state"])
 def test_replaced_state_is_what_the_reader_sees_and_git_shows_none_of_it(tmp_path, committed):
     repo, env = _checkout(tmp_path, committed)
     want_diff = _git(repo, "diff", "base", "reviewed", env=env)
-    launch = review_council.launch(ENGINES, settings())
 
-    _write_launch_files(launch.files, repo, env)
-    for _ in range(2):  # idempotent
-        review_council.prepare_checkout(
-            lambda argv: _git(Path(argv[2]), *argv[3:], env=env), str(repo)
-        )
+    assert _overlay(repo, env) == []
+    assert review_council.prepare_checkout(_run(env), str(repo)) == []  # idempotent
 
     state = repo / ".review-council"
     assert (state / "config.yml").read_bytes() == review_council.STATE["config.yml"]
@@ -243,16 +257,57 @@ def test_replaced_state_is_what_the_reader_sees_and_git_shows_none_of_it(tmp_pat
     assert _git(repo, "stash", "create", env=env) == ""
 
 
-def test_a_tracked_replacement_shows_without_the_checkout_hook(tmp_path):
+def test_a_tracked_replacement_shows_without_the_checkout_hook(tmp_path, monkeypatch):
     repo, env = _checkout(tmp_path, COMMITTED)
+    monkeypatch.setattr(review_council, "prepare_checkout", lambda run, repo: [])
 
-    _write_launch_files(review_council.launch(ENGINES, settings()).files, repo, env)
+    _overlay(repo, env)
 
     assert _git(repo, "status", "--porcelain", env=env).split() == [
         "M",
         ".review-council/config.yml",
         "M",
         ".review-council/learnings.md",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("link", "target", "writes"),
+    [
+        (".review-council/config.yml", "../a.py", "a file"),
+        (".review-council", "docs", "a directory"),
+    ],
+)
+def test_a_committed_symlink_on_the_overlay_refuses_the_trial_before_any_write(
+    tmp_path, link, target, writes
+):
+    reason = f"the checkout's {link} is a symlink, where the review-council overlay writes {writes}"
+    repo, env = _checkout(tmp_path, {"docs/config.yml": "reviewers: {}\n"})
+    _commit_link(repo, env, link, target)
+
+    assert _overlay(repo, env) == [reason]
+    assert _git(repo, "status", "--porcelain", "--untracked-files=all", env=env) == ""
+
+
+def test_a_directory_where_the_overlay_writes_a_file_refuses_the_trial(tmp_path):
+    repo, env = _checkout(tmp_path, {".review-council/learnings.md/x": "x\n"})
+
+    assert _overlay(repo, env) == [
+        (
+            "the checkout's .review-council/learnings.md is a directory, where the review-council"
+            " overlay writes a file"
+        )
+    ]
+
+
+def test_a_committed_rule_that_exposes_the_overlay_refuses_the_trial(tmp_path):
+    repo, env = _checkout(tmp_path, {".gitignore": "!.review-council/config.yml\n"})
+
+    assert _overlay(repo, env) == [
+        (
+            "git status shows the review-council overlay's .review-council/config.yml; a"
+            " committed ignore rule may expose it"
+        )
     ]
 
 
@@ -417,6 +472,8 @@ def test_report_given_before_the_skill_goes_on_is_the_report():
         ([SUCCESS | {"result": " \n"}], "no council report"),
         ([SUCCESS | {"result": "Cleanup complete. secret"}], "no council report"),
         ([said("### secret Report"), SUCCESS | {"result": "secret"}], "no council report"),
+        ([SUCCESS | {"result": "## Review Council Report"}], "no council report"),
+        ([SUCCESS | {"result": "## Review Council Report\n \n"}], "no council report"),
         ([SUCCESS], "malformed"),
         ([{"type": "assistant", "message": {"content": "secret"}}, SUCCESS | {"result": REPORT}],
          "malformed"),
@@ -440,12 +497,20 @@ GOOD = events(said(REPORT), SUCCESS | {"result": REPORT})
         GOOD.replace("\n", "\nsecret\n", 1),  # a non-event line among the events
         GOOD.replace('{"type": "assistant", ', "{", 1),  # an event with no type
         GOOD.replace("\n", "\n\n", 1),
+        '{"type": "system", "bad": NaN}\n' + GOOD,
+        '{"type": "system", "bad": -Infinity}\n' + GOOD,
     ],
 )
 def test_malformed_or_ambiguous_stream_is_refused_with_a_fixed_diagnostic(stdout):
     with pytest.raises(ReviewCouncilOutputError) as e:
         review_council.report(stdout)
     assert str(e.value) == MALFORMED
+
+
+def test_a_later_bare_heading_does_not_displace_an_earlier_report():
+    stdout = events(said(REPORT), SUCCESS | {"result": "Done.\n\n## Review Council Report\n"})
+
+    assert review_council.report(stdout) == REPORT
 
 
 def test_events_are_split_on_newlines_only():
