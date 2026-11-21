@@ -214,11 +214,37 @@ server or build step, and opens from disk as the spec requires.
     switches set, one call made no such attempt.
   - Codex's metrics (`ab.chatgpt.com`).
   - Codex's fetches from OpenAI file storage (`*.oaiusercontent.com`).
-- #37 checks, for the compose project it builds: a refused `CONNECT` to a numeric IP, no access to
-  a host service on the bridge, external DNS refused, and `github.com` refused and logged.
+- The proxy logs one line per request, allowed or refused: time, client, squid result and status,
+  method, target, and the address it connected to. Its own health check is left out.
+  `images/proxy` holds the squid configuration, the allowlist and the image that carries both.
+- The compose project's live test (#37) passes on Docker 29.4.1 with no credentials and no model
+  call. Refused and logged: `CONNECT github.com:443`, a `CONNECT` to the numeric address of
+  `api.anthropic.com`, and plain HTTP. `api.anthropic.com` tunnels. External names and
+  `host.docker.internal` do not resolve. A direct connection to an address fails. A listener in
+  the Docker host's network namespace answers the proxy on the egress bridge's gateway, but not the
+  agent there or on the default bridge's gateway. The agent container has no mounts.
 - Images are built per engine version and CLI versions, not per task. The scrubbed repository is
   unpacked from the task's archive (D11) and copied in with `docker cp` when the container is
   created, never mounted.
+  - The agent image (`images/agent`) installs exactly the CLI versions an engine declares, and
+    rbench reads them back from the built image. Its base images are pinned by digest, and its
+    build context holds only the Dockerfile.
+  - Images are referenced as `<name>@sha256:<hex>`. A local build in Docker's classic image store
+    has no registry digest, so the digest is the image ID: the content digest of the image's
+    configuration, which names its layers. Trials run an image by that ID, never by a tag or a pull.
+  - That ID pins one local build, not its source. Two `--no-cache` builds of the same Dockerfile
+    and CLI versions get different IDs, because creation times differ (PR #109 review). A frozen
+    plan therefore runs, and resumes, only on the images it recorded. If one is gone from the
+    Docker host, the trial fails to start with an infrastructure error. A rebuild gives a new ID,
+    so it needs a new run. Reuse (spec run-ledger) matches only trials that ran the same build.
+- Each trial is a fresh compose project. Compose identifies a project by name and would adopt
+  containers left under it, so starting a trial first removes whatever an earlier attempt left
+  under that name. A start that fails removes the containers and networks it created, and the
+  error names the trial.
+  - The name therefore grants the authority to remove that project, a running one included. The
+    executor (#55) gives each trial a name unique to the run and the trial on the Docker daemon,
+    stable across its retries, and reuses a name only while it holds the run's lock. A trial id
+    alone is unique only within its plan, so two runs could otherwise stop each other's trials.
 
 **Alternatives considered:**
 - *Anthropic's devcontainer firewall (iptables).* It allows GitHub and port 22, and resolves domains
