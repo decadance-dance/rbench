@@ -36,12 +36,15 @@ RUN set -eu; pkgs=""; \
     npm cache clean --force
 
 # rreview, when the engine is rreview. It refuses a Claude reviewer without zsh, the shell it runs
-# Claude's commands in so that no bash login reads startup files.
+# Claude's commands in so that no bash login reads startup files. The zsh version apt picked is
+# recorded in /opt/rbench/zsh.version, so two builds of the same pins can be told apart.
 ARG RREVIEW_COMMIT=
 COPY --from=rreview /out/bin/ /usr/local/bin/
 RUN set -eu; if [ -n "$RREVIEW_COMMIT" ]; then \
         apt-get update && apt-get install -y --no-install-recommends zsh \
-        && rm -rf /var/lib/apt/lists/*; \
+        && rm -rf /var/lib/apt/lists/* \
+        && install -d -m 0755 /opt/rbench \
+        && dpkg-query -W -f '${Version}\n' zsh > /opt/rbench/zsh.version; \
     fi
 
 # The gh stub (design D4): answers PR lookups from the trial's frozen PR, sends nothing anywhere.

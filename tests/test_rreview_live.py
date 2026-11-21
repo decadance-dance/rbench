@@ -5,6 +5,7 @@ It builds the agent image with rreview under a tag of its own and removes that t
 step fails. The container has no network, so no pass can reach a model.
 """
 
+import re
 import subprocess
 import uuid
 
@@ -44,10 +45,13 @@ def run(image, script: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_image_has_rreview_and_zsh(image):
-    out = run(image, "rreview --version && command -v zsh")
+    out = run(image, "rreview --version && command -v zsh && cat /opt/rbench/zsh.version")
 
     assert out.returncode == 0, out.stderr
-    assert out.stdout.splitlines() == ["rreview 0.1.1", "/usr/bin/zsh"]
+    print(out.stdout)
+    version, path, zsh = out.stdout.splitlines()
+    assert (version, path) == ("rreview 0.1.1", "/usr/bin/zsh")
+    assert re.fullmatch(r"\d[\w.:~+-]*", zsh)  # the Debian package version
 
 
 def test_rreview_resolves_the_trial_pr_through_the_gh_stub(image):
