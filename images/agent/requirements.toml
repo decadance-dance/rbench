@@ -1,0 +1,4 @@
+# Codex enforces these values over the user config.toml and -c flags (design D5, spike #20).
+# limit: ChatGPT apps are not pinned off here yet; that is #104.
+allowed_web_search_modes = ["disabled"]
+cli_auth_credentials_store = "file"

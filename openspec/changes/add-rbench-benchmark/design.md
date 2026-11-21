@@ -228,7 +228,8 @@ server or build step, and opens from disk as the spec requires.
   created, never mounted.
   - The agent image (`images/agent`) installs exactly the CLI versions an engine declares, and
     rbench reads them back from the built image. Its base images are pinned by digest, and its
-    build context holds only the Dockerfile and the files it copies in, such as the `gh` stub (D4).
+    build context is `images/agent/` alone: the Dockerfile, the managed configuration, the
+    shim scripts (D5) and the `gh` stub (D4).
   - Images are referenced as `<name>@sha256:<hex>`. A local build in Docker's classic image store
     has no registry digest, so the digest is the image ID: the content digest of the image's
     configuration, which names its layers. Trials run an image by that ID, never by a tag or a pull.
@@ -313,10 +314,15 @@ server or build step, and opens from disk as the spec requires.
     `--disallowedTools=WebSearch,WebFetch`; Codex `--strict-config -c web_search="disabled"` before
     the subcommand and `--ignore-rules` right after `exec`;
   - adds the model and effort flags for engines whose adapter passes them by flag, and only when
-    the engine's argv has none of its own;
+    the engine's argv has none of its own (Claude `--model`, `--effort`; Codex
+    `-c model="..."` and `-c model_reasoning_effort="..."` before the subcommand, which every
+    session command takes);
   - logs the argv and what binds the launch to its sessions (below);
   - starts the real binary as its own child, with the engine's stdio unchanged, forwards signals to
-    it and exits with its status.
+    it and exits with its status, or dies by the signal that killed it;
+  - reads the engine's options, and rewrites one (below), only before `--`, and for Codex only
+    before the first positional argument (a prompt or a session id). Text after them is the
+    prompt and is never read as an option.
 - Shim settings and log. Before the engine starts, the runner writes one settings file at a fixed
   path in the container, read-only to every trial process. It holds only the trial's public launch
   settings (the policy flags, and the model and effort for roles delivered by flag) and the log
@@ -324,7 +330,18 @@ server or build step, and opens from disk as the spec requires.
   starts in the container under another user, reached through a Unix socket. It stamps each record
   with the sender's process id from the socket's peer credentials (`SO_PEERCRED`) and appends it to
   a file that trial processes cannot write. An engine can add records but cannot change or remove
-  recorded ones.
+  recorded ones. Fixed paths in the image (#38): the settings
+  file `/etc/rbench/shim.json`, written by root with mode `0444`; the collector
+  `/opt/rbench/lib/collector.py`, started by `docker exec --user rbench-collector`, its socket
+  `/run/rbench/collector.sock` and its log `/var/log/rbench/shim.jsonl` (mode `0600`). A shim
+  without its settings or its collector refuses to start the CLI. Every exchange with the collector
+  has a 10-second limit: a collector that does not accept the launch in time counts as absent.
+  Once the CLI runs, a record lost to the limit leaves its sessions unbound, and a watcher still
+  running 10 seconds after the CLI exits is killed, which leaves the rollouts it had not reported
+  unbound; the trial fails closed and the shim never hangs. The shim still exits with the CLI's
+  status. The shims, the watcher, the
+  collector and the hook are Python scripts on the image's Debian `python3`, because Node has no
+  `SO_PEERCRED`.
 - Threat model of the audit (decided). The audit detects a CLI session started without the shims:
   an engine, or a model's shell command, that runs the real binary by path, by accident or on
   purpose. It does not defend against a process inside the container that forges the shims' or
@@ -333,7 +350,9 @@ server or build step, and opens from disk as the spec requires.
     records that child's process id from its own `fork`, not from a value a peer reports. Its
     watcher is a second child of the shim.
   - The collector accepts launch and binding records only from the shim and watcher pair it
-    registered for that launch. It accepts hook records from any process, because a hook record of
+    registered for that launch: a connection that opens with a launch record registers it, and a
+    watcher is accepted only while its parent process (`/proc/<pid>/stat`) is a shim whose launch
+    connection is open. It accepts hook records from any process, because a hook record of
     an unregistered CLI process is the evidence of a bypass.
 - Session binding. Each root session in the trial's transcripts must have exactly one origin launch:
   the registered shim launch that started it. It may also have any number of resume launches, each a
@@ -342,9 +361,10 @@ server or build step, and opens from disk as the spec requires.
   for the origin: a session with resumes but no origin marks the trial contaminated.
   - Claude: a SessionStart hook in the managed settings logs each session Claude Code actually
     starts: its `session_id`, its `source` (`startup`, `resume` or `fork`) and the process id of the
-    `claude` process it runs under. The audit joins that process id with the child process ids the
-    shims recorded. `startup` and `fork` make the launch the session's origin, and `resume` a resume
-    launch of the same id. The hook runs for sessions started without the shim too. Checked offline
+    `claude` process it runs under: its nearest ancestor that runs the real binary. The audit joins
+    that process id, with the process's start time so that a reused pid cannot match, with the
+    child process ids the shims recorded. `startup`, `fork` and `clear` make the launch the
+    session's origin, and `resume` and `compact` a resume launch of the same id. The hook runs for sessions started without the shim too. Checked offline
     with Claude Code 2.1.316 (#25): it reported the real id for a fresh session, `--continue`,
     `--resume` and `--resume --fork-session`, and it still ran with `--safe-mode`,
     `--setting-sources user` and `disableAllHooks` set in the user settings, in `--settings` and in
@@ -356,14 +376,20 @@ server or build step, and opens from disk as the spec requires.
     (`sessions/**/rollout-*.jsonl`) only while the CLI holds it open for writing: the flags in
     `/proc/<pid>/fdinfo` must include write or read-write access and append. A file that is only
     read, such as by Codex's metadata reader for existing rollouts, binds nothing. The watcher logs
-    the thread id from the rollout's `session_meta`. A launch that opens a rollout with no earlier
-    binding is its origin. A launch that reopens a bound rollout for append, as `codex exec resume`
-    does without writing a new `session_meta`, is a resume launch. Checked offline with Codex CLI
+    the thread id from the rollout's `session_meta`. Whether a launch is an origin or a resume
+    comes from its own argv, never from the order of bindings: a launch with `resume` among its
+    arguments before `--` (`codex resume`, `codex exec resume`) is a resume launch of every root
+    rollout it binds, which it reopens for append without writing a new `session_meta`. Any other
+    launch that binds a root rollout is its origin. A rollout bound only by resume launches, such
+    as a session the real binary started and a shim launch resumed, has no origin. A `resume`
+    that is a prompt or an option's value makes a fresh session look like a resume, which fails
+    closed. Checked offline with Codex CLI
     0.171.0 (#25): `codex exec` keeps its rollout open for read-write and append (`O_RDWR |
     O_APPEND`) for the whole session, `codex exec resume <id>` reopens the same file the same way,
     and `codex exec review` holds both the parent rollout and the review thread's rollout in the
     same process. A child thread is bound when the same launch opened it for writing and its
     `parent_thread_id` names a root thread of that launch.
+    A rollout whose session_meta names no `parent_thread_id` is a root thread, and binds like one.
     `session_id` and `thread_source` alone are not trusted. If a session ends between two polls,
     its rollout is unbound, and the trial fails closed (see the audit).
   - Rejected: matching rollouts to launches by `CODEX_HOME`, working directory and time. That only
@@ -375,9 +401,11 @@ server or build step, and opens from disk as the spec requires.
     the engine's stdio, and it depends on the output mode.
 - The audit discovers transcripts on its own: every Claude transcript (`projects/**/*.jsonl`) and
   every Codex rollout anywhere in the trial container's writable filesystem, not only in the homes
-  the shim log names. Any of these marks the trial contaminated: a session with no origin launch,
-  a session with two origin launches, a hook record whose `claude` process no shim started, or a
-  child thread whose lineage does not reach a bound root.
+  the shim log names. The runner lists the files `docker diff` reports as added or changed in the
+  agent container and copies those out with `docker cp`, which reads them whatever their owner. Any of these marks the trial contaminated: a session with no origin launch,
+  a session with two origin launches, a hook record whose `claude` process no shim started, a
+  child thread whose lineage does not reach a bound root, or a launch with no exit record in the
+  log, whose other records may then be incomplete too.
 - An engine's own model and effort must equal the planned role's. The adapter builds the engine's
   options from the plan: rreview's `--role-model` and `--role-effort`, and `codex-review`'s `-m`,
   `review_model` and `model_reasoning_effort`. The audit reads the model and effort that applied to
@@ -472,6 +500,18 @@ the trial's `CODEX_HOME` inside the container. The trial homes hold:
 - the engine's declared plugins.
 
 `CLAUDE_CODE_EFFORT_LEVEL` is unset. The reviewed repository's `CLAUDE.md` and `AGENTS.md` stay.
+
+The Claude switches above are the `env` of the managed settings, with `autoMemoryEnabled: false`,
+the `WebSearch` and `WebFetch` deny rules and the SessionStart hook, so they hold below the shims.
+The homes are `/home/node/.claude` and `/home/node/.codex`, the CLIs' default paths too, created
+empty in the image; the runner writes the engine's `config.toml` and `settings.json` into them. The
+managed files' directories must be readable by the trial's user: Claude Code 2.1.316 that cannot
+read `/etc/claude-code` runs without its managed settings and only warns on stderr. Checked live
+with Docker only (#38): both CLIs, run through the shims and by absolute path, sent their requests
+to a local recording endpoint in the container. No request carried `WebSearch`, `WebFetch` or
+Codex's `web_search` tool, also with `codex --search -c web_search="live"`; with the managed files
+hidden, the same calls carried all three. Codex ran the model set only in the trial's
+`config.toml`, and only the sessions started by path failed to bind.
 
 **Alternative considered:** pass flags through each engine's configuration. Not every engine exposes
 that, and it would make the policy differ between engines.
