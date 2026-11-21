@@ -1,5 +1,5 @@
 """The trial executor (spec run-ledger: Balanced queue order, Failures and retries, Concurrency per
-provider; design D3, D8).
+provider, Limit detection and stop; design D3, D8).
 
 The queue is `recover_trials`' answer: the trials still to run, in plan order (attempt, then task,
 then configuration). A trial starts once every provider it uses has a free slot: Claude has
@@ -14,6 +14,11 @@ An infrastructure error is retried up to `RETRIES` times. After that, and after 
 the attempt cannot record, the trial goes back to `interrupted`, no new trial starts, running ones
 finish, and `RunStopped` carries the error. An error after the trial's final state, such as a
 project its attempt could not remove, keeps that state but stops the run the same way.
+
+A trial a limit interrupted stops the run too: from the moment the attempt detects it (the
+`limit` latch, set before the trial's project is removed), no new trial starts; running ones
+finish, and `LimitReached` names the limits and any error that also stopped the run, which the
+operator fixes before resuming after the reset.
 """
 
 import os
@@ -32,11 +37,12 @@ from rbench.ledger.plan import (
     PlannedTrial,
     run_identity,
 )
-from rbench.ledger.trials import read_status, set_state
+from rbench.ledger.trials import read_status, read_wasted, set_state
 from rbench.run.adapters import ADAPTERS, Adapter
 from rbench.run.trial import (
     NORMALIZER_DIR,
     PROJECT_DIR,
+    Latch,
     RunContext,
     label,
     normalizer_name,
@@ -59,6 +65,15 @@ CODEX_LOGIN_ENV = "RBENCH_CODEX_LOGIN"
 
 class RunStopped(Exception):
     """The runner stopped on an error; running trials were let finish."""
+
+
+class LimitReached(RunStopped):
+    """A CLI reported a rate or usage limit; running trials were let finish. `errors` are the
+    errors that also stopped the run."""
+
+    def __init__(self, limits: Sequence[str], errors: Sequence[str] = ()) -> None:
+        super().__init__("; ".join(limits))
+        self.errors = list(errors)
 
 
 class _Unclean(Exception):
@@ -88,9 +103,11 @@ def execute(
     claude_concurrency: int = CLAUDE_CONCURRENCY,
     retries: int = RETRIES,
     log: Callable[[str], None] = print,
+    limit: Latch | None = None,
 ) -> dict[str, int]:
     """Run `queue` with `attempt` and return the count of each final state; raises `RunStopped`
-    once running trials end when a trial could not be run."""
+    once running trials end when a trial could not be run, or `LimitReached` when a trial was
+    interrupted by a limit. `attempt` sets `limit` when it detects one."""
     if claude_concurrency < 1:
         raise ValueError("the Claude concurrency must be at least 1")
     free = {"claude": claude_concurrency, "codex": 1}
@@ -98,13 +115,17 @@ def execute(
     running: dict[Future, PlannedTrial] = {}
     counts: dict[str, int] = {}
     errors: list[str] = []
+    limits: list[str] = []
     guard = threading.Lock()
+    if limit is None:
+        limit = Latch()
 
     def work(trial: PlannedTrial) -> str:
         name = label(plan, trial)
         trial_dir = run_dir / TRIALS_DIR / trial.id
         error, infrastructure = "", False
         for n in range(retries + 1):
+            spent = len(read_wasted(trial_dir))
             try:
                 return attempt(trial)
             except (*INFRASTRUCTURE, OSError, ValueError) as e:  # any other stops the run
@@ -114,7 +135,11 @@ def execute(
                 )
             # An error after the final state, such as removing the project, never reruns the
             # trial, but what it left is unconfirmed: the run stops.
-            if (state := read_status(trial_dir).state) not in ("pending", "running", "interrupted"):
+            # A limit's interrupted state is final too: its wasted tokens show this attempt set it.
+            state = read_status(trial_dir).state
+            if state not in ("pending", "running", "interrupted") or (
+                state == "interrupted" and len(read_wasted(trial_dir)) > spent
+            ):
                 raise _Unclean(state, f"{name}: {state}, then {error}")
             if not infrastructure or n == retries:
                 break
@@ -127,7 +152,7 @@ def execute(
 
     with ThreadPoolExecutor(max_workers=claude_concurrency + 1) as pool:
         while pending or running:
-            if not errors:
+            if not errors and not limits and not limit.is_set():
                 # The earliest attempt each provider group has queued or running.
                 earliest: dict[frozenset[str], int] = {}
                 for trial in [*pending, *running.values()]:
@@ -135,7 +160,11 @@ def execute(
                     earliest[group] = min(earliest.get(group, trial.attempt), trial.attempt)
                 for trial in list(pending):
                     need = slots(plan, trial)
-                    if trial.attempt == earliest[need] and all(free[p] > 0 for p in need):
+                    if trial.attempt != earliest[need] or not all(free[p] > 0 for p in need):
+                        continue
+                    with limit.lock:  # a limit detected during the scan wins over this start
+                        if limit.is_set():
+                            break
                         for p in need:
                             free[p] -= 1
                         pending.remove(trial)
@@ -154,16 +183,30 @@ def execute(
                     continue
                 except _Unclean as e:
                     counts[e.state] = counts.get(e.state, 0) + 1
+                    if e.state == "interrupted":  # a limit, then its teardown failed
+                        limits.append(
+                            f"{label(plan, trial)}: interrupted: {_reason(run_dir, trial)}"
+                        )
                     errors.append(str(e))
                     with guard:
                         log(str(e))
                     continue
                 counts[state] = counts.get(state, 0) + 1
+                message = f"{label(plan, trial)}: {state}"
+                if state == "interrupted":
+                    message += f": {_reason(run_dir, trial)}"
+                    limits.append(message)
                 with guard:
-                    log(f"{label(plan, trial)}: {state}")
+                    log(message)
+    if limits:
+        raise LimitReached(limits, errors)
     if errors:
         raise RunStopped("; ".join(errors))
     return counts
+
+
+def _reason(run_dir: Path, trial: PlannedTrial) -> str | None:
+    return read_status(run_dir / TRIALS_DIR / trial.id).reason
 
 
 def load_tasks(
@@ -276,4 +319,5 @@ def prepare_run(
 
 def run_trials(ctx: RunContext, queue: Sequence[PlannedTrial], **options) -> dict[str, int]:
     """`execute` the queue with `run_attempt` in `ctx`."""
-    return execute(ctx.run_dir, ctx.plan, queue, lambda t: run_attempt(ctx, t), **options)
+    attempt = lambda t: run_attempt(ctx, t)
+    return execute(ctx.run_dir, ctx.plan, queue, attempt, limit=ctx.limit, **options)

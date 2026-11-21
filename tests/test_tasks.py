@@ -23,7 +23,7 @@ from rbench.tasks import (
 )
 from rbench.tasks.loader import HIDDEN_DIR_ENV, _load_tasks
 
-_canaries = itertools.count(1)  # every test that writes tasks draws from it
+_canaries = itertools.count(1)
 # The real hidden canary prefix is operator configuration and never appears in this repository.
 HIDDEN = f"{secrets.token_hex(8)}-"
 # Built at runtime: the publication guard rejects tracked files holding hidden-prefixed task ids.

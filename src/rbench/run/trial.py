@@ -19,6 +19,8 @@ whole trial directory, the step's findings included.
 The final state:
 - `misconfigured` when a checkout hook gives a reason, before the engine starts;
 - `contaminated` when the audit says so, whatever the engine did;
+- `interrupted` when a CLI reported a rate or usage limit (`rbench.trial.limits`), with that
+  attempt's usage added to the trial's wasted tokens, whatever the engine did next;
 - `failed` with reason `timeout` when the engine ran past its limit;
 - `misconfigured` when the shim log shows the launch did not run as built;
 - `failed` with the adapter's reason for an engine error, invalid output or a PR not eligible,
@@ -38,6 +40,7 @@ import json
 import os
 import re
 import shutil
+import threading
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -54,7 +57,7 @@ from rbench.ledger.plan import (
     PlannedEngine,
     PlannedTrial,
 )
-from rbench.ledger.trials import RAW_DIR, dump_json, set_state, store_results
+from rbench.ledger.trials import RAW_DIR, add_wasted, dump_json, set_state, store_results
 from rbench.run.adapters import Adapter, EngineFailure, EngineTrial, Output
 from rbench.tasks.archive import archive_name
 from rbench.tasks.hidden import HiddenConfig
@@ -63,6 +66,7 @@ from rbench.trial.audit import Audit, audit_trial, record_audit
 from rbench.trial.compose import COMPOSE_LABEL, LOGIN_LABEL, TrialProject, login_key
 from rbench.trial.hermetic import LOG_FILE, TRANSCRIPTS_DIR, collect, prepare, shim_settings
 from rbench.trial.images import TrialError, docker
+from rbench.trial.limits import detect_limits
 from rbench.trial.repository import (
     REPO_DIR,
     RepositoryState,
@@ -146,6 +150,23 @@ def login_lock(home: Path) -> Iterator[None]:
         os.close(fd)  # releases the lock
 
 
+class Latch:
+    """Set once a trial detects a limit. The executor holds `lock` while it decides to start a
+    trial and starts it, and `set` takes it too, so every trial starts either before the latch is
+    set or not at all."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self._set = False
+
+    def set(self) -> None:
+        with self.lock:
+            self._set = True
+
+    def is_set(self) -> bool:
+        return self._set
+
+
 @dataclass
 class RunContext:
     """What every trial of a run shares. `tasks` maps the plan's task ids to loaded tasks, and
@@ -164,6 +185,9 @@ class RunContext:
     codex_login: Path | None = None
     hidden: HiddenConfig | None = None
     timeout: float = TIMEOUT
+    # Set as soon as a trial detects a limit, before its project is removed: the executor starts
+    # no trial after it.
+    limit: Latch = field(default_factory=Latch)
     configurations: dict[str, PlannedConfiguration] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -254,6 +278,14 @@ def _attempt(ctx: RunContext, trial: PlannedTrial) -> str:
         record_audit(trial_dir, audit)
         if audit.contaminated:
             return "contaminated"
+        codex_stdout = _codex_stdout(launch, records, raw)
+        if limits := detect_limits(records, raw / TRANSCRIPTS_DIR, codex_stdout.values()):
+            ctx.limit.set()
+            # Wasted first: a runner killed in between leaves the trial running, which resume
+            # reruns, rather than an interrupted trial whose tokens are lost.
+            add_wasted(trial_dir, _wasted(records, raw, codex_stdout))
+            set_state(trial_dir, "interrupted", "; ".join(map(str, limits)))
+            return "interrupted"
         if timed_out:
             set_state(trial_dir, "failed", "timeout")
             return "failed"
@@ -276,7 +308,7 @@ def _attempt(ctx: RunContext, trial: PlannedTrial) -> str:
                 findings, normalized = normalization.findings, Usage(normalization.usage, [])
             else:
                 findings = adapter.result(engine_trial, launch, output)
-            usage = count_usage(records, raw / TRANSCRIPTS_DIR, _codex_stdout(launch, records, raw))
+            usage = count_usage(records, raw / TRANSCRIPTS_DIR, codex_stdout)
             record = usage_record(usage, normalized)
             _check_unicode(findings, record)
         except EngineFailure as e:
@@ -398,6 +430,17 @@ def _archive(ctx: RunContext, task: Task) -> Path:
     if ctx.hidden is None:
         raise ValueError("the run has hidden tasks but no hidden directory")
     return ctx.hidden.inside(name)
+
+
+def _wasted(records: list[dict], raw: Path, codex_stdout: dict[int, Path]) -> dict:
+    """The usage of an attempt a limit interrupted; flagged unknown when it cannot be counted."""
+    try:
+        record = usage_record(count_usage(records, raw / TRANSCRIPTS_DIR, codex_stdout))
+        _check_unicode([], record)
+        return record
+    except (UsageError, EngineFailure):
+        # Their messages quote transcript paths, ids and models, all engine output.
+        return usage_record(Usage({}, ["the transcripts' usage is malformed, so it is unknown"]))
 
 
 def _check_unicode(findings: list[dict], usage: dict) -> None:
