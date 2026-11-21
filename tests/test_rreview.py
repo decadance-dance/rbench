@@ -99,6 +99,7 @@ def test_declaration_pins_the_release_commit_and_d13_roles():
         (lambda t: t.replace(f'kind = "git", ref = "{COMMIT}"', 'kind = "version", ref = "0.1.1"'),
          "a release this adapter knows"),
         (lambda t: t.replace("[roles.judge]", "[roles.verifier]"), "exactly the roles"),
+        (lambda t: t.replace('name = "rreview"', 'name = "rreview"\noutput = "markdown"'), "structured"),
         (lambda t: t.replace('gpt-6.2-sol", effort = "high" }\n\n[roles.coord',
                              'gpt-6.2-sol", effort = "ultra" }\n\n[roles.coord'),
          "accepts no effort 'ultra' on codex"),

@@ -73,6 +73,8 @@ def bind(engine: Engine, engines_dir: Path) -> Engine:
         raise DeclarationError(
             f"{where}: pin must be the git commit of a release this adapter knows: {known}"
         )
+    if engine.output != "structured":
+        raise DeclarationError(f"{where}: output must be 'structured' (rreview's result.json)")
     if engine.roles.keys() != ROLES.keys():
         raise DeclarationError(f"{where}: needs exactly the roles {', '.join(ROLES)}")
     for name, role in engine.roles.items():
