@@ -432,18 +432,43 @@ anywhere.
 - The prompt and schema live in `engines/plain/` (`prompt.md`, `findings.schema.json`).
 - Claude: `claude -p --tools Read,Grep,Glob,Bash --json-schema <schema>`.
 - Codex: `codex exec --output-schema <schema> -c web_search=disabled -c features.goals=false
-  -c features.view_image=false -c model_catalog_json=<catalog>`; the container is the sandbox
-  (as in D6).
-- Codex has no flag to drop its `apply_patch` edit tool: the tool comes from the model catalog's
-  `apply_patch_tool_type`. The benchmark's catalog is `codex debug models` at the pinned CLI
-  version, with that field set to null for every model in the matrix and nothing else changed. It
-  is generated per CLI version, and its hash is part of the configuration's settings.
+  -c features.view_image=false -c features.image_generation=false -c features.apps=false
+  -c agents.enabled=false -c model_catalog_json=<catalog>`; the container is the sandbox (as in
+  D6). `agents.enabled=false` turns off the subagent tools, and `features.apps=false` the apps
+  connectors and the plugin-install suggestion, which needs apps.
+- Some tools come only from the model catalog, and Codex has no flag for them. The benchmark's
+  catalog is `codex debug models` at the pinned CLI version. For every model in the matrix it
+  overrides exactly these fields and changes nothing else:
+  - `apply_patch_tool_type = null`: no `apply_patch` edit tool;
+  - `tool_mode = "direct"`: tools are sent as plain functions. The catalog's `code_mode_only`
+    puts them behind a JavaScript `exec` runner, and a model's `tool_mode` beats the
+    `code_mode` features;
+  - `experimental_supported_tools = []`: no clock, sleep or asynchronous messaging tools.
+
+  The catalog is generated per CLI version, and its hash is part of the configuration's settings.
 - Checked with Codex CLI 0.167.0 and Claude Code against a local endpoint that records requests:
   - Codex by default sends `apply_patch`, `exec_command`, `write_stdin`, `view_image`,
-    `web_search`, the goal tools, `tool_search` and `request_user_input`. With the options above it
-    sends only `exec_command`, `write_stdin`, `tool_search` and `request_user_input`; the rest of
-    the request is unchanged.
+    `web_search`, the goal tools, `tool_search` and `request_user_input`. With the 0.167.0
+    options (only `apply_patch_tool_type` in the catalog, no `image_generation`, `apps` or
+    `agents` flags) it sent only `exec_command`, `write_stdin`, `tool_search` and
+    `request_user_input`; the rest of the request was unchanged.
   - Claude with `--tools Read,Grep,Glob,Bash` sends only those four tools.
+- Checked with Codex CLI 0.171.0, the benchmark's ChatGPT login and `gpt-6.2-astra` (spike #26).
+  The tool list was read from the request body that Codex's rollout trace records
+  (`CODEX_ROLLOUT_TRACE_ROOT`). The session rollout has no tool list in this version. Under this
+  login the tools travel in an `additional_tools` input item, not in a top-level `tools` field.
+  - The remote catalog does not override `model_catalog_json`. When it is set, Codex uses that
+    catalog as a static one and never refreshes it, and no `apply_patch` was sent.
+  - The 0.171.0 catalog, remote and bundled alike, gives `gpt-6.2-sol` and `gpt-6.2-astra`
+    `tool_mode = "code_mode_only"`, multi-agent v2 and experimental tools. With only
+    `apply_patch_tool_type` nulled, Codex sent:
+    - the `exec` runner, with nested `exec_command`, `write_stdin`, MCP resource tools,
+      `request_plugin_install`, a clock and `image_gen`;
+    - the subagent tools (`spawn_agent` and five more);
+    - `wait`, `sleep`, `request_user_input` and two asynchronous messaging tools.
+  - With the options above it sent only `exec_command`, `write_stdin` and `request_user_input`.
+    `tool_search` is gone: Codex offers it only when a deferred searchable tool exists, and with
+    apps off there is none.
 - Model and effort come from the matrix, and the hermetic shims (D5) apply as for every engine.
 
 **Alternative considered:** give `plain` only the diff, with no tools. It is cheaper, but it would
@@ -631,10 +656,22 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
   source with the license kept.
 - **[Codex's base instructions still mention `apply_patch` after the tool is removed.]** → The
   model may try to call it and get an error, or write files through the shell. Neither reaches the
-  findings. The smoke stage counts such calls in `plain` transcripts.
-- **[A remote model catalog may override `model_catalog_json` under a ChatGPT login.]** → The local
-  check used a custom provider, so the remote catalog was not fetched. The spike repeats the check
-  with the real login and reads the tool list from the session transcript.
+  findings. The smoke stage counts such calls in `plain` transcripts. In spike #26 (0.171.0,
+  `gpt-6.2-astra`) the request never mentioned `apply_patch`; other models may differ.
+- **[A remote model catalog may override `model_catalog_json` under a ChatGPT login.]** → Checked
+  in spike #26 with Codex CLI 0.171.0 and the real login: it does not. Codex fetched the remote
+  catalog for `codex debug models`, but a session with `model_catalog_json` used the local
+  catalog only (D12). A CLI upgrade re-checks it in the smoke stage, from the rollout trace's
+  request body, since the session rollout has no tool list.
+- **[GPT models run outside their native code mode in `plain`.]** → The pinned catalog makes
+  `gpt-6.2-*` code-mode-only, with subagent and image tools. `plain` overrides that (D12),
+  because spec `engine-configurations` gives `plain` the same file-reading and shell tools on
+  both CLIs. `plain` therefore measures each model with that minimal toolset. The model in its
+  native Codex harness is what `codex-review` and the other Codex engines measure. The report
+  says so next to the `plain` results.
+- **[Codex engines other than `plain` keep the apps connectors under a ChatGPT login.]** →
+  `features.apps` is on by default and is turned off only for `plain` (D12). Whether every Codex
+  engine needs it off for the hermetic policy (D5) is a follow-up.
 - **[ReviewBench tasks are public and likely memorized.]** → The report shows task sets apart; `ours`
   and `hidden` carry the weight of the engine decision.
 - **[Transcript usage counts differ from CLI-reported usage.]** → The spike (#24) found the on-disk
