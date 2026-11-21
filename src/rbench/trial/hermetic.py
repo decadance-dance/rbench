@@ -13,6 +13,7 @@ the step that mounts it. After the engine ends, `collect` copies out the shim lo
 transcript the container's writable layer holds and the trial's launch record.
 """
 
+import copy
 import json
 import re
 import subprocess
@@ -66,7 +67,7 @@ def shim_settings(by_flag: Mapping[str, Setting]) -> dict:
         raise ValueError(f"shim settings: unknown CLI {', '.join(sorted(unknown))}")
     settings: dict = {"socket": SOCKET}
     for cli in CLIS:
-        settings[cli] = json.loads(json.dumps(POLICY[cli]))
+        settings[cli] = copy.deepcopy(POLICY[cli])
         if cli in by_flag:
             settings[cli] |= {"model": by_flag[cli].model, "effort": by_flag[cli].effort}
     return settings

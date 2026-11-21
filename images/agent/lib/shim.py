@@ -37,92 +37,26 @@ FORWARDED = (
 # Claude Code 2.1.316 `claude --help`, Commands. A launch whose first argument is one of these, or
 # that asks for the version or help, is not a session and gets no flags.
 # limit: a command after leading options (`claude --debug mcp list`) is taken for a session.
-CLAUDE_COMMANDS = frozenset(
-    [
-        "agents",
-        "attach",
-        "auth",
-        "auto-mode",
-        "doctor",
-        "gateway",
-        "import",
-        "install",
-        "logs",
-        "mcp",
-        "plugin",
-        "plugins",
-        "purge",
-        "respawn",
-        "rm",
-        "setup-token",
-        "stop",
-        "kill",
-        "ultrareview",
-        "update",
-        "upgrade",
-    ]
-)
+CLAUDE_COMMANDS = frozenset({
+    "agents", "attach", "auth", "auto-mode", "doctor", "gateway", "import", "install", "logs",
+    "mcp", "plugin", "plugins", "purge", "respawn", "rm", "setup-token", "stop", "kill",
+    "ultrareview", "update", "upgrade",
+})  # fmt: skip
 CLAUDE_INFO = frozenset({"-v", "--version", "-h", "--help"})
 CLAUDE_CONTINUATION = ("-c", "--continue", "-r", "--resume", "--from-pr")
 
 # Codex CLI 0.171.0 `codex --help`: the top-level options that take a value, and the commands.
-CODEX_VALUE_OPTIONS = frozenset(
-    [
-        "-c",
-        "--config",
-        "--enable",
-        "--disable",
-        "--remote",
-        "--remote-auth-token-env",
-        "-i",
-        "--image",
-        "-m",
-        "--model",
-        "--local-provider",
-        "-p",
-        "--profile",
-        "-s",
-        "--sandbox",
-        "-C",
-        "--cd",
-        "--add-dir",
-        "-a",
-        "--ask-for-approval",
-    ]
-)
-CODEX_COMMANDS = frozenset(
-    [
-        "agents",
-        "exec",
-        "e",
-        "review",
-        "login",
-        "logout",
-        "mcp",
-        "plugin",
-        "app-server",
-        "remote-control",
-        "completion",
-        "update",
-        "doctor",
-        "sandbox",
-        "debug",
-        "apply",
-        "a",
-        "resume",
-        "queue",
-        "archive",
-        "delete",
-        "migrate-rollouts",
-        "migrate-nfs-db",
-        "unarchive",
-        "fork",
-        "cloud",
-        "exec-server",
-        "features",
-        "help",
-    ]
-)
+CODEX_VALUE_OPTIONS = frozenset({
+    "-c", "--config", "--enable", "--disable", "--remote", "--remote-auth-token-env", "-i",
+    "--image", "-m", "--model", "--local-provider", "-p", "--profile", "-s", "--sandbox", "-C",
+    "--cd", "--add-dir", "-a", "--ask-for-approval",
+})  # fmt: skip
+CODEX_COMMANDS = frozenset({
+    "agents", "exec", "e", "review", "login", "logout", "mcp", "plugin", "app-server",
+    "remote-control", "completion", "update", "doctor", "sandbox", "debug", "apply", "a", "resume",
+    "queue", "archive", "delete", "migrate-rollouts", "migrate-nfs-db", "unarchive", "fork",
+    "cloud", "exec-server", "features", "help",
+})  # fmt: skip
 CODEX_SESSIONS = frozenset({"exec", "e", "review", "resume", "fork"})  # and the TUI
 CODEX_INFO = frozenset({"-V", "--version", "-h", "--help"})
 CODEX_EXEC = frozenset({"exec", "e"})
@@ -227,10 +161,9 @@ def start_time(pid: int) -> int | None:
     """A process's start time in clock ticks since boot: with its pid, it names the process."""
     try:
         with open(f"{PROC}/{pid}/stat", encoding="ascii", errors="replace") as f:
-            stat = f.read()
-    except OSError:
+            return int(f.read().rpartition(")")[2].split()[19])
+    except (OSError, ValueError, IndexError):
         return None
-    return int(stat.rpartition(")")[2].split()[19])
 
 
 def parent(pid: int) -> int | None:
@@ -320,8 +253,8 @@ def watch(child: int, conn: socket.socket, stop: int) -> None:
         for pid in descendants(child):
             for path, flags in open_rollouts(pid):
                 if path not in reported and path not in pending:
-                    pending[path] = {"path": path, "pid": pid, "start": start_time(pid)}
-                    pending[path]["flags"] = flags
+                    start = start_time(pid)
+                    pending[path] = {"path": path, "pid": pid, "start": start, "flags": flags}
         for path, binding in list(pending.items()):
             meta = session_meta(path)
             if meta is None and not done:
