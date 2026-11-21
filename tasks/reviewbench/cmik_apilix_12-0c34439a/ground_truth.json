@@ -1,0 +1,325 @@
+{
+  "canary": "rbench-canary-562ef417c4ac4fd08266e4695ba6ebe7",
+  "items": [
+    {
+      "category": "reliability",
+      "end_line": 23,
+      "file": "server/package.json",
+      "id": "cmik_apilix_12-0c34439a#0",
+      "message": "bcryptjs and jsonwebtoken are recorded in the lockfile's root-package dependencies section but are absent from server/package.json. The PR description says these were added to fix 'Cannot find module' crashes, but the package.json diff only adds simple-git. A fresh `npm install` in the server directory will not install bcryptjs or jsonwebtoken, and `npm ci` will fail with a lockfile/manifest mismatch.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "must",
+      "start_line": 1
+    },
+    {
+      "category": "security",
+      "end_line": 1044,
+      "file": "server/index.js",
+      "id": "cmik_apilix_12-0c34439a#1",
+      "message": "The `dataDir` value used to construct repo paths in all three git sync routes is taken directly from the request body (`req.body.dataDir`). Any caller can supply an arbitrary `dataDir` (e.g. `/`) to make the server create git repositories and write workspace files anywhere on the filesystem that the server process can access. The path-traversal check on `workspaceId` does nothing to constrain `dataDir` itself. The routes should reject any client-supplied `dataDir` and use only `process.env.APILIX_DATA_DIR`.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "must",
+      "start_line": 1037
+    },
+    {
+      "category": "security",
+      "end_line": 1044,
+      "file": "server/index.js",
+      "id": "cmik_apilix_12-0c34439a#2",
+      "message": "The path-traversal guard `repoDir.startsWith(path.resolve(repoBase))` is missing a trailing path separator. If `repoBase` is `/data/git-sync/workspaces`, a `workspaceId` of `../workspaces_evil/x` resolves to `/data/git-sync/workspaces_evil/x`, which starts with `/data/git-sync/workspaces` and passes the check. The same bug exists at lines 1083 and 1118. The fix, consistent with `assertInsideUserData` in electron/main.js, is to append `path.sep` to the base when comparing.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "must",
+      "start_line": 1044
+    },
+    {
+      "category": "correctness",
+      "end_line": 51,
+      "file": "client/src/utils/syncEngine.ts",
+      "id": "cmik_apilix_12-0c34439a#3",
+      "message": "`syncConfig.lastSynced` is never written by `writeSyncConfig` in storageDriver.ts, and the `SyncConfig` objects constructed in WorkspaceManagerModal never include a `lastSynced` field. As a result `localTs` is always `null`, the condition `remoteTs && localTs && remoteTs > localTs` is always false, and conflict detection is completely disabled — every pull silently overwrites local changes without warning.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "must",
+      "start_line": 49
+    },
+    {
+      "category": "correctness",
+      "end_line": 51,
+      "file": "client/src/utils/syncEngine.ts",
+      "id": "cmik_apilix_12-0c34439a#4",
+      "message": "Conflict detection compares timestamps as strings (`remoteTs > localTs`). The HTTP adapter returns `Last-Modified` (RFC 2822 format, e.g. `Mon, 01 Jan 2024 00:00:00 GMT`) and S3 also returns `Last-Modified` in RFC 2822. RFC 2822 strings are not lexicographically sortable, so the comparison produces incorrect results for those providers. All timestamps should be parsed into `Date` objects before comparing.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 50
+    },
+    {
+      "category": "correctness",
+      "end_line": 573,
+      "file": "client/src/store.tsx",
+      "id": "cmik_apilix_12-0c34439a#5",
+      "message": "`saveTimer` is stored in React `useState` rather than `useRef`. Every time the 300ms debounce timer is set, `setSaveTimer(t)` triggers an additional component re-render. Because `saveTimer` is not in the effect dependency array, the effect closure captures a stale value of it, making the `if (saveTimer) clearTimeout(saveTimer)` guard unreliable. The cleanup function (`return () => clearTimeout(t)`) already handles timer cancellation correctly; `saveTimer` state serves no purpose and adds unnecessary renders. Use `useRef` instead.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 573
+    },
+    {
+      "category": "correctness",
+      "end_line": 668,
+      "file": "client/src/store.tsx",
+      "id": "cmik_apilix_12-0c34439a#6",
+      "message": "When the user switches workspaces, the dependency-change triggers the save effect to re-run, which first runs the cleanup (`clearTimeout(t)`) cancelling any pending 300ms debounce timer for the previous workspace before it fires. Edits made to workspace A in the 300ms window before switching are silently lost because the save for workspace A is cancelled and a new timer starts for workspace B. There is no flush-before-switch logic in either handleSwitch implementation.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "must",
+      "start_line": 648
+    },
+    {
+      "category": "correctness",
+      "end_line": 191,
+      "file": "client/src/utils/storageDriver.ts",
+      "id": "cmik_apilix_12-0c34439a#7",
+      "message": "In `writeSyncConfig`, if the Electron API's `readJsonFile` call throws (e.g. corrupted file, permission error), the `catch` silently falls through with `store` still set to `{}`. The subsequent `lsWrite` then writes only the current workspace's config, erasing all other workspaces' sync credentials from localStorage. To fix: read the existing localStorage store as the fallback when the file read fails, rather than using the empty `store`.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 179
+    },
+    {
+      "category": "performance",
+      "end_line": 176,
+      "file": "electron/main.js",
+      "id": "cmik_apilix_12-0c34439a#8",
+      "message": "The IPC handlers for `read-json-file`, `write-json-file`, `delete-file`, and `list-dir` use synchronous Node.js filesystem APIs (`fs.readFileSync`, `fs.writeFileSync`, `fs.mkdirSync`, `fs.readdirSync`, `fs.unlinkSync`) directly on the Electron main process thread. These block the main process event loop for the duration of each I/O operation. On slow disks or with large workspace files, this can freeze the entire Electron window. All handlers should use `fs.promises` equivalents.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 140
+    },
+    {
+      "category": "reliability",
+      "end_line": 101,
+      "file": "client/src/components/WorkspaceManagerModal.tsx",
+      "id": "cmik_apilix_12-0c34439a#9",
+      "message": "`handleDelete` dispatches `DELETE_WORKSPACE` and conditionally `SWITCH_WORKSPACE` (updating in-memory state immediately) and then calls `StorageDriver.writeManifest`. If `writeManifest` fails, the on-disk manifest still contains the deleted workspace but the in-memory state does not. On next app restart the deleted workspace will reappear in the manifest but its data file has already been deleted by `deleteWorkspace`, resulting in an empty workspace silently presented to the user. Errors from `writeManifest` are not caught or surfaced.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 87
+    },
+    {
+      "category": "accessibility",
+      "end_line": 26,
+      "file": "client/src/utils/sync/s3Adapter.ts",
+      "id": "cmik_apilix_12-0c34439a#13",
+      "message": "The S3 adapter relies on `window.electronAPI.getPresignedUrl` to function. If this API is not available (e.g., when running in a browser), it throws an error. However, the UI in `WorkspaceManagerModal.tsx` does not disable the S3 sync option for non-Electron environments, leading to a poor user experience where the user can configure S3 sync only to have it fail at runtime.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 23
+    },
+    {
+      "category": "reliability",
+      "end_line": 1009,
+      "file": "server/index.js",
+      "id": "cmik_apilix_12-0c34439a#14",
+      "message": "`simple-git` is an optional dependency. If it fails to load, the server continues to run. However, the error is caught and `simpleGit` remains `undefined`. The health check endpoint `/health` will still return a 200 OK status, which could mislead monitoring systems into thinking the service is fully functional when a core feature (git sync) is unavailable.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 1009
+    },
+    {
+      "category": "reliability",
+      "end_line": 18,
+      "file": "server/package-lock.json",
+      "id": "cmik_apilix_12-0c34439a#18",
+      "message": "`bcryptjs` and `jsonwebtoken` are added to `package-lock.json` but not declared in `server/package.json`. With npm's lockfile v3, packages listed at the top level of `node_modules/...` without a matching root dependency entry are treated as extraneous and will be pruned by `npm ci` / `npm install`. Either declare these in `package.json` (as the PR description implied) or remove their entries from the lockfile to keep both files consistent.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 13
+    },
+    {
+      "category": "correctness",
+      "end_line": 39,
+      "file": "client/src/utils/sync/s3Adapter.ts",
+      "id": "cmik_apilix_12-0c34439a#19",
+      "message": "`s3Adapter` calls `(window as any).electronAPI.getPresignedUrl(...)`, but no `getPresignedUrl` is exposed in `electron/preload.js` and no `get-presigned-url` IPC handler is registered in `electron/main.js`. As a result, every push/pull/timestamp call for the S3 provider will throw `S3 presigned URL generation requires Electron (not available in browser mode)` even when running inside Electron. The S3 provider is documented as a supported, Electron-only option (see `WORKSPACES.md` §7 and `README.md`), but it is non-functional in this PR. Either implement the `get-presigned-url` IPC channel (and add `getPresignedUrl` to preload) or remove S3 from the provider list and documentation until it lands.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "must",
+      "start_line": 20
+    },
+    {
+      "category": "reliability",
+      "end_line": 44,
+      "file": "client/src/utils/snapshotEngine.ts",
+      "id": "cmik_apilix_12-0c34439a#20",
+      "message": "The history index is sliced to `MAX_SNAPSHOTS` (50), but the corresponding snapshot files written to `userData/workspaces/{workspaceId}/snapshots/{snapshotId}.json` are never deleted from disk when their entry is evicted from the index. Because a new snapshot is created on every debounced save (every ~300ms of user idle time after a change), this leaks disk space indefinitely and orphans potentially large workspace JSON blobs that no UI can ever surface. Before slicing the updated index, capture the dropped entries and call `StorageDriver.deleteFile` (or a new `deleteSnapshot` helper) for each evicted `snapshotId`.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 36
+    },
+    {
+      "category": "correctness",
+      "end_line": 666,
+      "file": "client/src/store.tsx",
+      "id": "cmik_apilix_12-0c34439a#21",
+      "message": "A snapshot is created on **every** debounced workspace save, which fires roughly every time any field changes (collections, environments, variables, cookies, mock state, even the active workspace id). With `MAX_SNAPSHOTS = 50` and a 300 ms debounce, the rolling history window covers only ~15 seconds of editing in practice, making the History tab almost useless for actual rollback. Consider gating snapshot creation behind a longer minimum interval (e.g. only one snapshot per N minutes, or only when a structural change is detected by `diffSnapshots`).",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 664
+    },
+    {
+      "category": "documentation",
+      "end_line": 670,
+      "file": "WORKSPACES.md",
+      "id": "cmik_apilix_12-0c34439a#22",
+      "message": "The feature comparison table marks Git as **not requiring Electron** (`✗`), but `gitAdapter.ts` calls `getDataDir()` from `storageDriver`, which returns `null` in browser mode, and then sends `dataDir: null` to the server. The server route at `/api/sync/git/push` (and pull/timestamp) explicitly requires `dataDir`: `if (!workspaceId || !data || !config?.remote || !dataDir) return res.status(400)...`. So in practice, Git sync also requires Electron unless `APILIX_DATA_DIR` is set in the server's environment. Either clarify this row (e.g. \"Requires Electron or `APILIX_DATA_DIR` on server\") or update the adapter/server to be browser-friendly.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 667
+    },
+    {
+      "category": "maintainability",
+      "end_line": 99,
+      "file": "client/src/components/WorkspaceManagerModal.tsx",
+      "id": "cmik_apilix_12-0c34439a#23",
+      "message": "In `handleDelete`, `state.activeWorkspaceId` is read both before and after `dispatch({ type: 'DELETE_WORKSPACE', ... })`, but the closure's `state.activeWorkspaceId` does not update synchronously. The subsequent `await StorageDriver.writeManifest(...)` therefore persists `activeWorkspaceId: state.activeWorkspaceId === id ? fallback.id : state.activeWorkspaceId` using the *pre-dispatch* value — which still works for the current case, but the logic is fragile and easy to break. More importantly, the debounced save effect in `store.tsx` will fire a moment later and overwrite this manifest write with the new state anyway, so this explicit `writeManifest` call is redundant and the two writes can race on slow disks. Consider removing the explicit `writeManifest` here and relying on the debounced effect, or routing all manifest writes through a single helper.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 87
+    },
+    {
+      "category": "correctness",
+      "end_line": 476,
+      "file": "client/src/components/WorkspaceManagerModal.tsx",
+      "id": "cmik_apilix_12-0c34439a#24",
+      "message": "`TeamTab` imports `dispatch` from `useApp()` but never uses it; it also reads `activeWorkspace.teamServerUrl` and writes to local `serverUrl` state but never persists the entered Server URL or JWT token anywhere (no `StorageDriver.writeSyncConfig` call). After \"Test connection\" succeeds the credentials are simply discarded on tab change or modal close, contradicting `WORKSPACES.md` §9 step 6 which says clicking \"Test connection in the Team tab\" is part of the connect-and-sync flow. Either remove the unused `dispatch`, wire up the team-server credential save, or document that this tab is informational only.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 444
+    },
+    {
+      "category": "correctness",
+      "end_line": 228,
+      "file": "client/src/components/WorkspaceManagerModal.tsx",
+      "id": "cmik_apilix_12-0c34439a#25",
+      "message": "These S3 field keys do not match what the S3 adapter reads: the UI stores `accessKeyId` and `secretAccessKey`, while `s3Adapter` sends `config.keyId` and `config.secret` to the presigner. Even after adding the missing IPC handler, S3 requests would be generated with undefined credentials.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "must",
+      "start_line": 227
+    },
+    {
+      "category": "security",
+      "end_line": 187,
+      "file": "client/src/utils/storageDriver.ts",
+      "id": "cmik_apilix_12-0c34439a#26",
+      "message": "Despite the encryption helper below and the type/docs saying credentials are encrypted, this writes provider config directly to `sync-config.json` and localStorage. Tokens and access keys entered in the Sync tab are therefore persisted in plaintext in Electron mode.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 185
+    },
+    {
+      "category": "correctness",
+      "end_line": 47,
+      "file": "client/src/components/WorkspaceSwitcher.tsx",
+      "id": "cmik_apilix_12-0c34439a#27",
+      "message": "Switching workspaces reads the target workspace and dispatches immediately without flushing the active workspace. Since `AppProvider` persists on a 300 ms debounce and cancels the pending timer on state changes, edits made shortly before switching can be dropped instead of saved to the previous workspace.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "must",
+      "start_line": 46
+    },
+    {
+      "category": "correctness",
+      "end_line": 68,
+      "file": "client/src/components/WorkspaceManagerModal.tsx",
+      "id": "cmik_apilix_12-0c34439a#28",
+      "message": "This workspace switch path also bypasses a flush of the currently active workspace before replacing state. With the debounced persistence in `AppProvider`, recent edits can be lost when switching from the manager modal before the pending save fires.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "must",
+      "start_line": 67
+    },
+    {
+      "category": "security",
+      "end_line": 1035,
+      "file": "server/index.js",
+      "id": "cmik_apilix_12-0c34439a#29",
+      "message": "These mutating git sync endpoints are exposed on the same unauthenticated Express app with global `cors()` enabled (server/index.js:43). A malicious web page can issue requests to the user's local server and cause git commits/pushes using supplied remotes/credentials; add an app-local authorization/CSRF guard before exposing filesystem and network side effects.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 1033
+    },
+    {
+      "category": "correctness",
+      "end_line": 310,
+      "file": "client/src/components/WorkspaceManagerModal.tsx",
+      "id": "cmik_apilix_12-0c34439a#30",
+      "message": "When the user resolves a conflict with `Keep Local`, `syncPull` returns `null`, but this branch reports “Remote is empty — nothing to pull”. That gives the wrong result message for a conflict resolution and may lead users to believe the remote has no data.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 309
+    },
+    {
+      "category": "correctness",
+      "end_line": 291,
+      "file": "client/src/components/WorkspaceManagerModal.tsx",
+      "id": "cmik_apilix_12-0c34439a#31",
+      "message": "Push reads the workspace from StorageDriver instead of the current in-memory state. Because workspace persistence is debounced, clicking Push immediately after edits can upload the previous on-disk version and omit the user's latest changes.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 287
+    },
+    {
+      "category": "correctness",
+      "end_line": 112,
+      "file": "client/src/components/WorkspaceManagerModal.tsx",
+      "id": "cmik_apilix_12-0c34439a#32",
+      "message": "Duplicating a workspace reads the source data from StorageDriver. For the active workspace, recent in-memory edits may not have reached disk yet because saves are debounced, so the duplicate can be created without the latest changes.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 101
+    },
+    {
+      "category": "correctness",
+      "end_line": 62,
+      "file": "client/src/components/WorkspaceSwitcher.tsx",
+      "id": "cmik_apilix_12-0c34439a#33",
+      "message": "Creating a new workspace switches `activeWorkspaceId` without first persisting the current workspace. With the debounced save in `AppProvider`, any edits made shortly before creating the workspace can be discarded when the pending save is cancelled.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "must",
+      "start_line": 60
+    },
+    {
+      "category": "correctness",
+      "end_line": 1063,
+      "file": "server/index.js",
+      "id": "cmik_apilix_12-0c34439a#34",
+      "message": "`URL.username` and `URL.password` setters perform their own percent-encoding, so passing `encodeURIComponent(...)` here double-encodes credentials that contain reserved characters such as `%`, `@`, or `:`. Those tokens/passwords will fail authentication when pushed.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 1061
+    },
+    {
+      "category": "reliability",
+      "end_line": 124,
+      "file": "client/src/utils/storageDriver.ts",
+      "id": "cmik_apilix_12-0c34439a#35",
+      "message": "Deleting a workspace only removes `{id}.json`; its `workspaces/{id}/history.json` and `workspaces/{id}/snapshots/*` directory are left behind. Deleted workspace data can remain on disk indefinitely through snapshots.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 123
+    },
+    {
+      "category": "security",
+      "end_line": 97,
+      "file": "client/src/components/WorkspaceManagerModal.tsx",
+      "id": "cmik_apilix_12-0c34439a#36",
+      "message": "Workspace deletion removes the workspace JSON and manifest entry, but it never removes the workspace's entry from `sync-config.json`. Any tokens/access keys saved for the deleted workspace remain on disk after deletion.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 92
+    },
+    {
+      "category": "documentation",
+      "end_line": 3,
+      "file": "WORKSPACES.md",
+      "id": "cmik_apilix_12-0c34439a#37",
+      "message": "The PR description says this change only declares missing `jsonwebtoken` and `bcryptjs` dependencies, but this file introduces extensive workspace/sync documentation for a much larger feature set. The description should be updated so reviewers and release notes reflect the actual scope and risk of the PR.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 1
+    }
+  ]
+}

@@ -1,0 +1,105 @@
+{
+  "canary": "rbench-canary-380de3a84c894c5c847bfd46fc671f62",
+  "items": [
+    {
+      "category": "reliability",
+      "end_line": 313,
+      "file": "chronicle-daemon/crates/storage/src/media.rs",
+      "id": "mheuss_chronicle_14-04ac4c02#1",
+      "message": "The function `walk_files_recursive` is designed to be a best-effort walk and swallows errors by logging a warning and returning. However, its public-facing caller `MediaManager::walk_files` does not propagate any error information, returning an empty `Vec`. This loss of information could mask filesystem issues, such as permission errors on subdirectories, from callers like `sweep_orphans` which might silently fail to scan parts of the media directory, leaving orphan files behind.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 296
+    },
+    {
+      "category": "security",
+      "end_line": 67,
+      "file": "chronicle-daemon/src/pipeline.rs",
+      "id": "mheuss_chronicle_14-04ac4c02#3",
+      "message": "The error handling for `harden_file` attempts to clean up the newly created HEIF file on failure. However, if `storage.media_manager().delete_file()` also fails, the error from the deletion is logged but not propagated. The original error from `harden_file` is returned, but the file remains on disk with incorrect permissions, and the system is in a state where manual intervention may be required to fix both permissions and potential orphan files. This could be problematic if the permissions failure is persistent.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "should",
+      "start_line": 59
+    },
+    {
+      "category": "reliability",
+      "end_line": 31,
+      "file": "chronicle-daemon/src/main.rs",
+      "id": "mheuss_chronicle_14-04ac4c02#4",
+      "message": "The startup orphan sweep logs errors but continues with daemon startup. If the sweep fails due to a transient issue, it's missed until the next restart. If it fails due to a persistent issue (e.g., directory permissions), it will fail on every startup, but the daemon will run anyway, potentially accumulating orphan files over time. Depending on the severity of the failure, a fatal exit might be more appropriate to alert an operator.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 24
+    },
+    {
+      "category": "reliability",
+      "end_line": 166,
+      "file": "chronicle-daemon/crates/storage/src/retention.rs",
+      "id": "mheuss_chronicle_14-04ac4c02#6",
+      "message": "In `sweep_media_orphans`, if `media_mgr.delete_file` fails, the error is logged and the function continues. This could lead to a situation where `sweep_orphans` reports success (returning `Ok(bytes_freed)`) even if it failed to delete some or all of the orphan files it found, leaving them on disk.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 150
+    },
+    {
+      "category": "maintainability",
+      "end_line": 42,
+      "file": "chronicle-daemon/crates/storage/src/files.rs",
+      "id": "mheuss_chronicle_14-04ac4c02#12",
+      "message": "After this refactor, the entire `files` module consists only of `#[cfg(test)]` helpers (`sanitize_id`, `date_parts`, `screenshot_path`, `audio_path`) and their tests. None of its functions are referenced from production code anymore, and the helpers reimplement the path/date logic that now lives in `media.rs` — so the tests verify a parallel implementation, not the real code path. Consider removing this module entirely (and the `pub(crate) mod files;` declaration in `lib.rs`) to avoid dead code drift, or convert these into tests of `MediaManager::allocate_path` that assert the expected `YYYY/MM/DD/<ts>_<id>.<ext>` layout against the actual production code.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 1
+    },
+    {
+      "category": "testing",
+      "end_line": 191,
+      "file": "chronicle-daemon/crates/storage/src/retention.rs",
+      "id": "mheuss_chronicle_14-04ac4c02#13",
+      "message": "`dummy_media_mgr()` uses a hard-coded shared path `/tmp/chronicle-test-dummy` that is created (but never cleaned up) and reused across every test that calls it. Because `cargo test` runs tests in parallel by default, several tests may concurrently share/own this directory, and on systems where `/tmp` is a symlink (e.g. macOS where `/tmp -> /private/tmp`) the canonicalization in `MediaManager::new` will resolve to a different path than the literal one passed in — which is fine here only because the dummy is never used for actual writes. Prefer creating a per-test `tempfile::tempdir()` (as `cleanup_handles_missing_files_gracefully` and the other tests already do) so each test gets an isolated, automatically-cleaned-up base directory.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 187
+    },
+    {
+      "category": "security",
+      "end_line": 241,
+      "file": "chronicle-daemon/crates/storage/src/media.rs",
+      "id": "mheuss_chronicle_14-04ac4c02#14",
+      "message": "`DirBuilder::mode` only affects directories created by this call. If the media/date directory already exists with more permissive permissions (for example from an older install or a previous run), this leaves it unchanged, so the storage hardening does not consistently enforce 0o700 on media directories.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 238
+    },
+    {
+      "category": "security",
+      "end_line": 67,
+      "file": "chronicle-daemon/crates/storage/src/media.rs",
+      "id": "mheuss_chronicle_14-04ac4c02#15",
+      "message": "This validation only constrains paths to the storage root, but `delete_file` is used on paths read from the database and `insert_screenshot`/`insert_audio_segment` accept caller-supplied paths. A malformed or legacy row pointing at another file under the root (for example `chronicle.db` or the IPC socket) would pass validation and be removable during cleanup; media operations should be constrained to the intended media subdirectories or validated at insert time.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 55
+    },
+    {
+      "category": "maintainability",
+      "end_line": 16,
+      "file": "chronicle-daemon/crates/storage/src/lib.rs",
+      "id": "mheuss_chronicle_14-04ac4c02#16",
+      "message": "`files` no longer has any non-test items or non-test references after moving file lifecycle logic into `media` (a repository search for `files::` returns no uses). Keeping it as a normal module leaves a dead production module just to host test-only helpers; consider removing it or moving those tests under `media` to avoid carrying obsolete structure.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 16
+    },
+    {
+      "category": "testing",
+      "end_line": 190,
+      "file": "chronicle-daemon/crates/storage/src/retention.rs",
+      "id": "mheuss_chronicle_14-04ac4c02#17",
+      "message": "This test helper uses a fixed `/tmp/chronicle-test-dummy` directory instead of a per-test temp directory, so tests can interfere across concurrent runs and leave persistent state on the developer/CI machine. Prefer returning a `TempDir` alongside the manager or constructing the manager from each test's existing temp root.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 187
+    }
+  ]
+}

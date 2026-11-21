@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "12b877601c56d0c64bf2b9889c4468a524e22c6553a72eaff26c21dbaff938b1",
+  "base": "b29930e93765700608313c0f0d32c4818734e158",
+  "description": "## Summary\n\nCloses #14.\n\nThis keeps the audit log list endpoint focused on lightweight summary rows by omitting request/response headers and bodies from GET /admin/audit. Full payloads remain available through the existing GET /admin/audit/{id} detail route, which the audit table now calls only when a row is expanded.\n\n## Changes\n\n- Add a summary query path for audit log list responses.\n- Return total and has_more pagination metadata from GET /admin/audit.\n- Cap requested audit list page size to avoid accidental very large responses.\n- Lazy-load full audit entry details in the UI when a row expands.\n- Add integration coverage that list responses omit payloads while detail responses preserve them.\n\n## Validation\n\n- go test -c -o /tmp/crabtrap-admin.test ./internal/admin\n- go test -c -o /tmp/crabtrap-proxy.test ./internal/proxy\n- go vet ./...\n- /Users/nathanmetzger/go/bin/staticcheck ./...\n- make build-web\n\nNote: go test ./internal/admin is blocked locally because Testcontainers cannot find rootless Docker in this environment.",
+  "head": "5ef0884c59b3ee1d5a986dd02686a8232570c80f",
+  "id": "brexhq_crabtrap_15-5ef0884c",
+  "language": "Go",
+  "pr": 15,
+  "repo": "brexhq/CrabTrap",
+  "set": "reviewbench",
+  "title": "fix: lighten audit log list responses"
+}

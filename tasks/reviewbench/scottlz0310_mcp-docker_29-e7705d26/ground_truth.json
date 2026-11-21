@@ -1,0 +1,225 @@
+{
+  "canary": "rbench-canary-244021cf1593434fb6da40de9a2acf90",
+  "items": [
+    {
+      "category": "security",
+      "end_line": 115,
+      "file": "services/copilot-review-mcp/internal/auth/session.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#0",
+      "message": "PKCE is not enforced. ExchangeCode only verifies the code_challenge when sess.CodeChallenge != \"\", but the /authorize handler never requires code_challenge to be present. An attacker who obtains an internal authorization code (e.g. via referrer header, browser history, or log inspection) can call /token with no code_verifier and receive the GitHub access token. The Discovery endpoint advertises PKCE S256 as supported but the implementation makes it purely opt-in. PKCE should be required on every flow.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 111
+    },
+    {
+      "category": "security",
+      "end_line": 213,
+      "file": "services/copilot-review-mcp/internal/auth/handler.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#1",
+      "message": "The /token endpoint performs no client_id validation. The comment claims GitHub validates client_id during code exchange, but that exchange happens at /callback, not at /token time. When /token is called, the internal code is already in the store and no outbound GitHub call is made. Combined with the missing PKCE enforcement, any party that obtains an internal code can present it to /token without supplying client_id and receive the GitHub access token. RFC 6749 §3.2.1 requires public clients to be identified at the token endpoint.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 173
+    },
+    {
+      "category": "reliability",
+      "end_line": 238,
+      "file": "services/copilot-review-mcp/internal/auth/handler.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#2",
+      "message": "io.ReadAll(resp.Body) in ValidateToken has no size limit. A misbehaving reverse proxy or a response from a compromised network path could stream an unbounded body, exhausting process memory. The same file already uses io.LimitReader correctly at line 275 in exchangeGitHubCode. This call should be wrapped with io.LimitReader(resp.Body, maxBytes) before ReadAll.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 238
+    },
+    {
+      "category": "security",
+      "end_line": 66,
+      "file": "services/copilot-review-mcp/internal/auth/session.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#3",
+      "message": "SaveSession adds entries to the sessions map with no upper bound on the total count. Any unauthenticated caller can flood /authorize with distinct state values to fill the map indefinitely. The janitor only runs every minute, so a sustained burst can consume substantial memory between sweeps. There is no session count cap, no per-IP rate limit, and no rejection when the store is full.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 57
+    },
+    {
+      "category": "reliability",
+      "end_line": 53,
+      "file": "services/copilot-review-mcp/internal/auth/session.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#4",
+      "message": "The janitor goroutine started in NewStore runs forever with no stop mechanism. There is no context, done channel, or ticker.Stop() call. Every Store created (including in tests) leaks a goroutine for the lifetime of the process. This prevents orderly shutdown and causes goroutine leaks in any test that creates a Handler.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 44
+    },
+    {
+      "category": "security",
+      "end_line": 109,
+      "file": "services/copilot-review-mcp/internal/auth/handler.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#5",
+      "message": "The redirect_uri allowlist check uses parsedRedirect.Hostname(), which strips the port. This means any port on an allowed host is accepted: both http://localhost:8080/callback and http://localhost:9999/evil pass the check when \"localhost\" is in AllowedRedirectHosts. An attacker running any service on localhost (or any allowed host) can receive the authorization code redirect. The check should include the port, or restrict to specific full origins.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 106
+    },
+    {
+      "category": "security",
+      "end_line": 75,
+      "file": "services/copilot-review-mcp/internal/auth/handler.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#6",
+      "message": "The state query parameter is accepted with no length limit and stored verbatim as a map key in SaveSession. An attacker can submit a multi-megabyte state value in a single request, inflating the session map entry far beyond a normal key size. Combined with the lack of a session count cap, this makes the memory exhaustion DoS cheaper to execute per request.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 75
+    },
+    {
+      "category": "maintainability",
+      "end_line": 13,
+      "file": "services/copilot-review-mcp/Dockerfile",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#7",
+      "message": "EXPOSE 8083 is hardcoded, but the port the server actually listens on is determined at runtime by the MCP_PORT environment variable. If MCP_PORT is set to any value other than 8083, the EXPOSE directive is wrong. Docker tooling that reads EXPOSE to discover the container's service port (e.g. `docker run -P`, some service mesh sidecars) will use 8083 regardless of the actual listening port. The Dockerfile should use a build arg or the EXPOSE should match the default in the entrypoint rather than a hardcoded literal.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 13
+    },
+    {
+      "category": "maintainability",
+      "end_line": 13,
+      "file": "services/copilot-review-mcp/cmd/server/main.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#11",
+      "message": "The project uses `github.com/scottlz0310/copilot-review-mcp` as the module path, but the repository is `scottlz0310/Mcp-Docker`. Go tooling relies on the module path matching the repository path. This should be `github.com/scottlz0310/Mcp-Docker/services/copilot-review-mcp` or a similar path that correctly reflects the repository structure.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 13
+    },
+    {
+      "category": "maintainability",
+      "end_line": 173,
+      "file": "services/copilot-review-mcp/internal/auth/handler.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#12",
+      "message": "In the `Callback` handler, the session is looked up via `lookupByCode` after the session is potentially modified by `CompleteCallback`. This re-lookup is unnecessary and potentially racy. `CompleteCallback` should return the `redirectURI` along with the `internalCode` so that the `Callback` function doesn't need to perform a second lookup.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 167
+    },
+    {
+      "category": "security",
+      "end_line": 198,
+      "file": "services/copilot-review-mcp/internal/auth/handler.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#22",
+      "message": "Forwarding `err.Error()` from `ExchangeCode` directly into the `error_description` field leaks internal state to the client. In particular, the \"session not found or expired for state %q\" error from `session.go` will echo the client-supplied state value back in the response and the \"redirect_uri mismatch\" message can also be informative to attackers. Per RFC 6749 §5.2, `error_description` should be a human-readable explanation safe for the client, not an internal log message. Consider mapping internal errors to a generic message (e.g. \"authorization code is invalid or expired\") and keeping the detailed `err` only in the `slog.Warn` log line above.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 193
+    },
+    {
+      "category": "security",
+      "end_line": 123,
+      "file": "services/copilot-review-mcp/internal/auth/session.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#23",
+      "message": "When `ExchangeCode` fails due to `redirect_uri` mismatch or PKCE verification failure, the authorization code is left in `s.codes` and remains valid until TTL expiry. RFC 6749 §10.5 and RFC 7636 §4.6 require that an authorization code be invalidated as soon as it has been used (or attempted) so an attacker who obtains the code cannot brute-force the `code_verifier`. Recommend deleting the entry from `s.codes` (and the matching session) on any validation failure, not only on success.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 99
+    },
+    {
+      "category": "security",
+      "end_line": 94,
+      "file": "services/copilot-review-mcp/internal/auth/handler.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#24",
+      "message": "The Discovery document advertises `code_challenge_methods_supported: [\"S256\"]`, but the `/authorize` and `/token` handlers treat PKCE as optional (no `code_challenge` parameter at `/authorize` results in `sess.CodeChallenge == \"\"`, and `ExchangeCode` then skips PKCE verification entirely). RFC 8414 / MCP clients (including Claude Desktop, per issue #28) will interpret the Discovery field as PKCE being mandatory. Either advertise that PKCE is optional, or enforce that `code_challenge` is required at `/authorize` (and `code_verifier` at `/token`) to match the advertised metadata.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 90
+    },
+    {
+      "category": "security",
+      "end_line": 96,
+      "file": "services/copilot-review-mcp/internal/auth/session.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#25",
+      "message": "`Callback` calls `CompleteCallback`, which leaves the original `s.sessions[state]` entry in place (it is only removed later when `/token` consumes the code). This allows the same `state` to be replayed against `/callback` — for example, if the redirect from GitHub is repeated by the browser — and each replay will issue a fresh internal code while overwriting `sess.InternalCode`, leaving orphan entries in `s.codes` that still reference the same underlying session. Consider invalidating the state on first successful callback (i.e. delete `s.sessions[state]` once an internal code has been issued) so a callback can be processed at most once.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 77
+    },
+    {
+      "category": "testing",
+      "end_line": 56,
+      "file": "services/copilot-review-mcp/internal/auth/handler.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#26",
+      "message": "No tests are included in `services/copilot-review-mcp/` for the OAuth façade, although issue #28's DoD and \"テスト戦略\" section explicitly require unit/E2E tests for Discovery, the OAuth flow, PKCE verifier mismatch, token validation, and session TTL. Given that PKCE handling, session lifecycle, and Bearer token validation have several subtle security-relevant branches (PKCE optionality, redirect_uri validation, upstream-error mapping to 503), at least table-driven unit tests for `verifyPKCE`, `ExchangeCode`, `isAllowedRedirectHost`, and an `httptest`-based test for `/.well-known/...`, `/authorize`, `/token`, and the auth middleware would be valuable before this phase 1 lands.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 46
+    },
+    {
+      "category": "reliability",
+      "end_line": 251,
+      "file": "services/copilot-review-mcp/internal/auth/handler.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#27",
+      "message": "`ValidateToken` caches by raw GitHub access token used as a map key, and `extractBearer` does not enforce any minimum entropy or shape. A misbehaving (or malicious) client repeatedly sending different invalid tokens cannot poison the cache (`CacheToken` is only called after a successful GitHub `/user` response), but each unique invalid token causes a synchronous outbound call to GitHub with no rate limiting or negative caching. Consider adding a short negative cache (or single-flight) for tokens that GitHub has rejected with 401/403, to bound the request amplification an unauthenticated caller can produce against `api.github.com`.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 216
+    },
+    {
+      "category": "api-architecture",
+      "end_line": 29,
+      "file": "services/copilot-review-mcp/cmd/server/main.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#28",
+      "message": "The default `AllowedRedirectHosts` allowlist contains only `localhost` and `127.0.0.1`, and there is no configuration env var wired in `cmd/server/main.go` to extend it. This will reject any non-loopback MCP client `redirect_uri` (e.g. Claude Desktop installations using a custom scheme or a non-loopback host) with `invalid_request`, even though the issue/PR description targets such clients. Consider plumbing an env var (e.g. `ALLOWED_REDIRECT_HOSTS`) into `auth.Config.AllowedRedirectHosts` from `loadConfig`, or documenting that only loopback `redirect_uri`s are supported in phase 1.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 22
+    },
+    {
+      "category": "security",
+      "end_line": 94,
+      "file": "services/copilot-review-mcp/internal/auth/handler.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#29",
+      "message": "PKCE is advertised in discovery but remains optional here: if a client omits `code_challenge`, the session is saved without one and `ExchangeCode` skips verifier validation. For this public OAuth façade, require `code_challenge` with S256 so intercepted internal authorization codes cannot be redeemed without a verifier.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 90
+    },
+    {
+      "category": "security",
+      "end_line": 79,
+      "file": "services/copilot-review-mcp/internal/auth/handler.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#30",
+      "message": "`client_id` is not read or checked on the authorization request, so any caller can create a session that will later be exchanged as this façade's configured GitHub OAuth app. In a single-client façade, validate the incoming `client_id` against the configured client and store it with the session for the `/token` check.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 74
+    },
+    {
+      "category": "reliability",
+      "end_line": 60,
+      "file": "docker-compose.yml",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#31",
+      "message": "When `COPILOT_REVIEW_MCP_PORT` is overridden, the container listens and publishes that port, but `BASE_URL` still defaults to `http://localhost:8083`. Discovery and GitHub callback URLs will point at the wrong port unless the user also remembers to set `BASE_URL`; derive the default from the same port variable or document/enforce the coupling.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 58
+    },
+    {
+      "category": "reliability",
+      "end_line": 95,
+      "file": "services/copilot-review-mcp/internal/auth/session.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#32",
+      "message": "The internal authorization code inherits the original session expiry from `/authorize`; `CompleteCallback` does not extend or set a code-specific expiry when the code is issued. If the user completes GitHub login near the session TTL, the redirect back to the client can carry a code that expires immediately and `/token` will reject it.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 91
+    },
+    {
+      "category": "correctness",
+      "end_line": 132,
+      "file": "services/copilot-review-mcp/internal/auth/handler.go",
+      "id": "scottlz0310_Mcp-Docker_29-e7705d26#33",
+      "message": "GitHub OAuth error callbacks (for example `?error=access_denied&state=...` when the user denies consent) are treated as a generic missing-code 400 and are not redirected back to the original client redirect URI. That leaves the MCP client without the OAuth error response it needs to finish the flow; look up the session by state and redirect with the error parameters when GitHub returns an OAuth error.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 126
+    }
+  ]
+}

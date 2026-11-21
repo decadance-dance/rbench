@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "8efeb357df92852dcd401d72eaa31edc2a9d5422dd314c51c5cc4c8258db1c84",
+  "base": "63baf3dbbc10d271710706f56150dd8425dd4b4a",
+  "description": "## 概要\n\nservices/copilot-review-mcp/ を新規作成。ISSUE#28 の OAuth Facade 実装（フェーズ1）。\n\n## 変更内容\n\n- /.well-known/oauth-authorization-server Discovery エンドポイント（RFC 8414）\n- /authorize → GitHub OAuth 認可リダイレクト\n- /callback → GitHub code 受領 → 内部 code 発行\n- /token → authorization_code grant + PKCE S256 検証\n- Bearer token 検証ミドルウェア（GitHub API + インメモリキャッシュ）\n- セッションストア（TTL 付き、janitor goroutine）\n- distroless Dockerfile（CGO_ENABLED=0）\n- docker-compose.yml に copilot-review-mcp サービス追加\n\n## テスト方法\n\n`\bash\n# .env に GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET を設定後\ndocker compose build copilot-review-mcp\ndocker compose up copilot-review-mcp\ncurl http://localhost:8083/health\ncurl http://localhost:8083/.well-known/oauth-authorization-server\n`\n\nCloses #28（一部。DoD 全項目は後続 PR で完了）\n\nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>",
+  "head": "e7705d269ea374d49e7999bdb8bc42e9480a6b37",
+  "id": "scottlz0310_mcp-docker_29-e7705d26",
+  "language": "Go",
+  "pr": 29,
+  "repo": "scottlz0310/Mcp-Docker",
+  "set": "reviewbench",
+  "title": "Phase1: copilot-review-mcp OAuth Facade (ISSUE#28)"
+}

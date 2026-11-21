@@ -1,0 +1,155 @@
+{
+  "canary": "rbench-canary-68cbdc0348504636b0f4ee8650a2a26d",
+  "items": [
+    {
+      "category": "reliability",
+      "end_line": 27,
+      "file": ".github/workflows/docs.yml",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#0",
+      "message": "Changing `cancel-in-progress` to `true` means a new push to `main` will cancel an in-flight GitHub Pages deployment job. The `deploy-pages` action may be interrupted mid-upload, leaving the Pages site in a broken or partially-updated state. The original `cancel-in-progress: false` was intentional for deployment workflows — it's safe to cancel a build but not a live deploy. The concurrency group should either remain `false` for cancel-in-progress, or the deploy job should use a separate concurrency group with `cancel-in-progress: false`.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 26
+    },
+    {
+      "category": "accessibility",
+      "end_line": 244,
+      "file": "docfx/templates/forgemap/public/main.css",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#1",
+      "message": "Dark mode has no `[data-bs-theme=\"dark\"] pre code` color override, but light mode explicitly sets `[data-bs-theme=\"light\"] pre code { color: #e0ddd8 !important }` to ensure legible text on the dark `#1e2530` pre background. In dark mode, pre background is `#0a0e14` (near-black) but code text color falls back to Bootstrap's `var(--bs-code-color)`, which resolves to `var(--forge-ember-light)` = `#f5b85a` (amber). This makes all unstyled pre code text amber-on-black rather than the expected near-white, and will conflict with any syntax highlighter that expects a neutral base color.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 241
+    },
+    {
+      "category": "maintainability",
+      "end_line": 255,
+      "file": "docfx/templates/forgemap/public/main.css",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#2",
+      "message": "`pre::before` is `position: absolute` inside a `position: relative` element that also has `overflow: auto`. This makes `pre` a scroll container, and absolutely-positioned children live in the scrollable content area — not pinned to the visual viewport of the element. When a code block has wide content and the user scrolls horizontally, the decorative amber stripe scrolls with the content and disappears from view. It should be rendered as a non-scrolling overlay, e.g. using a wrapper div with `overflow: hidden` for the stripe and `overflow: auto` on an inner element, or a sticky/fixed alternative.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 246
+    },
+    {
+      "category": "accessibility",
+      "end_line": 286,
+      "file": "docfx/templates/forgemap/public/main.css",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#3",
+      "message": "`overflow: hidden` on a `<table>` element does not clip to `border-radius` consistently across browsers. Firefox in particular does not apply `border-radius` clipping to table elements even when `overflow: hidden` is set, so the rounded-corner appearance will be absent in Firefox. The standard workaround is to wrap the table in a `<div>` with `overflow: hidden; border-radius: 8px` and remove those properties from the table itself.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 279
+    },
+    {
+      "category": "performance",
+      "end_line": 331,
+      "file": "docfx/templates/forgemap/public/main.css",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#4",
+      "message": "`transition: all 0.15s ease` on `.toc .nav-link` animates every CSS property on each state change, including layout-triggering properties like `width`, `height`, `padding`, and `margin`. This forces the browser to run layout and paint on every animation frame for sidebar navigation links, which scroll continuously during page navigation. It should be replaced with an explicit list of only the properties that actually change: `transition: color 0.15s ease, border-left-color 0.15s ease`.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 331
+    },
+    {
+      "category": "maintainability",
+      "end_line": 204,
+      "file": "docfx/templates/forgemap/public/main.css",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#8",
+      "message": "The `box-shadow` property on `.form-control:focus` is set with a color value using `rgba(232, 118, 10, 0.2)`. This hardcoded color does not adapt to the dark theme, where a different `--forge-ember` color is defined. It should use CSS variables to respect the active color theme.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 204
+    },
+    {
+      "category": "maintainability",
+      "end_line": 133,
+      "file": "docfx/templates/forgemap/public/main.css",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#9",
+      "message": "The `filter` property on `#logo` and `.navbar-brand:hover #logo` uses hardcoded RGB values for the `drop-shadow`. This will not adapt correctly for dark mode. The color should be defined using a CSS variable to ensure it matches the theme's `--forge-ember` color.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 130
+    },
+    {
+      "category": "maintainability",
+      "end_line": 25,
+      "file": "docfx/templates/forgemap/public/main.css",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#10",
+      "message": "The `--bs-link-hover-color` in the light theme is hardcoded to `#c4630a`. This color is a darkened version of `--forge-ember`. It should be derived from the `--forge-ember` variable (e.g., using `color-mix` or a pre-calculated variable) to ensure consistency if the primary ember color is changed.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 25
+    },
+    {
+      "category": "accessibility",
+      "end_line": 368,
+      "file": "docfx/templates/forgemap/public/main.css",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#12",
+      "message": "Removing underlines from all links makes inline article links distinguishable only by color until hover. Since the docs include inline links in body content, this creates an accessibility issue for users who cannot rely on color alone; keep a non-color cue for content links and scope the no-underline treatment to navigation/UI links.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 365
+    },
+    {
+      "category": "accessibility",
+      "end_line": 131,
+      "file": "docfx/templates/forgemap/public/main.css",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#13",
+      "message": "The default navbar link color has insufficient contrast against the forced dark header background. In dark mode this resolves to #6b7280 on #141a22 (about 3.6:1), below the 4.5:1 requirement for the 0.875rem text used here, so inactive navigation items can be hard to read.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 124
+    },
+    {
+      "category": "accessibility",
+      "end_line": 170,
+      "file": "docfx/templates/forgemap/public/main.css",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#14",
+      "message": "The search placeholder color does not meet text contrast in either theme against the input backgrounds introduced here (about 3.8:1 in light mode and 2.5:1 in dark mode). This makes the search affordance difficult to read, especially because the placeholder is the only visible prompt inside the field.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 168
+    },
+    {
+      "category": "accessibility",
+      "end_line": 32,
+      "file": "docfx/templates/forgemap/public/main.css",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#15",
+      "message": "The light-theme link colors do not provide enough contrast against the light page background for normal body text (the default #e8760a link color is under 3:1 on #faf9f7, and the hover color is also below 4.5:1). Since article content includes inline links, these links can be difficult to read and fail text contrast requirements.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 30
+    },
+    {
+      "category": "accessibility",
+      "end_line": 36,
+      "file": "docfx/templates/forgemap/public/main.css",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#16",
+      "message": "The light-theme inline code color reuses #e8760a, which has insufficient contrast against the inline code background set later to --forge-ash (#f4f1ed). Inline code is rendered at 0.85em, so this low contrast makes code fragments hard to read in article text.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 33
+    },
+    {
+      "category": "accessibility",
+      "end_line": 318,
+      "file": "docfx/templates/forgemap/public/main.css",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#17",
+      "message": "Bold table values are forced to the ember color in light mode, which has insufficient contrast against the table/page background for normal text. The benchmark winner cells in the landing page are regular-sized text, so this color choice can make the emphasized values harder to read.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 314
+    },
+    {
+      "category": "accessibility",
+      "end_line": 214,
+      "file": "docfx/templates/forgemap/public/main.css",
+      "id": "superyyrrzz_ForgeMap_106-2f3977ed#18",
+      "message": "The light-theme feature heading color uses #e8760a on the light page background, which is below the required 3:1 contrast even for large/bold text. These headings can therefore be hard to read on the landing page.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 207
+    }
+  ]
+}
