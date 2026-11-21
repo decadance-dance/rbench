@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "0681605e40786e1a3cba79c1fd9971d4684b0bd2fdc9aa3022f57c9ce7a1d201",
+  "base": "58d880509f9cf6d37715153b7cf261205dfa0f96",
+  "description": "Confirmed all mappings are based on https://docs.google.com/spreadsheets/d/1DeAE04O1mz3R9s3dCZpG2hQp9hwif5WjdkUMsBci-u8/edit?gid=461277142#gid=461277142",
+  "head": "efb31e9c764865f416230073c6d0b1686a0f44b7",
+  "id": "ncatstranslator_translator-ingests_336-efb31e9c",
+  "language": "Jupyter Notebook",
+  "pr": 336,
+  "repo": "NCATSTranslator/translator-ingests",
+  "set": "reviewbench",
+  "title": "Addressing Matt's QA on gtopdb"
+}

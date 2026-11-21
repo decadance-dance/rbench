@@ -1,0 +1,95 @@
+{
+  "canary": "rbench-canary-9d67f9664b2c4857bc42f00f01bedd45",
+  "items": [
+    {
+      "category": "security",
+      "end_line": 454,
+      "file": "src/server/handlers.ts",
+      "id": "PierreJanineh_TechDebtMCP_135-16a54f0f#0",
+      "message": "The user-supplied `path` parameter is passed directly to `fileExists`, `getFileStats`, and `readFile` without validating via `path.isAbsolute()` or normalizing via `path.resolve()`. A malicious client can supply a relative traversal string like `../../../../etc/passwd` to read arbitrary files, bypassing the intent of the size guard entirely. The project's AGENTS.md explicitly mandates these checks before any filesystem operation (Issues #125, #126) and no such validation is present anywhere in the server directory.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "must",
+      "start_line": 438
+    },
+    {
+      "category": "correctness",
+      "end_line": 32,
+      "file": "src/core/customRulesEngine.ts",
+      "id": "PierreJanineh_TechDebtMCP_135-16a54f0f#1",
+      "message": "ALLOWED_FLAGS_RE = /^[gimsuy]*$/ excludes the `d` flag (hasIndices), which is a valid ECMAScript 2022 flag supported since Node.js 16. The project declares `engines.node >= 18`, making `d` a fully valid flag on every supported runtime. Any user passing `flags: 'd'` to `add_custom_rule` or `validate_custom_pattern` gets an incorrect 'Invalid regex flags' rejection, and the flag is silently stripped at execution time, changing matching behavior without warning.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 32
+    },
+    {
+      "category": "reliability",
+      "end_line": 90,
+      "file": "src/server/handlers.ts",
+      "id": "PierreJanineh_TechDebtMCP_135-16a54f0f#2",
+      "message": "The production `CustomRulesEngine` is instantiated without an `onRuleError` callback. When the defense-in-depth guard in `executePattern` fires at runtime (e.g., an oversized or invalid pattern loaded from `.techdebtrc.json` bypassing `validatePattern`), the branch `if (this.onRuleError)` is false and the error is silently discarded. The MCP client receives an empty issues array for those rules with no indication that they were skipped, making the tool silently unreliable for config-loaded rules.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 90
+    },
+    {
+      "category": "api-architecture",
+      "end_line": 32,
+      "file": "src/core/customRulesEngine.ts",
+      "id": "PierreJanineh_TechDebtMCP_135-16a54f0f#4",
+      "message": "ALLOWED_FLAGS_RE = /^[gimsuy]*$/ uses `*` (zero or more), so it accepts duplicate flag characters such as `'gg'`. Passing `'gg'` directly to `new RegExp()` throws a SyntaxError; the deduplication inside both `validatePattern` and `executePattern` silently masks this. The stated contract of `validatePattern` is that a passing result means the pattern is ready to use, but a caller who constructs `new RegExp(pattern.pattern, pattern.flags)` from a 'valid' result with duplicate flags will get a thrown exception. The regex should enforce uniqueness, e.g. `/^[gimsuy]{0,6}$/` with a uniqueness check.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 32
+    },
+    {
+      "category": "correctness",
+      "end_line": 278,
+      "file": "src/core/customRulesEngine.ts",
+      "id": "PierreJanineh_TechDebtMCP_135-16a54f0f#5",
+      "message": "When `pattern.flags` contains disallowed characters, `validatePattern` pushes a flags-error and then continues to compile the regex using normalized (stripped) flags. This means a pattern that is syntactically invalid only when combined with its declared flags (rare but possible with flag-specific syntax like `\\p{}` requiring `u`) will be compiled with `u` stripped and may not surface an 'Invalid regex pattern' error. The two validation concerns — flags and pattern — are tested independently rather than together, so the reported validity does not reflect the actual behavior at execution time when both flags and pattern interact.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 255
+    },
+    {
+      "category": "security",
+      "end_line": 448,
+      "file": "src/server/handlers.ts",
+      "id": "PierreJanineh_TechDebtMCP_135-16a54f0f#6",
+      "message": "The two new error messages `File not found: ${path}` and `Could not read file stats for: ${path}` embed the raw `path` value, which is typically an absolute filesystem path, in the MCP error response. The project's AGENTS.md security section states 'Use getRelativePath() in error messages returned to clients — never leak absolute filesystem paths' (Issue #129). These are new error paths introduced by this PR that do not follow that convention.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 439
+    },
+    {
+      "category": "maintainability",
+      "end_line": 242,
+      "file": "src/core/customRulesEngine.ts",
+      "id": "PierreJanineh_TechDebtMCP_135-16a54f0f#7",
+      "message": "The regex flag normalization logic (stripping invalid characters and deduplication) is duplicated between `validatePattern` (lines 235-242) and `executePattern` (lines 119-123). This logic should be extracted into a private helper function to avoid code duplication and ensure that validation and execution always use the identical flag processing rules.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 235
+    },
+    {
+      "category": "testing",
+      "end_line": 450,
+      "file": "src/server/handlers.ts",
+      "id": "PierreJanineh_TechDebtMCP_135-16a54f0f#9",
+      "message": "The code handles a null return from `getFileStats` by throwing an `McpError`, but there is no corresponding test case to verify this error path. The new tests in `src/server/__tests__/handlers.test.ts` only cover the file size limit being exceeded and met, but not the case where file stats cannot be retrieved.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 444
+    },
+    {
+      "category": "documentation",
+      "end_line": 36,
+      "file": "CHANGELOG.md",
+      "id": "PierreJanineh_TechDebtMCP_135-16a54f0f#18",
+      "message": "This changelog overstates the security fix: limiting pattern length and flags does not prevent catastrophic-backtracking ReDoS for short patterns that are still executed synchronously. Please either implement an actual ReDoS mitigation before claiming prevention or reword this entry to accurately describe the narrower guards added.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 36
+    }
+  ]
+}

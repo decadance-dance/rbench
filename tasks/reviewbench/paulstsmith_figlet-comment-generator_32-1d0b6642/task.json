@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "e715bd2a9a10901c4d09eeeecf1ee8456aa387f1607f05998a93cd4c726ac797",
+  "base": "3750acad624b6b38b768aa8b9aa3ba1573e2f63e",
+  "description": "#### PR Classification\nFeature and configuration refactor, CI/CD improvement, and documentation update.\n\n#### PR Summary\nThis PR refactors the VS Code extension's configuration and settings, enhances language support, and modernizes WinGet CI workflows for robust release automation.\n- BannerUtils.ts, FigletPanel.ts, FigletSettingsPanel.ts, and related UI: Removed defaultFont setting/command, now persist last used font in global state, and simplified settings UI.\n- LanguageCommentStyles.ts: Added dedicated Batch file (::) comment style and updated language mapping for bat/cmd/dos/batch.\n- publish-figprint.yml: Rewrote WinGet manifest generation to be fully manual, added schema headers, improved error handling, and clarified release notes.\n- LICENSE, ChangeLog-2026.md, ChangeLog.md, and readme.md: Updated documentation, changelog, and license with new banners, copyright years, and WinGet status.\n- tsconfig.json and codebase: Improved type safety and code clarity, including Node.js types.\r\n",
+  "head": "1d0b6642fcf5ca31fc308c3d603b19ab02ea249e",
+  "id": "paulstsmith_figlet-comment-generator_32-1d0b6642",
+  "language": "C#",
+  "pr": 32,
+  "repo": "PaulStSmith/figlet-comment-generator",
+  "set": "reviewbench",
+  "title": "BugFix: Link to Issues not working on VSCode"
+}

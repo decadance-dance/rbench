@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "8b8af1662a9d4fd0eb62b27e20339e5c3c7b62ae774d56972af9ec29fe7754ab",
+  "base": "c4879eb1c460e45c11ce28e3e8a305194023b64e",
+  "description": "\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n## Summary by CodeRabbit\n\n* **New Features**\n  * Adds a structured auth-pattern system and many new universal auth schemes (SecretToken, IdentityPassword, Certificate, KeyPair, ConnectionUri, FederatedAssertion, OTP seed, Shared/Signing keys, InstanceBinding, ChallengeResponse).\n  * Proc-macro support and examples for declaring scheme patterns.\n\n* **Improvements**\n  * Stronger encryption: envelope key IDs, multi-key rotation, enforced AAD, and lazy re-encryption on read.\n  * Credential testing: returns None to indicate “not testable.”\n\n* **Breaking Changes**\n  * Scheme IDs moved from string kinds to pattern-based identifiers; several legacy scheme types/credentials removed or renamed.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+  "head": "d5ba86dd1014b79e263d93a1e324eeec0d0b306c",
+  "id": "vanyastaff_nebula_224-d5ba86dd",
+  "language": "Rust",
+  "pr": 224,
+  "repo": "vanyastaff/nebula",
+  "set": "reviewbench",
+  "title": "feat(credential): v3 universal schemes, key rotation, security hardening"
+}
