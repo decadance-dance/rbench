@@ -858,6 +858,16 @@ measure a different task from the engines, which all read the repository.
   record has
   `payload.type = "item_completed"` and `payload.item.type = "ExitedReviewMode"`. The
   `payload.item.review_output` holds the findings with priority and file/line ranges.
+- `codex-review` is a structured engine: each finding of `review_output` (0.171.0
+  `ReviewFinding`) has a file and a line range, so it becomes a finding without the D9 step. The
+  adapter (#49, `rbench.engines.codex_review`) makes `absolute_file_path` relative to the
+  checkout, takes `line_range` as the lines, the title and body as the message, and `P<priority>`
+  as the engine's own label. A finding outside the checkout, a priority outside 0 to 3 or a bad
+  range rejects the result whole. A `review_output` that is null (an aborted review), or Codex's
+  fallback for a reviewer answer it cannot parse as JSON (no findings and an empty
+  `overall_correctness`, the text kept in `overall_explanation`), fails the trial instead of
+  scoring zero findings. The parent thread (`-m`) and the review thread (`review_model`) both
+  request the role's model and effort; #46 records what applied to each.
 - review-council: the Claude side is the main session (orchestrator and judge) plus the subagents
   `reviewer-claude`, `reviewer-security` and the Claude verifier, all `model: inherit`, so the
   session's `--model` and `--effort` set them. The Codex side is the Codex reviewer and verifier,

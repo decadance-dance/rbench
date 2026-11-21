@@ -211,4 +211,8 @@ def load_engine(path: Path) -> Engine:
         from rbench.engines.plain import bind  # plain imports this module
 
         engine = bind(engine, Path(path).parent)
+    elif engine.name == "codex-review":
+        from rbench.engines import codex_review  # it imports this module
+
+        engine = codex_review.bind(engine)
     return engine
