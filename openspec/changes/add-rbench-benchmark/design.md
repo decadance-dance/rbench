@@ -254,7 +254,8 @@ server or build step, and opens from disk as the spec requires.
     and engines also call `--version`, `codex plugin` and `codex debug`. The shim adds flags only to
     session launches (Claude: anything but `--version`, `--help` and management subcommands;
     Codex: `exec`, `review`, `resume`, `fork` and the TUI). It logs the other calls unchanged.
-    Every `-c` key the engines pass loaded under `--strict-config`.
+    Every `-c` key that the engines and D12 pass loads under `--strict-config`. This was checked
+    offline, where an unknown key fails at startup.
   - *Model and effort the engine sets itself.* `codex-review` passes `-m` and
     `model_reasoning_effort`, and rreview passes `--model`/`--effort` and `-m`/`-c` for each role.
     A second value from the shim would duplicate them, so the shim adds model or effort only
