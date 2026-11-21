@@ -10,6 +10,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 from rbench.ledger import load_plan, start_run
+from rbench.plan import command as plan_command
 
 
 class ExitCode(IntEnum):
@@ -60,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, help_ in COMMANDS:
         sub = commands.add_parser(name, help=help_, description=help_, **common)
+        if name == "plan":
+            plan_command.add_arguments(sub)
         if name == "run":
             sub.add_argument("matrix", type=Path, help="the matrix file")
             sub.add_argument("--round", required=True, help="the matrix round to run")
@@ -115,6 +118,8 @@ def _run(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "plan":
+        return plan_command.run(args)
     if args.command == "run":
         return _run(args)
     name = " ".join(filter(None, [args.command, getattr(args, "task_command", None)]))
