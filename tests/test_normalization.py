@@ -198,7 +198,7 @@ def test_a_blank_report_has_no_findings_and_runs_no_model(fake_bin, tmp_path):
 def test_a_failed_claude_launch_names_the_trial(fake_bin, tmp_path):
     claude_answers(fake_bin, "", exit_code=1)
 
-    with pytest.raises(NormalizationError, match=f"{WHERE}: claude exited 1: boom"):
+    with pytest.raises(NormalizationError, match=f"^{WHERE}: claude exited 1$"):
         normalize(project(tmp_path), REPORT, "t-1")
 
 
@@ -277,7 +277,10 @@ def test_a_malformed_answer_is_rejected_whole_naming_the_item(answer, message):
         ("not json", "the result is not one JSON object"),
         ('{"type": "result", "type": "result"}', "the result is not one JSON object"),
         (json.dumps([result()]), "expected a result object"),
-        (json.dumps(result(is_error=True, subtype="error_max_turns")), r"error \(error_max_turns"),
+        (
+            json.dumps(result(is_error=True, subtype="error_max_turns")),
+            r"error, with subtype error_max_turns",
+        ),
         (json.dumps(result(modelUsage={})), "does not show the pinned model claude-sonnet-5-5"),
         (
             json.dumps(result(modelUsage={"claude-opus-5-5": MODEL_USAGE["claude-sonnet-5-5"]})),
@@ -299,19 +302,47 @@ def test_a_malformed_answer_is_rejected_whole_naming_the_item(answer, message):
         ),
         (
             json.dumps(result(modelUsage=MODEL_USAGE | {" ": MODEL_USAGE["claude-sonnet-5-5"]})),
-            r"modelUsage key ' ': expected a model id",
+            "modelUsage entry 0: expected a model id",
         ),
         (
             json.dumps(
                 result(modelUsage=MODEL_USAGE | {"m\ud800": MODEL_USAGE["claude-sonnet-5-5"]})
             ),
-            "modelUsage key 'm.ud800': expected a model id",
+            "modelUsage entry 1: expected a model id",
         ),
     ],
 )
 def test_a_malformed_result_is_rejected_naming_the_trial(stdout, message):
     with pytest.raises(NormalizationError, match=f"^{WHERE}: .*{message}"):
         parse_result(stdout, WHERE)
+
+
+# What only the report said: the normalizer may copy it anywhere in its output.
+MARKER = "marker only the reviewed report wrote"
+
+
+@pytest.mark.parametrize(
+    ("stdout", "message"),
+    [
+        (json.dumps(result(is_error=True, subtype=MARKER)), "an unknown subtype"),
+        (f'{{"type": "result", "{MARKER}": 1, "{MARKER}": 2}}', "not one JSON object"),
+        (json.dumps(result(modelUsage=MODEL_USAGE | {MARKER: {}})), "entry 1: missing token"),
+        (json.dumps(result(modelUsage=MODEL_USAGE | {MARKER: None})), "entry 1: missing token"),
+    ],
+)
+def test_a_malformed_result_is_rejected_without_quoting_it(stdout, message):
+    with pytest.raises(NormalizationError, match=f"^{WHERE}: .*{message}") as e:
+        parse_result(stdout, WHERE)
+    assert MARKER not in str(e.value)
+
+
+def test_a_failed_claude_launch_does_not_quote_its_stderr(fake_bin, tmp_path):
+    reply = {"match": " claude -p ", "stdout": MARKER, "exit": 2, "stderr": f"{MARKER}\n"}
+    fake_bin.scenario("docker", replies=[reply])
+
+    with pytest.raises(NormalizationError, match=f"^{WHERE}: claude exited 2$") as e:
+        normalize(project(tmp_path), MARKER, "t-1")
+    assert MARKER not in str(e.value)
 
 
 def test_side_calls_on_other_models_are_counted():
