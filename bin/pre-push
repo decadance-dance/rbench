@@ -1,0 +1,5 @@
+#!/bin/sh
+# Local pre-push check (spec review-tasks: Publication guard): rejects a push that adds a real hidden
+# task id, canary or the canary prefix from $RBENCH_HIDDEN_DIR. Install it: see README.md.
+# Git runs the hook from the root of the working tree it pushes from.
+exec uv run --locked python -m rbench.tasks.guard pre-push "$@"
