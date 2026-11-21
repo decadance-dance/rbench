@@ -497,14 +497,35 @@ login made only for the benchmark (its own `codex login`, so its own refresh-tok
 login home no other tool uses. That login home is a dedicated credential directory. It holds
 `auth.json` and the files Codex makes next to it: `auth.json.lock` and transient `.auth-*` save
 files. It holds nothing unrelated; files left by `codex login` (logs, `tmp/`) are removed. The login
-home used in spike #21 still held `auth.lock`, `log/` and `tmp/`; #40 checks the mount's contents
-before trials start. It is
-mounted as a directory, read-write, into the trial, and the trial's `CODEX_HOME/auth.json` is a
-symlink to the `auth.json` in it. Mounting the file alone does not work: Codex 0.171.0 replaces `auth.json` by a
-temporary file and a rename in the target's directory, and a rename onto a mount point fails with
-`EBUSY`. Codex follows the symlink, so the temporary file and its `auth.json.lock` both land in the
-login home. Refreshed tokens therefore go back only to that home. Sessions, logs and state stay in
-the trial's `CODEX_HOME` inside the container. The trial homes hold:
+home used in spike #21 still held `auth.lock`, `log/` and `tmp/`. rbench resolves the login home's
+symlinks when it creates the trial and mounts that resolved path. Right before each start of the
+trial's project, it refuses a login home that is not a directory, lies inside the checkout, has no
+regular `auth.json`, holds any other entry (a symlink or a directory under an allowed name
+included; every such entry is named), or no longer resolves to the mounted path (#40). It is
+mounted as a directory, read-write, at `/rbench/codex-login` in the agent container (its only
+mount). The bind never creates a missing source, and a literal `$` in its path is escaped, because
+Compose interpolates the file. When the trial is prepared, the trial's user must read `auth.json`,
+open `auth.json` for writing (Codex does before it replaces the file), create a file in the login
+home and open an existing `auth.json.lock` for writing, or the trial stops with the reason. Only then is the trial's `CODEX_HOME/auth.json` made a symlink to the
+`auth.json` in it. Mounting the file alone does not work: Codex 0.171.0
+replaces `auth.json` by a temporary file and a rename in the target's directory, and a rename onto
+a mount point fails with `EBUSY`. Codex follows the symlink, so the temporary file and its
+`auth.json.lock` both land in the login home. Refreshed tokens therefore go back only to that home.
+A docker-only check (#40) repeated that save through the symlink with a stand-in login: only the
+login home changed, and no copy of `auth.json` appeared in the container. Sessions, logs and state
+stay in the trial's `CODEX_HOME` inside the container.
+
+The Claude token reaches the agent container by variable name only. The trial's compose file lists
+`CLAUDE_CODE_OAUTH_TOKEN` in the agent's `environment` without a value, so Compose takes it from
+its own environment, and rbench sets it only in the environment of `docker compose up`. A value the
+operator's shell exports is dropped from the environment of every docker call rbench makes, so a
+trial gets only the token rbench read for it. The value is never in an argv, the compose file or
+another file in the run directory. Docker's diagnostics and the output of commands rbench runs in
+the agent have it redacted. A transcript whose path holds the token stops the collection before
+anything is copied. A failed Keychain read reports the item, the exit status and a hint,
+never the command's output.
+
+The trial homes hold:
 - the policy settings;
 - `ENABLE_CLAUDEAI_MCP_SERVERS=false`;
 - Codex's ChatGPT apps off for every Codex engine (#104), verified before any Codex trial is scored;
@@ -1120,7 +1141,8 @@ when no task changed.
   source (decided): on
   macOS the operator keeps the token in the Keychain (generic password, service
   `rbench-claude-oauth`). rbench reads it at trial start and passes it to `docker` by variable name
-  only (`-e CLAUDE_CODE_OAUTH_TOKEN`, value in the child's environment), so the value never appears
+  only (D5: named without a value in the compose file, the value in the environment of
+  `docker compose up`), so the value never appears
   on an argv, in a file in the run dir or in an image (configuration or layer). The env file the
   spike used (`<env-file>`, outside the repository, mode 600) is a fallback for the spike only. Not
   yet checked: whether the managed settings are enforced (the spike checked authentication only)

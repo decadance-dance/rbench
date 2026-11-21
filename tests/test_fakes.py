@@ -13,7 +13,7 @@ def run(*argv: str, stdin: str = "", timeout: float = 10) -> subprocess.Complete
     )
 
 
-@pytest.mark.parametrize("tool", ["claude", "codex", "docker", "gh"])
+@pytest.mark.parametrize("tool", ["claude", "codex", "docker", "gh", "security"])
 def test_records_argv_and_stdin(fake_bin, tool):
     result = run(tool, "-p", "two words", stdin="the prompt\n")
 
