@@ -17,9 +17,13 @@ import pytest
 
 from rbench.engines.declaration import Setting
 from rbench.trial import (
+    CLAUDE_TOKEN_ENV,
+    CODEX_LOGIN,
+    TrialError,
     TrialProject,
     build_agent_image,
     build_proxy_image,
+    check_login_home,
     collect,
     image_id,
     prepare,
@@ -253,3 +257,127 @@ def test_without_the_managed_files_the_same_calls_get_web_tools(images, request)
         "WebSearch" in json.dumps(b) and "WebFetch" in json.dumps(b) for b in claude
     )
     assert codex and all(any(t["type"] == "web_search" for t in b["tools"]) for b in codex)
+
+
+# Credentials (spec trial-isolation, Credentials, Benchmark-only Codex login; issue #40). Stand-ins
+# only: no Keychain read, no real login home, and the CLIs talk to the stub.
+TOKEN = f"sk-ant-oat01-stand-in-{RUN}"
+AUTH = {"tokens": {"access_token": f"access-{RUN}", "refresh_token": f"refresh-{RUN}"}}
+REFRESHED = {"tokens": {"access_token": f"new-access-{RUN}", "refresh_token": f"new-refresh-{RUN}"}}
+# What Codex 0.171.0 does on a refresh (#20): lock `auth.json.lock` next to the file `auth.json`
+# resolves to, write a temporary file there and rename it onto `auth.json`.
+FAKE_REFRESH = """\
+import fcntl, os, sys, tempfile
+target = os.path.realpath(os.path.expanduser("~/.codex/auth.json"))
+home = os.path.dirname(target)
+with open(os.path.join(home, "auth.json.lock"), "a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    fd, tmp = tempfile.mkstemp(prefix=".auth-", dir=home)
+    with os.fdopen(fd, "w") as f:
+        f.write(sys.stdin.read())
+    os.replace(tmp, target)
+print(target)
+"""
+
+
+@pytest.fixture(scope="module")
+def credentialed(request, tmp_path_factory, images):
+    agent, proxy = images
+    login = tmp_path_factory.mktemp("login-home")
+    (login / "auth.json").write_text(json.dumps(AUTH))
+    (login / "auth.json.lock").write_text("")
+    for name in ("auth.json", "auth.json.lock"):  # as `codex login` leaves them
+        (login / name).chmod(0o600)
+    directory = tmp_path_factory.mktemp("credentialed")
+    name = f"rbench-live-{RUN}-credentials"
+    project = TrialProject.create(
+        directory, name, agent.ref, proxy, claude_token=TOKEN, codex_login=login
+    )
+    request.addfinalizer(project.down)
+    project.up()
+    prepare(project, shim_settings({}), CODEX_CONFIG)
+    start_stub(project)
+    return project, agent, login
+
+
+def test_credentials_reach_the_trial_and_not_its_output(credentialed):
+    project, agent, login = credentialed
+
+    # The token is in the container's environment; the value goes in by stdin, not argv.
+    same = run(project, "sh", "-c", f'test "${CLAUDE_TOKEN_ENV}" = "$(cat)"', stdin=TOKEN)
+    assert same.returncode == 0
+    link = run(project, "readlink", "/home/node/.codex/auth.json").stdout.strip()
+    assert link == f"{CODEX_LOGIN}/auth.json"
+
+    env = ["NO_PROXY=127.0.0.1", f"ANTHROPIC_BASE_URL=http://127.0.0.1:{PORT}"]
+    claude = run(project, "env", *env, "claude", "-p", "Reply with OK.")
+    codex = run(project, "env", *CODEX_ENV, "codex", "exec", "--skip-git-repo-check", "OK?")
+    assert claude.returncode == codex.returncode == 0
+    paths = [r["path"] for r in requests(project)]
+    print("stub requests:", paths)
+    assert any(p.startswith("/v1/messages") for p in paths) and "/v1/responses" in paths
+
+    raw = project.directory / "raw"
+    found = collect(project, agent, raw)
+    project.copy_proxy_log(project.directory / "proxy.log")
+    assert found  # both CLIs wrote transcripts
+    files = [p for p in project.directory.rglob("*") if p.is_file()]
+    print("scanned:", sorted(str(p.relative_to(project.directory)) for p in files))
+    history = docker("history", "--no-trunc", image_id(agent.ref)).stdout
+    config = docker("image", "inspect", image_id(agent.ref)).stdout
+    texts = [p.read_text(errors="replace") for p in files] + [history, config]
+    for secret in (TOKEN, *AUTH["tokens"].values()):
+        assert not [t for t in texts if secret in t]
+    check_login_home(login)
+    assert json.loads((login / "auth.json").read_text()) == AUTH
+
+
+def test_a_refresh_writes_back_only_to_the_login_home(credentialed, tmp_path):
+    project, _, login = credentialed
+    operator = tmp_path / "operator-codex"  # the operator's own Codex login: never mounted
+    operator.mkdir()
+    (operator / "auth.json").write_text(json.dumps(AUTH))
+
+    refreshed = run(project, "python3", "-c", FAKE_REFRESH, stdin=json.dumps(REFRESHED))
+
+    assert refreshed.returncode == 0
+    assert refreshed.stdout.strip() == f"{CODEX_LOGIN}/auth.json"
+    assert json.loads((login / "auth.json").read_text()) == REFRESHED
+    assert sorted(p.name for p in login.iterdir()) == ["auth.json", "auth.json.lock"]
+    assert (login / "auth.json").stat().st_mode & 0o777 == 0o600
+    check_login_home(login)
+    assert json.loads((operator / "auth.json").read_text()) == AUTH
+    # The trial's home still links to the login: no copy of the login lands in the container.
+    link = run(project, "readlink", "/home/node/.codex/auth.json").stdout.strip()
+    assert link == f"{CODEX_LOGIN}/auth.json"
+    copies = run(project, "find", "/home/node", "-name", "*auth*", "-type", "f").stdout.split()
+    assert copies == []
+
+
+@pytest.mark.parametrize(
+    ("home_mode", "auth_mode", "reason"),
+    [(0o500, 0o600, "cannot create files"), (0o700, 0o444, "cannot write auth.json")],
+)
+def test_a_login_home_the_trials_user_cannot_write_is_refused(
+    request, tmp_path, images, home_mode, auth_mode, reason
+):
+    """The host-side check passes, but Codex could not save a refresh there: a read-only home
+    (no temporary file) or a read-only `auth.json` (Codex opens it for writing first)."""
+    agent, proxy = images
+    login = tmp_path / "login-home"
+    login.mkdir()
+    (login / "auth.json").write_text(json.dumps(AUTH))
+    (login / "auth.json").chmod(auth_mode)
+    login.chmod(home_mode)
+    request.addfinalizer(lambda: login.chmod(0o700))
+    check_login_home(login)
+    name = f"rbench-live-{RUN}-unwritable-login-{oct(home_mode)[2:]}-{oct(auth_mode)[2:]}"
+    project = TrialProject.create(tmp_path / "trial", name, agent.ref, proxy, codex_login=login)
+    request.addfinalizer(project.down)
+    project.up()
+
+    with pytest.raises(TrialError, match=f"can use the Codex login home .*: {reason}"):
+        prepare(project, shim_settings({}), CODEX_CONFIG)
+    link = run(project, "test", "-e", "/home/node/.codex/auth.json")
+    assert link.returncode != 0
+    assert json.loads((login / "auth.json").read_text()) == AUTH  # the probe changed nothing

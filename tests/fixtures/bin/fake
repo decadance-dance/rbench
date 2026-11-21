@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Fake `claude`, `codex`, `docker` and `gh` for tests; each name is a symlink to this file.
+"""Fake `claude`, `codex`, `docker`, `gh` and `security` for tests; each name is a symlink to this file.
 
 Environment:
-  RBENCH_FAKE_LOG       file that gets one JSON line per call: {"tool", "argv", "stdin", "cwd"}.
+  RBENCH_FAKE_LOG       file that gets one JSON line per call: {"tool", "argv", "stdin", "cwd"},
+                        and "env" when RBENCH_FAKE_ENV is set.
+  RBENCH_FAKE_ENV       comma-separated variable names; "env" maps each to its value in the
+                        call's environment, or null when it is unset.
   RBENCH_FAKE_SCENARIO  JSON object mapping a tool name to its scenario; a tool without one
                         prints nothing and exits 0. Scenario keys, all optional:
                           delay   seconds to sleep before answering
@@ -13,6 +16,8 @@ Environment:
                                   stdout, as the real CLI prints it)
                           exit    exit code, default 0
                           crash   true: print what is given, then die by SIGKILL
+                          binary  true: write stdout and stderr as bytes, each character
+                                  one byte (Latin-1), so "\u00ff" gives the byte 0xff
                           replies a list of scenarios, each with a `match` string; the first
                                   whose `match` is a substring of the space-joined argv answers
                                   instead of the keys above
@@ -33,6 +38,8 @@ log = os.environ.get("RBENCH_FAKE_LOG")
 if log:
     with open(log, "a", encoding="utf-8") as f:
         call = {"tool": tool, "argv": sys.argv[1:], "stdin": stdin, "cwd": os.getcwd()}
+        if names := os.environ.get("RBENCH_FAKE_ENV"):
+            call["env"] = {name: os.environ.get(name) for name in names.split(",")}
         f.write(json.dumps(call) + "\n")
 
 scenario = json.loads(os.environ.get("RBENCH_FAKE_SCENARIO") or "{}").get(tool, {})
@@ -40,8 +47,14 @@ joined = " ".join(sys.argv[1:])
 scenario = next((r for r in scenario.get("replies", []) if r["match"] in joined), scenario)
 time.sleep(scenario.get("delay", 0))
 by_arg = scenario.get("stdout_for", {})
-sys.stdout.write(next((by_arg[a] for a in sys.argv[1:] if a in by_arg), scenario.get("stdout", "")))
-sys.stderr.write(scenario.get("stderr", ""))
+out = next((by_arg[a] for a in sys.argv[1:] if a in by_arg), scenario.get("stdout", ""))
+err = scenario.get("stderr", "")
+if scenario.get("binary"):
+    sys.stdout.buffer.write(out.encode("latin-1"))
+    sys.stderr.buffer.write(err.encode("latin-1"))
+else:
+    sys.stdout.write(out)
+    sys.stderr.write(err)
 sys.stdout.flush()
 sys.stderr.flush()
 if scenario.get("crash"):
