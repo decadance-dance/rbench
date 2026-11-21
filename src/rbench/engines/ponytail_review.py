@@ -26,6 +26,7 @@ from rbench.engines.normalization import Normalization, normalize
 from rbench.engines.pins import MODELS
 from rbench.engines.plain import CLAUDE_SUBTYPES, Launch
 from rbench.ledger.trials import no_repeated_keys
+from rbench.trial.images import PLUGINS_DIR
 
 if TYPE_CHECKING:
     from rbench.trial.compose import TrialProject
@@ -37,8 +38,9 @@ SOURCE = "https://github.com/DietrichGebert/ponytail"
 # Release -> (tag, commit): the releases this adapter was written against. Another version is
 # refused until its launch is checked, so that a new release is never benchmarked unseen.
 RELEASES = {"5.3.3": ("refs/tags/v5.3.3", "7801d061243d7b753bad0e0b3c057cd250b11755")}
-# Where the agent image holds the pinned plugin, and the local Codex marketplace that lists it.
-MARKETPLACE_ROOT = "/opt/rbench/plugins"
+# Where the agent image holds the pinned plugin; that directory is also the local Codex marketplace
+# that lists it (images/agent/Dockerfile).
+MARKETPLACE_ROOT = PLUGINS_DIR
 MARKETPLACE = "rbench"
 PLUGIN_DIR = f"{MARKETPLACE_ROOT}/{PLUGIN}"
 # The review of the trial's PR: the skill reviews what it is named, here the PR the `gh` stub

@@ -1,5 +1,7 @@
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,7 @@ from rbench.trial import (
     build_proxy_image,
     compose_spec,
     image_id,
+    images,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -382,3 +385,20 @@ def test_agent_build_context_holds_only_the_image_and_its_policy():
     ]
     copies = re.findall(r"^COPY .*? (\S+) \S+$", (context / "Dockerfile").read_text(), re.MULTILINE)
     assert copies == ["gh", "managed-settings.json", "requirements.toml", "lib/"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_plugin_listing_skips_the_codex_marketplace(tmp_path: Path):
+    plugin = tmp_path / "plugin" / ".claude-plugin"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text('{"name": "plugin", "version": "1.2.0"}')
+    (tmp_path / ".agents" / "plugins").mkdir(parents=True)  # the local Codex marketplace
+
+    done = subprocess.run(
+        ["node", "-e", images._PLUGINS_SCRIPT, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert done.stdout == "plugin plugin 1.2.0\n"
