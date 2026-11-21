@@ -275,17 +275,25 @@ Claude: the session file under `$CLAUDE_CONFIG_DIR/projects/`.
 Codex: the rollout file under `$CODEX_HOME/sessions/`.
 - `cached_input_tokens` is a subset of `input_tokens` (`total_tokens` = input + output), so
   uncached input is `input_tokens - cached_input_tokens`.
-- A thread's total is its last `token_count` event's `total_token_usage`, but only when the thread
-  starts from zero usage (not a fork), its counters are valid, and every request in it used the
-  same model (from the rollout's `turn_context`). A forked thread starts with its parent's usage:
-  its total minus that baseline, or the sum of its requests' `last_token_usage`, is its own. A
-  context-window snapshot with zeroed counters is skipped. When a thread's own counters cannot be
-  recovered this way, the trial's usage is flagged incomplete. How the rollout marks a fork and its
-  baseline is a smoke check.
-- When a thread's requests used more than one model, usage is the sum of `last_token_usage` per
-  request, by model. Without per-request usage, the trial's model attribution is flagged incomplete.
-- Fallback when the rollout is missing or unreadable: the last `turn.completed.usage` on stdout,
-  when it is visible and covers the same thread.
+- Primary: the rollout's `token_usage_record` entries, one per model response, counted once by
+  `response_id` (with `thread_id` and `turn_id`) and summed per model. The model is the turn's
+  `turn_context.model` only when it agrees with the effective model the CLI observed for the
+  response; otherwise the trial's model attribution is flagged incomplete. The records come from
+  the pinned source; the spike read only `token_count`, so their on-disk layout is a smoke check.
+- Fallback when a rollout has no such records: its last `token_count` event's `total_token_usage`.
+  `token_count` is a cumulative snapshot without a response id, and a rate-limit update can repeat
+  it without a request, so it is used only when the thread starts from zero usage (not a fork), its
+  counters are valid, no context-window reset occurred, and every request used the same verified
+  model. A forked thread starts with its parent's usage: its total minus that baseline is its own.
+  After a context-window reset (a snapshot with zeroed counters), cumulative accounting stops; later
+  usage comes from unique response records or the trial's usage is flagged incomplete. How fork
+  lineage (`session_meta.forked_from_id`) gives the baseline is a smoke check.
+- Last fallback when the rollout is missing or unreadable: the last `turn.completed.usage` on
+  stdout (`codex exec --json`), a cumulative thread total without a model split. It counts as
+  complete only when it covers the thread's last launch in the shim log, its counters are valid,
+  its starting usage is known (zero or a recovered fork baseline) and the thread used one verified
+  model; otherwise the trial's usage is flagged incomplete.
+- When none of these recovers a thread's own usage, the trial's usage is flagged incomplete.
 - Provisional: `cache_write_input_tokens` is counted as cache creation. Whether it overlaps
   `input_tokens` is unknown (the spike saw only zeros); a nonzero case is a smoke check before
   ordinary input and cache creation are split.
@@ -301,10 +309,11 @@ no covering result) flags the trial's usage as incomplete.
 
 The cross-check for a Claude session is its cumulative `modelUsage`: the transcript's last
 `cost-state` record (undocumented), or the result event of the session's last process where it is
-visible. A snapshot is used only when it is known to cover the same work: its record comes after
-the session's last assistant message. On a mismatch with such a snapshot, the snapshot's
-`modelUsage` is used and the trial is flagged. A stale or missing snapshot marks the cross-check as
-unavailable; it never replaces the message counts.
+visible. A snapshot is used only when it covers the same work: it comes after the session's last
+assistant message and belongs to the session's latest launch in the shim log (a `cost-state`
+`startTime` or result event from that launch). On a mismatch with such a snapshot, its
+`modelUsage` is used and the trial is flagged. Without a covering snapshot, including when the
+latest launch wrote none, the cross-check is unavailable; it never replaces the message counts.
 
 **Alternative considered:** capture each process's final result event. Engines own stdout, so it is
 not always visible.
