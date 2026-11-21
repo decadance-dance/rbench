@@ -70,6 +70,7 @@ class Configuration:
     engine: str
     version: str
     roles: tuple[tuple[str, RoleSetting], ...]  # every role of the engine, sorted by name
+    inputs: tuple[tuple[str, str], ...] = ()  # sorted; `Engine.inputs_for` its providers
     id: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -82,12 +83,13 @@ class Configuration:
         The id is only as exact as `version`. Before planning freezes ids or checks reuse:
         - a git tag pin (`refs/tags/<name>`) must be resolved to its commit, so the engine passed
           in carries the commit;
-        - for `plain`, the version is its prompt hash, and the findings schema hash and the Codex
-          model catalog hash (generated per CLI version, design D12) must join the settings too;
-          the `plain` adapter (issue #47) adds them.
+        - for `plain`, the version is its prompt hash, and `inputs` holds the findings schema
+          hash and, for a Codex model, the model catalog hash (design D12); an engine without
+          inputs has no `inputs` key, so its ids do not depend on this field.
         """
         roles = {r: {"models": list(s.models), "effort": s.effort} for r, s in self.roles}
-        return {"engine": self.engine, "version": self.version, "roles": roles}
+        settings = {"engine": self.engine, "version": self.version, "roles": roles}
+        return settings | ({"inputs": dict(self.inputs)} if self.inputs else {})
 
     @property
     def hash(self) -> str:
@@ -186,12 +188,17 @@ def _strings(value: object, where: str, listed: bool = False) -> list[str]:
     return items
 
 
+def configuration(engine: Engine, roles: Sequence[tuple[str, RoleSetting]]) -> Configuration:
+    """The configuration of `engine` with these role settings (sorted by role), with the input
+    hashes of the CLIs its models run on."""
+    clis = {MODELS[m] for _, s in roles for m in s.models}
+    return Configuration(engine.name, engine.version, tuple(roles), engine.inputs_for(clis))
+
+
 def _default(engine: Engine) -> Configuration:
     roles = engine.default_configuration()
-    return Configuration(
-        engine.name,
-        engine.version,
-        tuple((r, RoleSetting((s.model,), s.effort)) for r, s in sorted(roles.items())),
+    return configuration(
+        engine, [(r, RoleSetting((s.model,), s.effort)) for r, s in sorted(roles.items())]
     )
 
 
@@ -239,7 +246,7 @@ def _expand(entry: object, where: str, engines: Mapping[str, Engine]) -> list[Co
         choices.append(settings)
     names = sorted(engine.roles)
     return [
-        Configuration(engine.name, engine.version, tuple(zip(names, combo, strict=True)))
+        configuration(engine, tuple(zip(names, combo, strict=True)))
         for combo in itertools.product(*choices)
     ]
 

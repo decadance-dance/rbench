@@ -415,7 +415,10 @@ def parse_plan(data: object, where: str) -> Plan:
     for i, raw in enumerate(_list(d["configurations"], f"{where}: configurations")):
         at = f"{where}: configurations[{i}]"
         c = _fields(raw, at, {"id", "providers", "settings"})
-        s = _fields(c["settings"], f"{at}.settings", {"engine", "version", "roles"})
+        keys = {"engine", "version", "roles"}
+        if isinstance(c["settings"], dict) and "inputs" in c["settings"]:
+            keys.add("inputs")  # only an engine with input files, such as `plain`, has it
+        s = _fields(c["settings"], f"{at}.settings", keys)
         engine = engines.get(s["engine"]) if isinstance(s["engine"], str) else None
         if engine is None:
             raise LedgerError(f"{at}.settings.engine: not an engine of the plan")
@@ -439,7 +442,12 @@ def parse_plan(data: object, where: str) -> Plan:
                 except ValueError as error:
                     raise LedgerError(str(error)) from None
             roles.append((role, RoleSetting(tuple(models), effort)))
-        config = Configuration(s["engine"], s["version"], tuple(roles))
+        inputs = _object(s.get("inputs", {}), f"{at}.settings.inputs")
+        for name, digest in sorted(inputs.items()):
+            _string(digest, f"{at}.settings.inputs.{name}", _HEX64)
+        config = Configuration(
+            s["engine"], s["version"], tuple(roles), tuple(sorted(inputs.items()))
+        )
         if config.settings != s or config.id != c["id"]:
             raise LedgerError(f"{at}.id: does not match its settings")
         if c["providers"] != sorted(config.providers):

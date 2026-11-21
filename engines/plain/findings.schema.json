@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["findings"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "description": "One entry per distinct problem the change introduces; empty when there is none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "start_line", "end_line", "severity", "message"],
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Path relative to the repository root, as in the diff."
+          },
+          "start_line": {
+            "type": "integer",
+            "description": "First line of the problem, counted from 1, in the reviewed version of the file."
+          },
+          "end_line": {
+            "type": "integer",
+            "description": "Last line of the problem; equal to start_line for a single line."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["must_fix", "should_fix", "nit"]
+          },
+          "message": {
+            "type": "string",
+            "description": "What is wrong, why it matters and how to fix it."
+          }
+        }
+      }
+    }
+  }
+}

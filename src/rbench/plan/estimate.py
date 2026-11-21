@@ -45,7 +45,14 @@ from pathlib import Path
 
 from rbench.engines.declaration import CLIS, EFFORTS, DeclarationError, Engine, Setting
 from rbench.engines.pins import MODELS
-from rbench.matrix.expansion import UNDECIDED, Configuration, Matrix, RoleSetting, Round
+from rbench.matrix.expansion import (
+    UNDECIDED,
+    Configuration,
+    Matrix,
+    RoleSetting,
+    Round,
+    configuration,
+)
 
 KINDS = ("engine", "normalization", "judge")
 SMOKE_VERSION = 1
@@ -104,7 +111,7 @@ def configuration_of(config_id: str, engine: Engine) -> Configuration | None:
         except DeclarationError:
             return None
         settings.append((role, RoleSetting(tuple(sorted(models)), effort)))
-    config = Configuration(engine.name, engine.version, tuple(settings))
+    config = configuration(engine, settings)
     return config if config_id == f"{config.name}-{config_id[-64:]}" else None
 
 
