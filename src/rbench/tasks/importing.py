@@ -90,10 +90,14 @@ def _changelog(
     skipped: dict[str, str],
     note: str,
     empty: str,
+    force: bool = False,
 ) -> tuple[list | None, int]:
-    """The new changelog and version, or (None, old version) when nothing changed."""
+    """The new changelog and version, or (None, old version) when nothing changed.
+
+    `force` makes a new version even then, for news only the changelog carries (a new skip).
+    """
     current = {task_id: entry.sha256 for task_id, entry in entries.items()}
-    if old is not None and old.source == source and old.tasks == entries:
+    if not force and old is not None and old.source == source and old.tasks == entries:
         return None, old.version
     if not current and not skipped:
         raise TaskImportError(empty)
@@ -159,6 +163,7 @@ def _write_task(
     archive_sha: str,
     items,
     set_dir,
+    canary: str | None = None,
 ):
     title, body = texts
     task_dir = staging / task_id
@@ -176,7 +181,10 @@ def _write_task(
         "description": body,
     }
     atomic_write(task_dir / TASK_FILE, _dumps(meta))
-    canary = _existing_canary(set_dir / task_id) or PUBLIC_CANARY_PREFIX + uuid.uuid4().hex
+    # An assigned canary stays; a new task gets `canary`, or a random one when none is given.
+    canary = (
+        _existing_canary(set_dir / task_id) or canary or PUBLIC_CANARY_PREFIX + uuid.uuid4().hex
+    )
     atomic_write(task_dir / GROUND_TRUTH_FILE, _dumps({"canary": canary, "items": items}))
     try:
         return load_task(task_dir)

@@ -24,9 +24,11 @@ the PR it came from. PR text is data for the engines and the judge, never instru
 
 import argparse
 import csv
+import hashlib
 import os
 import re
 import shutil
+import subprocess
 import sys
 import uuid
 from dataclasses import dataclass, replace
@@ -51,7 +53,14 @@ from rbench.tasks.importing import (
     _write_task,
 )
 from rbench.tasks.license import LicenseError, LicenseLookupError, read_license
-from rbench.tasks.loader import COMMIT, HIDDEN_ID_PREFIX, REPO, TASK_ID, TaskError
+from rbench.tasks.loader import (
+    COMMIT,
+    HIDDEN_ID_PREFIX,
+    PUBLIC_CANARY_PREFIX,
+    REPO,
+    TASK_ID,
+    TaskError,
+)
 from rbench.tasks.manifest import (
     MANIFEST_FILE,
     MinedSource,
@@ -577,22 +586,27 @@ def _check_window(window: Window) -> None:
 
 
 def write_label_sheet(path: Path, window: Window = Window()) -> int:
-    """Mine and write the label sheet: one row per item; return the number of rows."""
+    """Mine and write the label sheet: one row per item; return the number of rows.
+
+    The sheet is working data for the maintainer: a path git tracks is refused, and every cell
+    built from GitHub text is written so a spreadsheet shows it as text, not a formula.
+    """
+    path = Path(path)
+    _refuse_tracked(path)
     found, _ = mine(window)
     rows = [
         (
             m.task_id,
             item.id,
-            f"{item.file}:{item.start_line}-{item.end_line}",
-            item.link,
+            _text(f"{item.file}:{item.start_line}-{item.end_line}"),
+            _text(item.link),
             LABELS[item.pre_label],
             "",
-            " ".join(item.message.split())[:EXCERPT],
+            _text(" ".join(item.message.split())[:EXCERPT]),
         )
         for m in found
         for item in m.items
     ]
-    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
     with tmp.open("w", newline="", encoding="utf-8") as f:
@@ -601,6 +615,28 @@ def write_label_sheet(path: Path, window: Window = Window()) -> int:
         writer.writerows(rows)
     os.replace(tmp, path)
     return len(rows)
+
+
+def _text(cell: str) -> str:
+    """A cell a spreadsheet keeps as text: a leading formula character gets a quote first."""
+    return f"'{cell}" if cell[:1] in ("=", "+", "-", "@", "\t", "\r") else cell
+
+
+def _refuse_tracked(path: Path) -> None:
+    """Refuse a label-sheet path that a git work tree tracks; the sheet is never committed."""
+    folder = path.parent if path.parent.is_dir() else None
+    if folder is None:
+        return  # a new directory holds no tracked file
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    found = subprocess.run(
+        ["git", "-C", str(folder), "ls-files", "--error-unmatch", "--", path.name],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+    )
+    if found.returncode == 0:
+        raise TaskImportError(f"label sheet {path} is tracked by git; write it outside the repo")
 
 
 def read_labels(path: Path) -> dict[str, str]:
@@ -673,26 +709,6 @@ def _import(
     old = load_task_set(set_dir, SET)[0] if (set_dir / MANIFEST_FILE).exists() else None
     found, skipped = mine(window)
     severity = _severities(found, labels, require_labels)
-    if require_labels:
-        how = "maintainer"
-    elif labels and any(labels.values()):
-        how = "rule+maintainer"
-    else:
-        how = "rule"
-    filters = {
-        "max_per_repo": window.max_per_repo,
-        "max_changed_lines": window.max_changed_lines,
-        "max_changed_files": window.max_changed_files,
-    }
-    source = MinedSource(
-        window.repos,
-        window.merged_after.isoformat(),
-        window.merged_before.isoformat(),
-        filters,
-        SEVERITY_MAP,
-        SEVERITY_RULE,
-        how,
-    )
 
     token = uuid.uuid4().hex
     stage = set_dir.parent / f".{set_dir.name}.import-{token}"
@@ -700,7 +716,7 @@ def _import(
     stage.mkdir(parents=True)
     archive_stage.mkdir(parents=True)
     try:
-        entries, bundles = {}, {}
+        entries, bundles, labelled = {}, {}, []
         for m in found:
             pr = m.pr
             out = archive_stage / f"{m.task_id}.bundle"
@@ -714,16 +730,55 @@ def _import(
                 skipped[m.task_id] = f"license refused: {err}"
                 continue
             items = [item.ground_truth(severity[item.id]) for item in m.items]
-            task = _write_task(stage, SET, m.task_id, pr, m.texts, archive.sha256, items, set_dir)
+            labelled += [bool((labels or {}).get(item.id)) for item in m.items]
+            task = _write_task(
+                stage,
+                SET,
+                m.task_id,
+                pr,
+                m.texts,
+                archive.sha256,
+                items,
+                set_dir,
+                _canary(m.task_id),
+            )
             entries[m.task_id] = manifest_task(task, archive)
             bundles[m.task_id] = archive
+        # Where the imported items' severities came from, not which options were given.
+        if labelled and all(labelled):
+            how = "maintainer"
+        else:
+            how = "rule+maintainer" if any(labelled) else "rule"
+        filters = {
+            "max_per_repo": window.max_per_repo,
+            "max_changed_lines": window.max_changed_lines,
+            "max_changed_files": window.max_changed_files,
+        }
+        source = MinedSource(
+            window.repos,
+            window.merged_after.isoformat(),
+            window.merged_before.isoformat(),
+            filters,
+            SEVERITY_MAP,
+            SEVERITY_RULE,
+            how,
+        )
         note = (
             f"Mined from {len(window.repos)} repositories, PRs opened and merged from"
             f" {source.merged_after} to before {source.merged_before} (design D15);"
             f" severity by {how}."
         )
+        latest = {t: h for e in (old.changelog if old else ()) for t, h in e.changed.items()}
+        # A skip the changelog does not name yet is news, even when no task changed.
+        news = any(latest.get(task_id, "") is not None for task_id in skipped)
         changelog, version = _changelog(
-            old, source, entries, skipped, note, "the window holds no PR that makes a task"
+            old,
+            source,
+            entries,
+            skipped,
+            note,
+            "the window holds no PR that makes a task",
+            force=news,
         )
         if changelog is not None:
             atomic_write(
@@ -742,6 +797,16 @@ def _import(
         shutil.rmtree(stage, ignore_errors=True)
         shutil.rmtree(archive_stage, ignore_errors=True)
     return ImportResult(version, changelog is not None, tuple(sorted(entries)), skipped)
+
+
+def _canary(task_id: str) -> str:
+    """A new task's canary, derived from its id so a fresh import is byte-reproducible.
+
+    It is unique because task ids are; the `ours` ground truth is public anyway, so a canary that
+    anyone can derive gives nothing away.
+    """
+    digest = hashlib.sha256(f"rbench-ours-canary:{task_id}".encode()).hexdigest()
+    return PUBLIC_CANARY_PREFIX + digest[:32]
 
 
 def _manifest(source: MinedSource, version: int, entries: dict, changelog: list) -> dict:
