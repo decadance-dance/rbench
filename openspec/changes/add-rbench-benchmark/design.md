@@ -296,6 +296,8 @@ server or build step, and opens from disk as the spec requires.
   `pr.json` and the repository. `pr diff` is `git diff refs/heads/base refs/heads/reviewed --`,
   passed on as bytes, so a file named `base` or a non-UTF-8 line changes nothing. It reports the
   PR as `OPEN` with no comments or reviews, so engines that skip closed or reviewed PRs still run.
+  Its `url` is `https://github.com/rbench-trial/repo/pull/<n>`, of no real repository, and its
+  `mergeCommit` is null; rreview 0.1.1 asks for both when it resolves the PR (#52).
   `gh pr comment` writes its body to `/rbench/output/comment-<n>.md`. After the engine, the trial
   copies the regular files named so into `raw/pr-comments/`, which normalization reads like any
   other engine output. The stub opens no connection. Anything else fails with exit 1: another
@@ -943,6 +945,21 @@ measure a different task from the engines, which all read the repository.
 - rreview: the panel roles `intent_contracts`, `reliability` and `security` run on Codex with one
   model for the whole panel; the coordinator runs on Claude Code; the judge runs on Codex, because
   rreview refuses a coordinator and judge of the same family.
+  - Pin: release 0.1.1, tag `0.1.1` at commit `f71d6e171bf47312fd6e564b6cc6a3dcc2d1fe94`, which
+    has `--sandbox external`. The agent image builds that commit with `cargo install --locked` in
+    a build stage and copies only the binary, with `zsh`, which rreview needs for a Claude pass
+    (#52).
+  - `engines/rreview.toml` declares the roles `panel` (Codex), `coordinator` (Claude) and `judge`
+    (Codex); `panel` gives its one model and effort to the three lenses. The adapter runs
+    `rreview reviewed --sandbox external --json` with `--role-agent`, `--role-model` and
+    `--role-effort` for each of rreview's five roles, so rreview passes the model and effort to
+    every pass and the shim adds none. Planning refuses, like the launch, an effort rreview does
+    not accept (Codex: `minimal` to `xhigh`) and a panel of more than one model.
+  - Findings are the `findings` of `result.json` on stdout, at rreview's default gate (P0-P2,
+    confidence at least 0.5), each with its label `P<n>`; dropped candidates are not findings.
+    Exit 2, a result off rreview 0.1.1's types and rules, `findings` that are not its default
+    gate applied to `ungated_findings`, or a result that does not say `sandbox: external` fails
+    the trial.
 - At 10 core tasks and one attempt, one round of all 33 configurations is 330 trials. R1 and R2 run
   all 33; R3 runs only the engine and role-model combinations on the quality-against-cost Pareto
   front after R1 and R2, each once at `xhigh` (O6).
