@@ -37,6 +37,7 @@ default = {{ model = "claude-opus-5-5", effort = "high" }}
     "panel": f"""
 name = "panel"
 pin = {{ kind = "git", ref = "{COMMIT}" }}
+output = "markdown"
 cli = {{ claude = "2.1.316", codex = "0.167.0" }}
 [roles.coordinator]
 cli = "claude"
