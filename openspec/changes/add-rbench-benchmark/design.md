@@ -220,8 +220,10 @@ server or build step, and opens from disk as the spec requires.
 - The contamination audit (#41) reads this log after the trial. A line for anything but `CONNECT`
   to port 443 of a listed host is a successful connection, which contaminates the trial, when
   squid connected upstream (an address, not `-`) or answered without a 4xx or 5xx status. Any
-  other such line is a refused attempt: run health lists it from the trial's `audit.json`. A line
-  the audit cannot read contaminates the trial.
+  other such line is a refused attempt: run health lists it from the trial's `audit.json`. A
+  record that is not valid in every field contaminates the trial, as does any file of the trial
+  directory the audit cannot read or that is not a regular file. Known hidden values are redacted
+  from what the audit records, and a contaminated trial's audit is final.
 - The compose project's live test (#37) passes on Docker 29.4.1 with no credentials and no model
   call. Refused and logged: `CONNECT github.com:443`, a `CONNECT` to the numeric address of
   `api.anthropic.com`, and plain HTTP. `api.anthropic.com` tunnels. External names and

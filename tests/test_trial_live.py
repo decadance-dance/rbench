@@ -133,8 +133,8 @@ def test_trial_sandbox(trial):
     assert any("TCP_DENIED/403 GET http://github.com/" in line for line in log)
     # The contamination audit reads squid's real lines: no connection outside the allowlist, and
     # every refused attempt listed for run health.
-    reasons, refused = audit_proxy_log(project.directory / "proxy.log", read_allowlist())
-    assert reasons == []
+    reasons, refused, omitted = audit_proxy_log(project.directory / "proxy.log", read_allowlist())
+    assert reasons == [] and omitted == 0
     assert [(r["method"], r["target"]) for r in refused] == [
         ("CONNECT", "github.com:443"),
         ("CONNECT", f"{ip}:443"),

@@ -155,7 +155,8 @@ def unbound_sessions(records: list[dict], transcripts: Path) -> list[str]:
             if isinstance(meta.get("id"), str) and _find(meta, "parent_thread_id") is None:
                 roots.setdefault(r["launch"], set()).add(meta["id"])
 
-    files = sorted(p for p in transcripts.rglob("*.jsonl") if p.is_file())
+    # Regular files only: a symlink could lead the audit to a file outside the trial's snapshot.
+    files = sorted(p for p in transcripts.rglob("*.jsonl") if p.is_file() and not p.is_symlink())
     claude_roots = set()
     for file in files:
         path = "/" + file.relative_to(transcripts).as_posix()

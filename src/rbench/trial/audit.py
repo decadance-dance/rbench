@@ -12,22 +12,28 @@ contaminated, and excluded from scores, when:
 - the repository's object count differs from the one recorded before the engine (D4);
 - a transcript session does not bind to exactly one origin launch in the shim log (D5).
 
-Evidence the audit cannot read (a proxy log line, the shim log, the object count) fails closed, as
-contamination. Every other proxy line outside the allowlist is a refused attempt: it does not
-contaminate, and `audit.json` lists it for run health (spec benchmark-report).
+Evidence the audit cannot read (a malformed proxy log record, an unreadable or non-regular file of
+the trial directory, the shim log, the object count) fails closed, as contamination. Every other
+proxy line outside the allowlist is a refused attempt: it does not contaminate, and `audit.json`
+lists it for run health (spec benchmark-report).
+
+Reasons and refused attempts are untrusted text that goes to run health, so every known hidden value
+(a hidden task's id, its canary and the hidden canary prefix) is redacted from them; a hidden task's
+canary is reported by its set only (spec review-tasks).
 """
 
+import ipaddress
 import json
 import mmap
 import os
 import re
 import stat
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 from rbench.atomic import atomic_write
-from rbench.ledger.trials import AUDIT_FILE, dump_json, set_state
+from rbench.ledger.trials import AUDIT_FILE, LedgerError, dump_json, read_status, set_state
 from rbench.tasks.loader import Task
 from rbench.trial.images import IMAGES_DIR
 from rbench.trial.repository import (
@@ -37,18 +43,35 @@ from rbench.trial.repository import (
     Runner,
     count_objects,
 )
-from rbench.trial.sessions import SessionError, read_shim_log, unbound_sessions
+from rbench.trial.sessions import read_shim_log, unbound_sessions
 
 ALLOWLIST = IMAGES_DIR / "proxy" / "allowlist"
+REDACTED = "<redacted>"
+# limit: what one trial's evidence may add to its audit record; the rest is counted, not listed.
+MAX_LISTED = 100
+# Squid caps a URL at 8 KiB; a longer line is not one of its records.
+MAX_PROXY_LINE = 64 << 10
+CANARY_SUFFIX_LENGTH = 32  # rbench.tasks.loader.CANARY_SUFFIX
+# The squid log record (images/proxy/squid.conf): time, client, result/status, method, target,
+# upstream address. A method is an HTTP token; squid escapes a target to printable ASCII.
+_TIME = re.compile(r"[0-9]+\.[0-9]{3}")
+_RESULT = re.compile(r"[A-Z_]+/[0-9]{3}")
+_METHOD = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+_TARGET = re.compile(r"[!-~]+")
+# A JSON string literal with at least one escape: its decoded text may spell a canary that its raw
+# bytes do not. Valid JSON has no backslash between two strings, so a match never straddles two.
+_ESCAPED_STRING = re.compile(rb'"[^"\\\n]*(?:\\.[^"\\\n]*)+"')
 
 
 @dataclass(frozen=True)
 class Audit:
-    """Why a trial is contaminated (empty when it is not), and its refused connection attempts
-    in log order, each `{"method", "target", "result"}`."""
+    """Why a trial is contaminated (empty when it is not), and its distinct refused connection
+    attempts in order of first appearance, each `{"method", "target", "result", "count"}`, with
+    the number of further refused attempts not listed."""
 
     reasons: tuple[str, ...] = ()
     refused: tuple[dict, ...] = ()
+    refused_omitted: int = 0
 
     @property
     def contaminated(self) -> bool:
@@ -77,8 +100,10 @@ def audit_trial(
     `tasks` are all loaded tasks of every set, not only the trial's; `repository` is the state
     `prepare_repository` recorded, and `run` runs commands in the trial's agent container.
     """
+    tasks = tuple(tasks)
+    redact = _redactor(tasks)
     hosts = read_allowlist() if allowlist is None else allowlist
-    reasons, refused = audit_proxy_log(proxy_log, hosts)
+    reasons, refused, omitted = audit_proxy_log(proxy_log, hosts)
     reasons += _canaries(Path(trial_dir), tasks)
     try:
         objects = count_objects(run, REPO_DIR, "the trial's repository")
@@ -90,84 +115,207 @@ def audit_trial(
                 f"the repository's object count changed from {repository.objects} to {objects}"
             )
     try:
-        records = read_shim_log(shim_log)
-    except (OSError, SessionError) as e:
-        reasons.append(f"the shim log cannot be read: {e}")
-    else:
-        reasons += unbound_sessions(records, transcripts)
-    return Audit(tuple(reasons), tuple(refused))
+        reasons += unbound_sessions(read_shim_log(shim_log), transcripts)
+    except (OSError, ValueError) as e:  # ValueError: SessionError, or bytes that are not UTF-8
+        reasons.append(f"the shim log or a transcript cannot be read: {e}")
+    # Errors name files by host path; the record names them within the trial directory.
+    within = f"{Path(trial_dir)}{os.sep}"
+    reasons = [redact(reason.replace(within, "")) for reason in reasons]
+    refused = [{k: redact(v) if isinstance(v, str) else v for k, v in r.items()} for r in refused]
+    return Audit(tuple(reasons), tuple(refused), omitted)
 
 
 def record_audit(trial_dir: Path, audit: Audit) -> None:
-    """Write `audit.json` for run health; a contaminated trial gets that state and its reasons."""
-    record = {"contaminated": list(audit.reasons), "refused": list(audit.refused)}
-    atomic_write(Path(trial_dir) / AUDIT_FILE, dump_json(record))
+    """Write `audit.json` for run health; a contaminated trial gets that state and its reasons.
+
+    A contaminated trial's audit is final: recording it again is a no-op, and a different audit of
+    it is refused (`LedgerError`), so `audit.json` and `status.json` always tell the same story.
+    """
+    trial_dir = Path(trial_dir)
+    record = dump_json(
+        {
+            "contaminated": list(audit.reasons),
+            "refused": list(audit.refused),
+            "refused_omitted": audit.refused_omitted,
+        }
+    )
+    if read_status(trial_dir).state == "contaminated":
+        try:
+            if (trial_dir / AUDIT_FILE).read_bytes() == record:
+                return
+        except OSError:
+            pass
+        raise LedgerError(f"{trial_dir}: the trial is contaminated; its audit stays as recorded")
+    atomic_write(trial_dir / AUDIT_FILE, record)
     if audit.contaminated:
         set_state(trial_dir, "contaminated", "; ".join(audit.reasons))
 
 
-def audit_proxy_log(log: Path, allowlist: Collection[str]) -> tuple[list[str], list[dict]]:
-    """Successful connections outside the allowlist, and refused attempts, from the squid log
-    (`images/proxy/squid.conf`: time, client, result/status, method, target, upstream address)."""
-    try:
-        text = log.read_bytes().decode("utf-8", errors="replace")
-    except OSError as e:
-        return [f"the proxy log cannot be read: {e}"], []
+def audit_proxy_log(log: Path, allowlist: Collection[str]) -> tuple[list[str], list[dict], int]:
+    """Successful connections outside the allowlist, the distinct refused attempts and how many
+    more were not listed, from the squid log. A record is validated whole before it is classified;
+    a malformed one fails closed. Memory stays bounded: records stream, and at most `MAX_LISTED`
+    reasons and distinct refused attempts are kept."""
     hosts = {host.lower() for host in allowlist}
-    reasons, refused = [], []
-    for n, line in enumerate(text.splitlines(), 1):
-        fields = line.split()
-        if not fields:
-            continue
-        if len(fields) != 6 or fields[2].count("/") != 1:
-            reasons.append(f"proxy log line {n} cannot be read, so it may hide a connection")
-            continue
-        _, _, result, method, target, upstream = fields
-        host, _, port = target.rpartition(":")
-        if method == "CONNECT" and port == "443" and host.lower() in hosts:
-            continue
-        if upstream == "-" and result.split("/")[1][:1] in ("4", "5"):
-            refused.append({"method": method, "target": target, "result": result})
-        else:
-            reasons.append(
-                f"the proxy log shows a connection outside the allowlist: {method} {target} "
-                f"({result}, line {n})"
-            )
-    return reasons, refused
+    reasons: list[str] = []
+    unlisted = 0
+    refused: dict[tuple[str, str, str], int] = {}
+    omitted = 0
+    try:
+        with log.open("rb") as f:
+            n = 0
+            while line := f.readline(MAX_PROXY_LINE + 1):
+                n += 1
+                if len(line) > MAX_PROXY_LINE and not line.endswith(b"\n"):
+                    while (rest := f.readline(MAX_PROXY_LINE)) and not rest.endswith(b"\n"):
+                        pass
+                    fields = None
+                else:
+                    fields = _proxy_record(line)
+                if fields is None:
+                    reason = (
+                        f"proxy log line {n} is not a valid record, so it may hide a connection"
+                    )
+                else:
+                    _, _, result, method, target, upstream = fields
+                    host, _, port = target.rpartition(":")
+                    if method == "CONNECT" and port == "443" and host.lower() in hosts:
+                        continue
+                    if upstream == "-" and result[-3] in "45":
+                        key = (method, target, result)
+                        if key in refused:
+                            refused[key] += 1
+                        elif len(refused) < MAX_LISTED:
+                            refused[key] = 1
+                        else:
+                            omitted += 1
+                        continue
+                    reason = (
+                        f"the proxy log shows a connection outside the allowlist: {method} "
+                        f"{target} ({result}, line {n})"
+                    )
+                if len(reasons) < MAX_LISTED:
+                    reasons.append(reason)
+                else:
+                    unlisted += 1
+    except OSError as e:
+        reasons.append(f"the proxy log cannot be read: {e.strerror or e}")
+    if unlisted:
+        reasons.append(f"{unlisted} more proxy log lines outside the allowlist or not valid")
+    listed = [
+        {"method": m, "target": t, "result": r, "count": c} for (m, t, r), c in refused.items()
+    ]
+    return reasons, listed, omitted
 
 
-def _canaries(trial_dir: Path, tasks: Iterable[Task]) -> list[str]:
-    """Every file of the trial directory that holds a task's canary, raw or JSON-escaped."""
-    owners: dict[bytes, str] = {}
+def _proxy_record(line: bytes) -> list[str] | None:
+    """The six fields of a squid log record, or None when any is malformed."""
+    try:
+        text = line.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    fields = text.removesuffix("\n").split(" ")
+    if len(fields) != 6:
+        return None
+    time, client, result, method, target, upstream = fields
+    if not (
+        _TIME.fullmatch(time)
+        and _RESULT.fullmatch(result)
+        and _METHOD.fullmatch(method)
+        and _TARGET.fullmatch(target)
+        and _address(client)
+        and (upstream == "-" or _address(upstream))
+    ):
+        return None
+    return fields
+
+
+def _address(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _redactor(tasks: tuple[Task, ...]) -> Callable[[str], str]:
+    """Replaces every hidden task's id and canary, and the hidden canary prefix, in a text."""
+    values = set()
+    for task in tasks:
+        if task.set == "hidden":
+            values |= {task.id, task.canary, task.canary[:-CANARY_SUFFIX_LENGTH]}
+    values.discard("")
+    if not values:
+        return lambda text: text
+    by_length = sorted(values, key=len, reverse=True)
+    pattern = re.compile("|".join(re.escape(v) for v in by_length), re.IGNORECASE)
+    return lambda text: pattern.sub(REDACTED, text)
+
+
+def _canaries(trial_dir: Path, tasks: tuple[Task, ...]) -> list[str]:
+    """Every file of the trial directory that holds a task's canary, in its raw bytes or in a
+    decoded JSON string; and every file the audit cannot read."""
+    owners: dict[str, str] = {}
     for task in tasks:
         # A hidden task is named only by its set (spec review-tasks).
         who = "a task in set 'hidden'" if task.set == "hidden" else f"task {task.id}"
-        for form in (task.canary, json.dumps(task.canary)[1:-1]):
-            owners.setdefault(form.encode(), who)
+        owners.setdefault(task.canary, who)
     if not owners:
         raise ValueError("the canary scan needs the loaded tasks")
-    pattern = re.compile(b"|".join(re.escape(c) for c in sorted(owners, key=len, reverse=True)))
+    by_length = sorted(owners, key=len, reverse=True)
+    raw = re.compile(b"|".join(re.escape(c.encode()) for c in by_length))
+    text = re.compile("|".join(re.escape(c) for c in by_length))
+    problems: list[str] = []
     hits = []
-    for path in _files(trial_dir):
-        for who in sorted({owners[m] for m in _matches(pattern, path)}):
-            hits.append(f"the canary of {who} appears in {path.relative_to(trial_dir).as_posix()}")
-    return hits
+    for path in _files(trial_dir, problems):
+        label = path.relative_to(trial_dir).as_posix()
+        try:
+            found = _found(path, raw, text)
+        except (OSError, ValueError) as e:  # ValueError: mmap of a file that changed size
+            problems.append(f"{label} cannot be read: {getattr(e, 'strerror', None) or e}")
+            continue
+        for who in sorted({owners[c] for c in found}):
+            hits.append(f"the canary of {who} appears in {label}")
+    return hits + problems
 
 
-def _files(root: Path) -> list[Path]:
-    """Regular files below `root`; symlinks are not followed, so no host file is read."""
+def _files(root: Path, problems: list[str]) -> list[Path]:
+    """Regular files below `root`. Anything else, and what cannot be listed, is a problem: a
+    symlink is not followed, so no file outside the trial directory is read."""
+
+    def label(path: str | Path) -> str:
+        return Path(path).relative_to(root).as_posix()
+
+    def failed(e: OSError) -> None:
+        problems.append(f"{label(e.filename or root)} cannot be listed: {e.strerror or e}")
+
     found = []
-    for directory, _, names in os.walk(root):
-        for name in names:
+    for directory, dirs, names in os.walk(root, onerror=failed):
+        for name in sorted(dirs + names):
             path = Path(directory) / name
-            if stat.S_ISREG(path.lstat().st_mode):
+            try:
+                mode = path.lstat().st_mode
+            except OSError as e:
+                problems.append(f"{label(path)} cannot be read: {e.strerror or e}")
+                continue
+            if stat.S_ISREG(mode):
                 found.append(path)
+            elif not stat.S_ISDIR(mode):
+                problems.append(f"{label(path)} is not a regular file, so it cannot be audited")
     return sorted(found)
 
 
-def _matches(pattern: re.Pattern[bytes], path: Path) -> set[bytes]:
+def _found(path: Path, raw: re.Pattern[bytes], text: re.Pattern[str]) -> set[str]:
+    """The canaries in a file, kept as a set of distinct values while the matches stream by."""
     with path.open("rb") as f:
         if os.fstat(f.fileno()).st_size == 0:
             return set()
         with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as data:
-            return set(pattern.findall(data))
+            found = {m.group().decode() for m in raw.finditer(data)}
+            for literal in _ESCAPED_STRING.finditer(data):
+                try:
+                    value = json.loads(literal.group())
+                except ValueError:
+                    continue
+                found.update(m.group() for m in text.finditer(value))
+            return found
