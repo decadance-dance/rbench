@@ -3,7 +3,8 @@
 A trial directory holds:
 
     status.json    {"state": ..., "reason": ...} or, once done,
-                   {"state": "done", "findings_sha256": ..., "usage_sha256": ...}
+                   {"state": "done", "findings_sha256": ..., "usage_sha256": ...,
+                    "reused_from"?: <source run id>}
     findings.json  the trial's findings:
                    [{"file", "start_line", "end_line", "message", "severity"?}]
     usage.json     its token usage, the engine's and the normalization step's apart:
@@ -35,6 +36,7 @@ STATUS_FILE = "status.json"
 FINDINGS_FILE = "findings.json"
 USAGE_FILE = "usage.json"
 RAW_DIR = "raw"
+RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 FINDING_KEYS = {"file", "start_line", "end_line", "message"}
 FINDING_OPTIONAL_KEYS = {"severity"}
 USAGE_KEYS = {"input", "output", "cache_read", "cache_creation"}
@@ -54,6 +56,7 @@ class TrialStatus:
     reason: str | None = None
     findings_sha256: str | None = None
     usage_sha256: str | None = None
+    reused_from: str | None = None
 
 
 def dump_json(data: object) -> bytes:
@@ -132,13 +135,17 @@ def set_state(trial_dir: Path, state: str, reason: str | None = None) -> None:
     atomic_write(trial_dir / STATUS_FILE, dump_json(status))
 
 
-def store_results(trial_dir: Path, findings: list, usage: dict) -> None:
+def store_results(
+    trial_dir: Path, findings: list, usage: dict, *, reused_from: str | None = None
+) -> None:
     """Store the trial's findings and usage, then mark it done; done is the last write.
 
     Refused, before any file changes, for invalid results and for a trial that is already done
     or has no readable status: a done trial's results are a checkpoint that resume keeps.
     """
     trial_dir = Path(trial_dir)
+    if reused_from is not None:
+        _check_source_id(reused_from, trial_dir)
     _check_findings(findings, str(trial_dir))
     _check_usage(usage, str(trial_dir))
     if read_status(trial_dir).state == "done":
@@ -151,7 +158,14 @@ def store_results(trial_dir: Path, findings: list, usage: dict) -> None:
         "findings_sha256": hashlib.sha256(payloads[FINDINGS_FILE]).hexdigest(),
         "usage_sha256": hashlib.sha256(payloads[USAGE_FILE]).hexdigest(),
     }
+    if reused_from is not None:
+        status["reused_from"] = reused_from
     atomic_write(trial_dir / STATUS_FILE, dump_json(status))
+
+
+def _check_source_id(value: object, where: Path) -> None:
+    if not (isinstance(value, str) and RUN_ID.fullmatch(value)):
+        raise LedgerError(f"{where}: reused_from: expected a valid source run id")
 
 
 def read_status(trial_dir: Path) -> TrialStatus:
@@ -166,6 +180,9 @@ def read_status(trial_dir: Path) -> TrialStatus:
         raise LedgerError(f"{path}: no valid state")
     if state == "done":
         keys = {"state", "findings_sha256", "usage_sha256"}
+        if "reused_from" in data:
+            keys.add("reused_from")
+            _check_source_id(data["reused_from"], path)
     else:
         keys = {"state", "reason"} if state in NEEDS_REASON else {"state"}
     if data.keys() != keys:

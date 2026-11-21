@@ -4,7 +4,7 @@
 
     plan.json            the frozen plan, written once when the run is created
     ledger.lock          the run's lock file; taking it is resume's job
-    trials/<trial-id>/   one per trial (see `rbench.ledger.trials`), created `pending`
+    trials/<trial-id>/   one per trial, pending or reused as done (see `rbench.ledger.trials`)
 
 The plan is one round of a matrix: its configurations, the version of every task set and the
 content hash of every planned task, each engine's pin, CLI versions, image digest and how each
@@ -39,13 +39,24 @@ from pathlib import Path, PurePosixPath
 from rbench.atomic import atomic_write
 from rbench.engines.declaration import CLIS, Engine, Setting, load_engine, parse_engine
 from rbench.engines.pins import MODELS, FloatingRefError, check_ref
-from rbench.ledger.trials import RAW_DIR, LedgerError, dump_json, no_repeated_keys, set_state
+from rbench.ledger.trials import (
+    RAW_DIR,
+    RUN_ID,
+    LedgerError,
+    dump_json,
+    no_repeated_keys,
+    read_results,
+    read_status,
+    set_state,
+    store_results,
+)
 from rbench.matrix.expansion import (
     STAGES,
     Configuration,
     Matrix,
     MatrixError,
     RoleSetting,
+    can_reuse,
     parse_matrix,
 )
 from rbench.tasks.hidden import check_hidden_results_dir, hidden_config
@@ -65,7 +76,6 @@ PLAN_FORMAT = 1
 PLAN_FILE = "plan.json"
 LOCK_FILE = "ledger.lock"
 TRIALS_DIR = "trials"
-RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 PUBLIC_SETS = ("reviewbench", "ours")
 PIN_KINDS = ("git", "version", "sha256", "cli")
 # limit: the checkout of an editable install (`uv run`); an installed wheel has no checkout, so
@@ -522,8 +532,64 @@ def _check_hidden_run_dir(path: Path) -> None:
         ) from None
 
 
-def create_run(runs_dir: Path, run_id: str, plan: Plan) -> Path:
-    """Create `runs_dir/run_id` with the plan, the lock file and every trial pending.
+def _check_reuse_stage(stage: str, reuse: Path | None) -> None:
+    if reuse is not None and not can_reuse(stage):
+        raise LedgerError(f"the {stage} stage requires fresh trials and cannot use --reuse")
+
+
+def _reuse_trials(staging: Path, plan: Plan, source_dir: Path) -> None:
+    try:
+        source_dir = source_dir.resolve(strict=True)
+        source = load_plan(source_dir)
+    except (OSError, ValueError, RuntimeError):
+        # An unreadable plan may belong to a hidden run, so its path and contents stay private.
+        raise LedgerError("cannot read or validate the earlier run's frozen plan.json") from None
+    if not RUN_ID.fullmatch(source_dir.name):
+        raise LedgerError("the earlier run's directory name must be a valid run id")
+
+    hidden = "hidden" in source.task_sets or "hidden" in plan.task_sets
+    source_trials = {trial.id: trial for trial in source.trials}
+    source_tasks = {task.id: task for task in source.tasks}
+    unchanged_tasks = {task.id for task in plan.tasks if source_tasks.get(task.id) == task}
+    unchanged_engines = {
+        name
+        for name, new in plan.engines.items()
+        if (old := source.engines.get(name)) is not None
+        and old.version == new.version
+        and old.clis == new.clis
+        and old.image.rsplit("@", 1)[1] == new.image.rsplit("@", 1)[1]
+    }
+    unchanged_configs = {
+        config.id
+        for config in plan.configurations
+        if config.settings["engine"] in unchanged_engines
+    }
+
+    for index, trial in enumerate(plan.trials, start=1):
+        # The full configuration id and attempt must match, even though the path uses a prefix.
+        if not (
+            source_trials.get(trial.id) == trial
+            and trial.task in unchanged_tasks
+            and trial.configuration in unchanged_configs
+        ):
+            continue
+        previous = source_dir / TRIALS_DIR / trial.id
+        try:
+            if read_status(previous).state == "done":
+                findings, usage = read_results(previous)
+                store_results(
+                    staging / TRIALS_DIR / trial.id, findings, usage, reused_from=source_dir.name
+                )
+        except (OSError, ValueError):
+            if hidden:
+                raise LedgerError(
+                    f"cannot reuse trial {index} in a run with hidden tasks"
+                ) from None
+            raise
+
+
+def create_run(runs_dir: Path, run_id: str, plan: Plan, *, reuse: Path | None = None) -> Path:
+    """Create `runs_dir/run_id` with the plan, the lock file and all trial checkpoints.
 
     The directory is built under a temporary name and renamed into place, so a run directory
     either holds the whole plan and every trial, or does not exist. An existing run is refused.
@@ -531,6 +597,7 @@ def create_run(runs_dir: Path, run_id: str, plan: Plan) -> Path:
     """
     runs_dir = Path(runs_dir)
     hidden = "hidden" in plan.task_sets
+    _check_reuse_stage(plan.stage, reuse)
     if not RUN_ID.fullmatch(run_id):
         label = "bad run id" if hidden else f"bad run id {run_id!r}"
         raise LedgerError(f"{label}; use letters, digits, '.', '_' and '-'")
@@ -556,6 +623,8 @@ def create_run(runs_dir: Path, run_id: str, plan: Plan) -> Path:
             trial_dir.mkdir(mode=0o700)
             (trial_dir / RAW_DIR).mkdir(mode=0o700)
             set_state(trial_dir, "pending")
+        if reuse is not None:
+            _reuse_trials(tmp, plan, reuse)
         # Fails if another runner created the same run meanwhile: the target is not empty.
         os.rename(tmp, run_dir)
     except BaseException as e:
@@ -657,6 +726,7 @@ def start_run(
     runs_dir: Path,
     run_id: str | None = None,
     root: Path | None = None,
+    reuse: Path | None = None,
 ) -> Path:
     """Load the inputs from disk, freeze the plan of one round and create its run directory.
 
@@ -671,6 +741,7 @@ def start_run(
         raise MatrixError(f"{matrix_path}: not a valid UTF-8 TOML file: {e}") from e
     engines = load_engines(engines_dir)
     matrix = parse_matrix(data, str(matrix_path), engines)
+    _check_reuse_stage(matrix.stage, reuse)
     hidden_set = None
     if matrix.tasks == "all":
         # The hidden-task API already reports validation failures and symlink loops as TaskError.
@@ -695,4 +766,4 @@ def start_run(
     )
     if run_id is None:
         run_id = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{matrix.stage}-{round_name}"
-    return create_run(runs_dir, run_id, plan)
+    return create_run(runs_dir, run_id, plan, reuse=reuse)

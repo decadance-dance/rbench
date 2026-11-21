@@ -9,7 +9,7 @@ from enum import IntEnum
 from importlib.metadata import version
 from pathlib import Path
 
-from rbench.ledger import load_plan, matrix_warning, start_run
+from rbench.ledger import TRIALS_DIR, load_plan, matrix_warning, read_status, start_run
 from rbench.ledger.resume import recover_trials, run_lock
 from rbench.plan import command as plan_command
 from rbench.tasks import release, reviewbench
@@ -99,6 +99,12 @@ def build_parser() -> argparse.ArgumentParser:
                 "--run-id", help="the run directory's name (default: UTC time, stage, round)"
             )
             sub.add_argument(
+                "--reuse",
+                type=Path,
+                metavar="RUN_DIRECTORY",
+                help="copy matching done trials into a new smoke or screening run",
+            )
+            sub.add_argument(
                 "--wait",
                 action="store_true",
                 help="on a limit, pause only that provider and resume it after the reset",
@@ -118,16 +124,28 @@ def _run(args: argparse.Namespace) -> int:
             tasks_root=args.tasks,
             runs_dir=args.runs,
             run_id=args.run_id,
+            reuse=args.reuse,
         )
     except (OSError, ValueError) as e:
         print(f"rbench run: {e}", file=sys.stderr)
         return ExitCode.ERROR
     try:
-        trials = len(load_plan(run_dir).trials)
+        plan = load_plan(run_dir)
     except (OSError, ValueError):
         print("rbench run: cannot read the newly created plan.json", file=sys.stderr)
         return ExitCode.ERROR
-    print(f"created {run_dir}: {trials} trials pending")
+    pending = len(plan.trials)
+    if args.reuse is not None:
+        try:
+            pending = sum(
+                read_status(run_dir / TRIALS_DIR / trial.id).state == "pending"
+                for trial in plan.trials
+            )
+        except (OSError, ValueError):
+            print("rbench run: cannot read the newly created trial statuses", file=sys.stderr)
+            return ExitCode.ERROR
+    label = "run with hidden tasks" if "hidden" in plan.task_sets else str(run_dir)
+    print(f"created {label}: {pending} trials pending")
     print("rbench run: the trial executor is not implemented yet", file=sys.stderr)
     return ExitCode.ERROR
 
