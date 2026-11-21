@@ -17,12 +17,14 @@ from rbench.trial import (
     TrialError,
     TrialProject,
     agent_runner,
+    audit_proxy_log,
     build_agent_image,
     build_proxy_image,
     copy_comments,
     image_id,
     inspect_repository,
     prepare_repository,
+    read_allowlist,
 )
 
 pytestmark = pytest.mark.live
@@ -129,6 +131,15 @@ def test_trial_sandbox(trial):
     assert any("TCP_DENIED/403 CONNECT github.com:443" in line for line in log)
     assert any(f"TCP_DENIED/403 CONNECT {ip}:443" in line for line in log)
     assert any("TCP_DENIED/403 GET http://github.com/" in line for line in log)
+    # The contamination audit reads squid's real lines: no connection outside the allowlist, and
+    # every refused attempt listed for run health.
+    reasons, refused, omitted = audit_proxy_log(project.directory / "proxy.log", read_allowlist())
+    assert reasons == [] and omitted == 0
+    assert [(r["method"], r["target"]) for r in refused] == [
+        ("CONNECT", "github.com:443"),
+        ("CONNECT", f"{ip}:443"),
+        ("GET", "http://github.com"),  # the destination only
+    ]
 
     # No route but the proxy: external DNS fails, and so does a direct connection to an address.
     for host in ("github.com", "host.docker.internal"):
