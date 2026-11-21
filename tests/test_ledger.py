@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from conftest import PLAIN_PROMPT_SHA256, write_plain_files
 from test_hidden import git_repo, hidden_dir
 from test_manifest import edit, write_manifest
 from test_matrix import engines, matrix
@@ -146,6 +147,7 @@ def test_plan_holds_what_the_spec_freezes(tmp_path: Path) -> None:
                     "default": {"model": "claude-opus-5-5", "effort": "high"},
                 }
             },
+            "output": "structured",
         }
     }
     assert plan["matrix"] == {"path": "m.toml", "sha256": "f" * 64}
@@ -764,7 +766,7 @@ def test_runs_directory_is_git_ignored() -> None:
 
 ENGINE_TOML = f"""
 name = "plain"
-pin = {{ kind = "sha256", ref = "{"ab" * 32}" }}
+pin = {{ kind = "sha256", ref = "{PLAIN_PROMPT_SHA256}" }}
 
 [cli]
 claude = "{CLI["claude"]}"
@@ -799,6 +801,7 @@ def checkout(tmp_path: Path, monkeypatch) -> Path:
 def cli_inputs(root: Path, images: dict | None = None) -> list[str]:
     (root / "engines").mkdir()
     (root / "engines" / "plain.toml").write_text(ENGINE_TOML)
+    write_plain_files(root / "engines", CLI["codex"])
     task_sets(root / "tasks")
     (root / "matrices").mkdir()
     (root / "matrices" / "m.toml").write_text(MATRIX_TOML)

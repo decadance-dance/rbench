@@ -39,8 +39,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rbench.engines import normalization
 from rbench.engines.declaration import CLIS, Engine, Setting
 from rbench.engines.pins import MODELS
+from rbench.engines.plain import NAME as PLAIN
 
 ALL_ENGINES = "*"
 # A budget the maintainer has not approved yet; decision O6 (issue #16) sets each from the
@@ -70,6 +72,8 @@ class Configuration:
     engine: str
     version: str
     roles: tuple[tuple[str, RoleSetting], ...]  # every role of the engine, sorted by name
+    inputs: tuple[tuple[str, str], ...] = ()  # sorted; `Engine.inputs_for` its providers
+    markdown: bool = False  # the engine's output goes through the normalization step
     id: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -82,12 +86,18 @@ class Configuration:
         The id is only as exact as `version`. Before planning freezes ids or checks reuse:
         - a git tag pin (`refs/tags/<name>`) must be resolved to its commit, so the engine passed
           in carries the commit;
-        - for `plain`, the version is its prompt hash, and the findings schema hash and the Codex
-          model catalog hash (generated per CLI version, design D12) must join the settings too;
-          the `plain` adapter (issue #47) adds them.
+        - for `plain`, the version is its prompt hash, and `inputs` holds the findings schema
+          hash and, for a Codex model, the model catalog hash (design D12); an engine without
+          inputs has no `inputs` key, so its ids do not depend on this field.
+
+        A Markdown engine's settings also hold the normalization step's pin, so a new normalizer
+        model or prompt gives new ids; a structured engine's do not.
         """
         roles = {r: {"models": list(s.models), "effort": s.effort} for r, s in self.roles}
-        return {"engine": self.engine, "version": self.version, "roles": roles}
+        settings = {"engine": self.engine, "version": self.version, "roles": roles}
+        if self.markdown:
+            settings["normalization"] = dict(normalization.SETTINGS)
+        return settings | ({"inputs": dict(self.inputs)} if self.inputs else {})
 
     @property
     def hash(self) -> str:
@@ -107,8 +117,15 @@ class Configuration:
 
     @property
     def providers(self) -> frozenset[str]:
-        """The CLIs its models run on; a round's budget must cover each."""
+        """The CLIs its models run on, which its engine tokens are on."""
         return frozenset(MODELS[m] for _, s in self.roles for m in s.models)
+
+    @property
+    def budget_providers(self) -> frozenset[str]:
+        """The CLIs a trial spends on: its models' and, for a Markdown engine, the normalizer's.
+        A round's budget covers each; engine estimates use `providers` alone."""
+        extra = {MODELS[normalization.MODEL]} if self.markdown else set()
+        return self.providers | extra
 
 
 @dataclass(frozen=True)
@@ -186,12 +203,23 @@ def _strings(value: object, where: str, listed: bool = False) -> list[str]:
     return items
 
 
-def _default(engine: Engine) -> Configuration:
-    roles = engine.default_configuration()
+def configuration(engine: Engine, roles: Sequence[tuple[str, RoleSetting]]) -> Configuration:
+    """The configuration of `engine` with these role settings (sorted by role), with the input
+    hashes of the CLIs its models run on."""
+    clis = {MODELS[m] for _, s in roles for m in s.models}
     return Configuration(
         engine.name,
         engine.version,
-        tuple((r, RoleSetting((s.model,), s.effort)) for r, s in sorted(roles.items())),
+        tuple(roles),
+        engine.inputs_for(clis),
+        markdown=engine.output == "markdown",
+    )
+
+
+def _default(engine: Engine) -> Configuration:
+    roles = engine.default_configuration()
+    return configuration(
+        engine, [(r, RoleSetting((s.model,), s.effort)) for r, s in sorted(roles.items())]
     )
 
 
@@ -229,6 +257,11 @@ def _expand(entry: object, where: str, engines: Mapping[str, Engine]) -> list[Co
             raise MatrixError(f"{at}: give model or models, not both")
         if "models" in raw:
             model_sets = [tuple(sorted(_strings(raw["models"], f"{at}: models", listed=True)))]
+            if engine.name == PLAIN and len(model_sets[0]) > 1:
+                raise MatrixError(
+                    f"{at}: plain runs one model per trial, not a set; give model = [...] to plan"
+                    " one configuration per model"
+                )
         else:
             model_sets = [(m,) for m in _strings(raw.get("model", d.model), f"{at}: model")]
         efforts = _strings(raw.get("effort", d.effort), f"{at}: effort")
@@ -239,7 +272,7 @@ def _expand(entry: object, where: str, engines: Mapping[str, Engine]) -> list[Co
         choices.append(settings)
     names = sorted(engine.roles)
     return [
-        Configuration(engine.name, engine.version, tuple(zip(names, combo, strict=True)))
+        configuration(engine, tuple(zip(names, combo, strict=True)))
         for combo in itertools.product(*choices)
     ]
 
@@ -296,7 +329,7 @@ def parse_matrix(data: object, source: str, engines: Mapping[str, Engine]) -> Ma
                     raise MatrixError(f"{where}: configuration {c.id} repeats {seen[c.id]}")
                 seen[c.id] = where
                 configurations.append(c)
-        used = frozenset().union(*(c.providers for c in configurations))
+        used = frozenset().union(*(c.budget_providers for c in configurations))
         budget = _budget(raw["budget"], f"{at}: budget", used)
         rounds.append(Round(name, budget, tuple(configurations)))
     if stage == "smoke":
