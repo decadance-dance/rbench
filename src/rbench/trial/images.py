@@ -18,11 +18,8 @@ AGENT_NAME = "rbench-agent"
 PROXY_NAME = "rbench-proxy"
 IMAGES_DIR = CHECKOUT_ROOT / "images"
 _ID = re.compile(r"sha256:[0-9a-f]{64}")
-# What `<cli> --version` prints, e.g. "2.1.316 (Claude Code)" and "codex-cli 0.171.0".
-_VERSION_OUTPUT = {
-    "claude": re.compile(r"(\S+) \(Claude Code\)"),
-    "codex": re.compile(r"codex-cli (\S+)"),
-}
+# All that `<cli> --version` prints, e.g. "2.1.316 (Claude Code)" and "codex-cli 0.171.0".
+_VERSION_OUTPUT = {"claude": "{} (Claude Code)", "codex": "codex-cli {}"}
 
 
 class TrialError(RuntimeError):
@@ -65,11 +62,14 @@ def _build(name: str, tag: str, context: Path, build_args: dict[str, str]) -> st
     return f"{name}@{out}"
 
 
-def build_agent_image(clis: dict[str, str], images_dir: Path = IMAGES_DIR) -> Image:
+def build_agent_image(
+    clis: dict[str, str], images_dir: Path = IMAGES_DIR, tag: str | None = None
+) -> Image:
     """Build the agent image with exactly these CLI versions and read them back from it.
 
     `clis` maps each CLI the engine declares to its exact version; a CLI not in it is not
-    installed. The result is what the ledger pins for an engine.
+    installed. The result is what the ledger pins for an engine. `tag` replaces the default tag,
+    which names the CLI versions; the reference is the digest either way.
     """
     if not (isinstance(clis, dict) and clis):
         raise TrialError("agent image: clis must name at least one CLI")
@@ -78,18 +78,17 @@ def build_agent_image(clis: dict[str, str], images_dir: Path = IMAGES_DIR) -> Im
             raise TrialError(f"agent image: unknown CLI {cli!r}; expected one of {CLIS}")
         check_ref("agent image", "version", version, f"clis.{cli}")
     # Docker tags allow [A-Za-z0-9_.-]; SemVer build metadata uses "+".
-    tag = "-".join(f"{cli}-{clis[cli]}" for cli in sorted(clis)).replace("+", "_")
+    tag = tag or "-".join(f"{cli}-{clis[cli]}" for cli in sorted(clis)).replace("+", "_")
     build_args = {f"{cli.upper()}_VERSION": clis.get(cli, "") for cli in CLIS}
     ref = _build(AGENT_NAME, tag, images_dir / "agent", build_args)
     for cli, version in sorted(clis.items()):
         what = f"reading the {cli} version in {ref}"
         out = docker("run", "--rm", "--network", "none", image_id(ref), cli, "--version", what=what)
-        found = _VERSION_OUTPUT[cli].search(out)
-        if found is None or found[1] != version:
+        if out.strip() != _VERSION_OUTPUT[cli].format(version):
             raise TrialError(f"{ref}: expected {cli} {version}, the image reports {out.strip()!r}")
     return Image(ref, dict(clis))
 
 
-def build_proxy_image(images_dir: Path = IMAGES_DIR) -> str:
+def build_proxy_image(images_dir: Path = IMAGES_DIR, tag: str = "latest") -> str:
     """Build the proxy image, which carries the allowlist and squid.conf; return its reference."""
-    return _build(PROXY_NAME, "latest", images_dir / "proxy", {})
+    return _build(PROXY_NAME, tag, images_dir / "proxy", {})

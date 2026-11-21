@@ -23,6 +23,7 @@ PROXY_ID = "sha256:" + "b" * 64
 AGENT = f"rbench-agent@{AGENT_ID}"
 PROXY = f"rbench-proxy@{PROXY_ID}"
 CLIS = {"claude": "2.1.316", "codex": "0.171.0"}
+DOWN = ["down", "--volumes", "--remove-orphans", "--timeout", "5"]
 
 
 def docker_answers(fake_bin, **extra):
@@ -79,6 +80,22 @@ def test_agent_image_rejects_another_version_inside(fake_bin):
     )
 
     with pytest.raises(TrialError, match=r"expected claude 2\.1\.316.*2\.1\.317"):
+        build_agent_image({"claude": "2.1.316"})
+
+
+@pytest.mark.parametrize(
+    "banner", ["2.1.316 (Claude Code)\n2.1.317 (Claude Code)\n", "v2.1.316 (Claude Code)\n", ""]
+)
+def test_agent_image_needs_exactly_the_version_banner(fake_bin, banner):
+    fake_bin.scenario(
+        "docker",
+        replies=[
+            {"match": "build ", "stdout": AGENT_ID + "\n"},
+            {"match": "claude --version", "stdout": banner},
+        ],
+    )
+
+    with pytest.raises(TrialError, match="expected claude 2.1.316"):
         build_agent_image({"claude": "2.1.316"})
 
 
@@ -175,19 +192,74 @@ def test_project_file_and_commands(fake_bin, tmp_path):
     assert (result.returncode, result.stdout) == (7, "out")
     base = ["compose", "--project-name", "rbench-t1", "--file", file]
     assert [(c["argv"], c["stdin"]) for c in fake_bin.calls()] == [
+        (base + DOWN, ""),
         (base + ["up", "--detach", "--wait"], ""),
         (base + ["exec", "-T", "agent", "curl", "https://github.com"], "x"),
         (base + ["cp", f"proxy:{PROXY_LOG}", str(tmp_path / "proxy.log")], ""),
-        (base + ["down", "--volumes", "--remove-orphans", "--timeout", "5"], ""),
+        (base + DOWN, ""),
     ]
 
 
-def test_failed_start_is_a_trial_error(fake_bin, tmp_path):
+def test_start_removes_a_leftover_project_of_that_name_first(fake_bin, tmp_path):
+    # Compose identifies a project by its name: without the removal, `up` would adopt the
+    # containers an earlier attempt left behind, with whatever it wrote into them.
     project = TrialProject.create(tmp_path, "rbench-t1", AGENT, PROXY)
-    fake_bin.scenario("docker", stderr="container rbench-t1-proxy-1 is unhealthy\n", exit=1)
 
-    with pytest.raises(TrialError, match="starting trial project rbench-t1.*unhealthy"):
+    project.up()
+
+    assert [c["argv"][5:] for c in fake_bin.calls()] == [DOWN, ["up", "--detach", "--wait"]]
+
+
+UNHEALTHY = {
+    "match": "up --detach",
+    "stderr": "container rbench-t1-proxy-1 is unhealthy\n",
+    "exit": 1,
+}
+
+
+def test_failed_start_removes_what_it_created(fake_bin, tmp_path):
+    project = TrialProject.create(tmp_path, "rbench-t1", AGENT, PROXY)
+    fake_bin.scenario("docker", replies=[UNHEALTHY])
+
+    with pytest.raises(TrialError, match="trial project rbench-t1: cannot start.*unhealthy") as e:
         project.up()
+
+    assert "removed" in str(e.value)
+    assert [c["argv"][5:] for c in fake_bin.calls()] == [DOWN, ["up", "--detach", "--wait"], DOWN]
+
+
+def test_failed_cleanup_after_a_failed_start_is_reported_too(fake_bin, tmp_path, monkeypatch):
+    project = TrialProject.create(tmp_path, "rbench-t1", AGENT, PROXY)
+    fake_bin.scenario("docker", replies=[UNHEALTHY])
+    downs = []
+
+    def down(self):
+        downs.append(self.name)
+        if len(downs) == 2:
+            raise TrialError("removing trial project rbench-t1: docker compose exited 1: busy")
+
+    monkeypatch.setattr(TrialProject, "down", down)
+
+    with pytest.raises(TrialError, match="unhealthy.*may remain.*busy"):
+        project.up()
+    assert downs == ["rbench-t1", "rbench-t1"]
+
+
+def test_leftover_that_cannot_be_removed_stops_the_start(fake_bin, tmp_path):
+    project = TrialProject.create(tmp_path, "rbench-t1", AGENT, PROXY)
+    fake_bin.scenario("docker", replies=[{"match": "down", "stderr": "busy\n", "exit": 1}])
+
+    with pytest.raises(TrialError, match="removing trial project rbench-t1.*busy"):
+        project.up()
+    assert [c["argv"][5] for c in fake_bin.calls()] == ["down"]
+
+
+def test_agent_command_without_docker_names_the_trial(tmp_path, monkeypatch):
+    project = TrialProject.create(tmp_path, "rbench-t1", AGENT, PROXY)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+
+    with pytest.raises(TrialError, match="trial project rbench-t1: cannot run docker"):
+        project.exec_agent(["true"])
 
 
 @pytest.mark.parametrize("name", ["", "Rbench", "-x", "a b", "a/b"])
@@ -204,6 +276,7 @@ def test_squid_allows_only_listed_names_on_443():
     access = [line for line in rules if line.startswith("http_access")]
     assert access == ["http_access allow CONNECT SSL_ports allowed", "http_access deny all"]
     assert "acl SSL_ports port 443" in rules
+    assert "cache deny all" in rules and not any(r.startswith("cache allow") for r in rules)
     assert any(re.fullmatch(r"access_log stdio:\S+ rbench !self", line) for line in rules)
 
 

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rbench.atomic import atomic_write
-from rbench.trial.images import docker, image_id
+from rbench.trial.images import TrialError, docker, image_id
 
 COMPOSE_FILE = "compose.json"
 PROXY_URL = "http://proxy:3128"
@@ -83,23 +83,40 @@ class TrialProject:
         return docker("compose", "--project-name", self.name, "--file", file, *argv, what=what)
 
     def up(self) -> None:
-        """Start the proxy and the agent; return once the proxy is healthy."""
-        self._compose("up", "--detach", "--wait", what=f"starting trial project {self.name}")
+        """Start a fresh proxy and agent; return once the proxy is healthy.
+
+        Compose identifies a project by its name and would adopt containers left under it, so
+        whatever an earlier attempt left is removed first. A failed start removes what it created.
+        """
+        self.down()
+        try:
+            self._compose(
+                "up", "--detach", "--wait", what=f"trial project {self.name}: cannot start"
+            )
+        except TrialError as e:
+            try:
+                self.down()
+            except TrialError as cleanup:
+                raise TrialError(f"{e}; its containers or networks may remain: {cleanup}") from e
+            raise TrialError(f"{e}; removed what it created") from e
 
     def exec_agent(
         self, argv: list[str], stdin: str | None = None
     ) -> subprocess.CompletedProcess[str]:
         """Run `argv` in the agent container; its exit status is the caller's to judge."""
         file = str(self.directory / COMPOSE_FILE)
-        return subprocess.run(
-            ["docker", "compose", "--project-name", self.name, "--file", file]
-            + ["exec", "-T", "agent", *argv],
-            check=False,
-            capture_output=True,
-            text=True,
-            input=stdin,
-            stdin=None if stdin is not None else subprocess.DEVNULL,
-        )
+        try:
+            return subprocess.run(
+                ["docker", "compose", "--project-name", self.name, "--file", file]
+                + ["exec", "-T", "agent", *argv],
+                check=False,
+                capture_output=True,
+                text=True,
+                input=stdin,
+                stdin=None if stdin is not None else subprocess.DEVNULL,
+            )
+        except OSError as e:
+            raise TrialError(f"trial project {self.name}: cannot run docker: {e}") from e
 
     def copy_proxy_log(self, dest: Path) -> None:
         """Copy the proxy's access log, every allowed and refused request, to `dest`."""
