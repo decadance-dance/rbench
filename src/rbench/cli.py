@@ -135,17 +135,18 @@ def _run(args: argparse.Namespace) -> int:
 def _resume(run_dir: Path) -> int:
     try:
         with run_lock(run_dir) as previous:
-            plan = load_plan(run_dir)
             if previous:
                 print(f"warning: recovered stale run lock from {previous}", file=sys.stderr)
+            plan = load_plan(run_dir)
             if warning := matrix_warning(plan):
                 print(warning, file=sys.stderr)
             queue = recover_trials(run_dir, plan)
     except (OSError, ValueError) as e:
         print(f"rbench resume: {e}", file=sys.stderr)
         return ExitCode.ERROR
-    print(f"{run_dir}: {len(queue)} trials ready to rerun once the trial executor is implemented")
-    return ExitCode.OK
+    print(f"{run_dir}: {len(queue)} trials ready to rerun")
+    print("rbench resume: the trial executor is not implemented yet", file=sys.stderr)
+    return ExitCode.ERROR
 
 
 def main(argv: list[str] | None = None) -> int:
