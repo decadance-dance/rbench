@@ -258,6 +258,31 @@ server or build step, and opens from disk as the spec requires.
     executor (#55) gives each trial a name unique to the run and the trial on the Docker daemon,
     stable across its retries, and reuses a name only while it holds the run's lock. A trial id
     alone is unique only within its plan, so two runs could otherwise stop each other's trials.
+    The name is `rbench-` and the first 16 hex digits of the SHA-256 of the run's identity and the
+    trial id, so no task id reaches the daemon. The identity is 32 random hex digits in the run
+    directory's `identity` file (D8), written when the run is created, or under the lock before
+    the first trial of a run created without one: neither another client using the same path nor
+    a move of the run directory changes the names. `rbench run` takes the lock before the new run
+    directory is renamed into place; `run` and `resume` then list the daemon's compose projects
+    and remove every one named for a trial of the run before any trial starts.
+  - The engine runs under coreutils `timeout` inside the agent: on the limit, the engine's process
+    group gets TERM and, 30 seconds later, KILL, so the shims still log each CLI's exit before
+    the audit reads the log. A shell wrapper runs `timeout -v` with `timeout`'s own stderr in a
+    file and the engine's on the real stderr, and ends stderr with its own line: the outcome and
+    the status. The outcome is `timeout` when `timeout` reported sending a signal (the trial is
+    `failed` with reason `timeout`), `start` when the engine is not an executable on `PATH` or
+    `timeout` reported failing to run it (an infrastructure error), and `exit` otherwise, the
+    engine's own status, 124 included. With no such line, the launch never completed in the
+    agent: an infrastructure error too. The host waits for `docker compose exec` at most the
+    limit plus 90 seconds, and for `docker compose down` at most 120 seconds, then treats the
+    call as an infrastructure error.
+  - A Codex trial holds an exclusive `flock` on its login home directory from before its project
+    starts until it is removed, so trials of any runner on the host that share the login run one
+    after the other. An agent that mounts a login carries the label `rbench.codex-login`, a hash
+    of the login's path. Under the lock, before it starts, a trial lists running agents with
+    that label: another project's agent means a runner died or failed to remove its project
+    while that agent may still hold the login, so the run stops and names that project, which
+    its own run removes.
 
 **Alternatives considered:**
 - *Anthropic's devcontainer firewall (iptables).* It allows GitHub and port 22, and resolves domains
@@ -672,6 +697,7 @@ not always visible.
 **Choice.** `runs/<run-id>/` holds:
 - `plan.json`;
 - `ledger.lock`;
+- `identity`, random hex that names the run's compose projects (D3);
 - one directory per trial with `status.json`, `findings.json`, `usage.json` and `raw/`;
 - `judge/`.
 

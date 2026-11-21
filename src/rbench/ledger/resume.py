@@ -43,12 +43,18 @@ def _read_holder(path: Path, local_host: str) -> str | None:
 
 
 @contextmanager
-def run_lock(run_dir: Path) -> Iterator[str | None]:
-    """Hold exclusive access and yield any stale holder left by a crash on this host."""
-    lock_path = run_dir / LOCK_FILE
-    gate = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY)
+def run_lock(run_dir: Path, *, staged: Path | None = None) -> Iterator[str | None]:
+    """Hold exclusive access and yield any stale holder left by a crash on this host.
+
+    With `staged`, the run is still being created there: the lock is taken on the staged directory
+    and holds through the caller's rename of it to `run_dir`, so no other runner can take a new
+    run before its first trial. Release then empties the lock file wherever the run is.
+    """
+    where = staged if staged is not None else run_dir
+    lock_path = where / LOCK_FILE
+    gate = os.open(where, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        with (run_dir / PLAN_FILE).open("rb") as plan_file:
+        with (where / PLAN_FILE).open("rb") as plan_file:
             # Serialize holder publication and release. The frozen plan's inode stays fixed
             # while ledger.lock is atomically replaced, and its flock dies with the process.
             fcntl.flock(gate, fcntl.LOCK_EX)
@@ -74,7 +80,9 @@ def run_lock(run_dir: Path) -> Iterator[str | None]:
                 yield previous
             finally:
                 fcntl.flock(gate, fcntl.LOCK_EX)
-                atomic_write(lock_path, b"")
+                # The gate and the plan file follow the directory through a rename; a path does not.
+                home = staged if staged is not None and staged.exists() else run_dir
+                atomic_write(home / LOCK_FILE, b"")
     finally:
         os.close(gate)
 

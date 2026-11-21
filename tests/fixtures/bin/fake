@@ -21,6 +21,8 @@ Environment:
                           crash   true: print what is given, then die by SIGKILL
                           binary  true: write stdout and stderr as bytes, each character
                                   one byte (Latin-1), so "\u00ff" gives the byte 0xff
+                          copy    object mapping an argument to text written to the call's
+                                  last argument, as `docker cp <src> <dest>` would
                           replies a list of scenarios, each with a `match` string; the first
                                   whose `match` is a substring of the space-joined argv answers
                                   instead of the keys above
@@ -52,6 +54,10 @@ time.sleep(scenario.get("delay", 0))
 by_arg = scenario.get("stdout_for", {})
 out = next((by_arg[a] for a in sys.argv[1:] if a in by_arg), scenario.get("stdout", ""))
 err = scenario.get("stderr", "")
+for source, text in scenario.get("copy", {}).items():
+    if source in sys.argv[1:-1]:
+        with open(sys.argv[-1], "w", encoding="utf-8") as f:
+            f.write(text)
 for option, text in scenario.get("write_after", {}).items():
     if option in sys.argv[1:-1]:
         with open(sys.argv[sys.argv.index(option) + 1], "w", encoding="utf-8") as f:

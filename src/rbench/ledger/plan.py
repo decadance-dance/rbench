@@ -4,6 +4,7 @@
 
     plan.json            the frozen plan, written once when the run is created
     ledger.lock          the run's lock file; taking it is resume's job
+    identity             random hex naming the run's compose projects (`run_identity`)
     trials/<trial-id>/   one per trial, pending or reused as done (see `rbench.ledger.trials`)
 
 The plan is one round of a matrix: its configurations, the version of every task set and the
@@ -28,11 +29,13 @@ import itertools
 import json
 import os
 import re
+import secrets
 import shutil
 import tempfile
 import time
 import tomllib
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -77,6 +80,8 @@ from rbench.tasks.manifest import (
 PLAN_FORMAT = 1
 PLAN_FILE = "plan.json"
 LOCK_FILE = "ledger.lock"
+IDENTITY_FILE = "identity"
+_IDENTITY = re.compile(r"[0-9a-f]{32}")
 TRIALS_DIR = "trials"
 PUBLIC_SETS = ("reviewbench", "ours")
 PIN_KINDS = ("git", "version", "sha256", "cli")
@@ -633,12 +638,20 @@ def _reuse_trials(staging: Path, plan: Plan, source_dir: Path) -> None:
             raise
 
 
-def create_run(runs_dir: Path, run_id: str, plan: Plan, *, reuse: Path | None = None) -> Path:
+def create_run(
+    runs_dir: Path,
+    run_id: str,
+    plan: Plan,
+    *,
+    reuse: Path | None = None,
+    lock: ExitStack | None = None,
+) -> Path:
     """Create `runs_dir/run_id` with the plan, the lock file and all trial checkpoints.
 
     The directory is built under a temporary name and renamed into place, so a run directory
     either holds the whole plan and every trial, or does not exist. An existing run is refused.
     Plans with hidden tasks require Git to ignore both the staging and final directories.
+    With `lock`, the run lock is taken before the rename and stays held until `lock` closes.
     """
     runs_dir = Path(runs_dir)
     hidden = "hidden" in plan.task_sets
@@ -662,6 +675,7 @@ def create_run(runs_dir: Path, run_id: str, plan: Plan, *, reuse: Path | None = 
             _check_hidden_run_dir(tmp)
         atomic_write(tmp / PLAN_FILE, dump_json(dataclasses.asdict(plan)))
         atomic_write(tmp / LOCK_FILE, b"")
+        atomic_write(tmp / IDENTITY_FILE, secrets.token_hex(16) + "\n")
         (tmp / TRIALS_DIR).mkdir(mode=0o700)
         for trial in plan.trials:
             trial_dir = tmp / TRIALS_DIR / trial.id
@@ -670,8 +684,15 @@ def create_run(runs_dir: Path, run_id: str, plan: Plan, *, reuse: Path | None = 
             set_state(trial_dir, "pending")
         if reuse is not None:
             _reuse_trials(tmp, plan, reuse)
-        # Fails if another runner created the same run meanwhile: the target is not empty.
-        os.rename(tmp, run_dir)
+        with ExitStack() as held:
+            if lock is not None:
+                from rbench.ledger.resume import run_lock  # resume imports this module
+
+                held.enter_context(run_lock(run_dir, staged=tmp))
+            # Fails if another runner created the same run meanwhile: the target is not empty.
+            os.rename(tmp, run_dir)
+            if lock is not None:
+                lock.enter_context(held.pop_all())
     except BaseException as e:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -679,6 +700,23 @@ def create_run(runs_dir: Path, run_id: str, plan: Plan, *, reuse: Path | None = 
             raise LedgerError(f"cannot create the run with hidden tasks: {e.strerror}") from None
         raise
     return run_dir
+
+
+def run_identity(run_dir: Path) -> str:
+    """The run's identity, random and kept in the run directory, so neither another client using
+    the same path nor a move of the run changes what it names (design D3). A run created before
+    the file existed gets one now; call it holding the run lock, before the first trial starts."""
+    path = Path(run_dir) / IDENTITY_FILE
+    try:
+        identity = path.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        identity = secrets.token_hex(16)
+        atomic_write(path, identity + "\n")
+    except (OSError, UnicodeDecodeError) as e:
+        raise LedgerError(f"{path}: cannot read the run identity ({type(e).__name__})") from None
+    if not _IDENTITY.fullmatch(identity):
+        raise LedgerError(f"{path}: not a run identity; expected 32 hex digits")
+    return identity
 
 
 def load_plan(run_dir: Path) -> Plan:
@@ -772,6 +810,7 @@ def start_run(
     run_id: str | None = None,
     root: Path | None = None,
     reuse: Path | None = None,
+    lock: ExitStack | None = None,
 ) -> Path:
     """Load the inputs from disk, freeze the plan of one round and create its run directory.
 
@@ -811,4 +850,4 @@ def start_run(
     )
     if run_id is None:
         run_id = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{matrix.stage}-{round_name}"
-    return create_run(runs_dir, run_id, plan, reuse=reuse)
+    return create_run(runs_dir, run_id, plan, reuse=reuse, lock=lock)

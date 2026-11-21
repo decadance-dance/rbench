@@ -13,6 +13,7 @@ caller owns the name: unique to the run and the trial on the Docker daemon, stab
 trial's retries, and reused only while the caller holds the run's lock (design D3).
 """
 
+import hashlib
 import json
 import re
 import subprocess
@@ -28,8 +29,18 @@ PROXY_URL = "http://proxy:3128"
 PROXY_LOG = "/var/log/squid/access.log"
 # Where the Codex login home is mounted; the trial's CODEX_HOME/auth.json links into it (D5).
 CODEX_LOGIN = "/rbench/codex-login"
+COMPOSE_LABEL = "com.docker.compose.project"
+# On an agent that mounts a Codex login: `login_key` of it, so any runner finds who holds the login.
+LOGIN_LABEL = "rbench.codex-login"
+# How long the host waits for `docker compose down`; past it, the call is refused and retried.
+DOWN_TIMEOUT = 120.0
 # Docker Compose's rule for project names.
 _PROJECT_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
+
+def login_key(login: Path) -> str:
+    """The label value of an agent that mounts the resolved Codex login home `login`."""
+    return hashlib.sha256(str(login).encode()).hexdigest()[:16]
 
 
 def compose_spec(
@@ -93,6 +104,7 @@ def compose_spec(
             "bind": {"create_host_path": False},
         }
         spec["services"]["agent"]["volumes"] = [mount]
+        spec["services"]["agent"]["labels"] = {LOGIN_LABEL: login_key(codex_login)}
     return spec
 
 
@@ -136,11 +148,17 @@ class TrialProject:
         """`text` without the trial's Claude token."""
         return redact(text, [self.claude_token] if self.claude_token else [])
 
-    def _compose(self, *argv: str, what: str, env: dict[str, str] | None = None) -> str:
+    def _compose(
+        self,
+        *argv: str,
+        what: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
         file = str(self.directory / COMPOSE_FILE)
         cmd = ("compose", "--project-name", self.name, "--file", file, *argv)
         secrets = [self.claude_token] if self.claude_token else []
-        return docker(*cmd, what=what, env=env, secrets=secrets)
+        return docker(*cmd, what=what, env=env, secrets=secrets, timeout=timeout)
 
     def up(self) -> None:
         """Start a fresh proxy and agent; return once the proxy is healthy.
@@ -170,11 +188,13 @@ class TrialProject:
             raise TrialError(f"{e}; removed what it created") from e
 
     def exec_agent(
-        self, argv: list[str], stdin: str | None = None
+        self, argv: list[str], stdin: str | None = None, timeout: float | None = None
     ) -> subprocess.CompletedProcess[str]:
         """Run `argv` in the agent container; its exit status is the caller's to judge.
 
-        Its output has the trial's Claude token redacted.
+        Its output has the trial's Claude token redacted. With `timeout`, a docker call still
+        running after that many seconds is killed and refused, so a stuck exec cannot hold the
+        trial's slot.
         """
         file = str(self.directory / COMPOSE_FILE)
         try:
@@ -188,7 +208,12 @@ class TrialProject:
                 input=stdin,
                 stdin=None if stdin is not None else subprocess.DEVNULL,
                 env=host_env(),
+                timeout=timeout,
             )
+        except subprocess.TimeoutExpired:
+            raise TrialError(
+                f"trial project {self.name}: docker exec did not return within {timeout:g}s"
+            ) from None
         except OSError as e:
             raise TrialError(
                 f"trial project {self.name}: cannot run docker: {e.strerror}"
@@ -214,4 +239,5 @@ class TrialProject:
     def down(self) -> None:
         """Remove the project's containers and networks; the images stay for the next trial."""
         what = f"removing trial project {self.name}"
-        self._compose("down", "--volumes", "--remove-orphans", "--timeout", "5", what=what)
+        args = ("down", "--volumes", "--remove-orphans", "--timeout", "5")
+        self._compose(*args, what=what, timeout=DOWN_TIMEOUT)

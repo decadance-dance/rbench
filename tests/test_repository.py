@@ -337,7 +337,8 @@ def test_failing_check_in_the_agent_is_an_infrastructure_error(
     fake_bin.scenario("docker", stderr="fatal: not a git repository\n", exit=128)
     project = TrialProject.create(tmp_path / "trial", "rbench-t1", AGENT, PROXY)
 
-    with pytest.raises(RepositoryError, match=r"^task t-1, in the trial: .* exited 128: fatal"):
+    # The agent's stderr is never quoted: after the engine, it is the engine's.
+    with pytest.raises(RepositoryError, match=r"^task t-1, in the trial: .* exited 128$"):
         prepare_repository(project, task, archive, tmp_path / "trial")
 
 

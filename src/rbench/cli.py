@@ -5,14 +5,19 @@ The command list and exit codes are provisional until each command's issue fixes
 
 import argparse
 import sys
+from contextlib import ExitStack
 from enum import IntEnum
 from importlib.metadata import version
 from pathlib import Path
 
-from rbench.ledger import TRIALS_DIR, load_plan, matrix_warning, read_status, start_run
+from rbench.ledger import TRIALS_DIR, Plan, load_plan, matrix_warning, read_status, start_run
 from rbench.ledger.resume import recover_trials, run_lock
 from rbench.plan import command as plan_command
+from rbench.run import executor
 from rbench.tasks import ours, release, reviewbench
+from rbench.tasks.archive import ArchiveError
+from rbench.tasks.release import default_archive_dir
+from rbench.trial.images import TrialError
 
 
 class ExitCode(IntEnum):
@@ -133,46 +138,98 @@ def build_parser() -> argparse.ArgumentParser:
             )
         if name == "resume":
             sub.add_argument("run", type=Path, help="the run directory to resume")
+            sub.add_argument(
+                "--engines",
+                type=Path,
+                default=Path("engines"),
+                help="engine declarations (default: engines)",
+            )
+            sub.add_argument(
+                "--tasks", type=Path, default=Path("tasks"), help="task sets (default: tasks)"
+            )
+        if name in ("run", "resume"):
+            sub.add_argument(
+                "--archives",
+                type=Path,
+                default=None,
+                help="task source archives (default: the `rbench tasks fetch` cache)",
+            )
+            sub.add_argument(
+                "--claude-concurrency",
+                type=int,
+                default=executor.CLAUDE_CONCURRENCY,
+                metavar="N",
+                help=f"Claude trials at once (default: {executor.CLAUDE_CONCURRENCY}); Codex"
+                f" runs one at a time on the login {executor.CODEX_LOGIN_ENV} names",
+            )
     return parser
 
 
-def _run(args: argparse.Namespace) -> int:
+def _execute(command: str, run_dir: Path, plan: Plan, args: argparse.Namespace) -> int:
+    """Run the trials left in `run_dir`; the caller holds the run lock."""
+    hidden = "hidden" in plan.task_sets
+    resume = "rbench resume <its run directory>" if hidden else f"rbench resume {run_dir}"
     try:
-        run_dir = start_run(
-            args.matrix,
-            args.round,
-            images_path=args.images,
+        queue = recover_trials(run_dir, plan)
+        print(f"{len(queue)} trials to run")
+        ctx = executor.prepare_run(
+            run_dir,
+            plan,
             engines_dir=args.engines,
             tasks_root=args.tasks,
-            runs_dir=args.runs,
-            run_id=args.run_id,
-            reuse=args.reuse,
+            archives=args.archives or default_archive_dir(),
         )
-    except (OSError, ValueError) as e:
-        print(f"rbench run: {e}", file=sys.stderr)
+        counts = executor.run_trials(ctx, queue, claude_concurrency=args.claude_concurrency)
+    except executor.RunStopped as e:
+        print(f"{command}: stopped: {e}", file=sys.stderr)
+        print(f"fix the cause, then resume: {resume}", file=sys.stderr)
         return ExitCode.ERROR
-    try:
-        plan = load_plan(run_dir)
-    except (OSError, ValueError):
-        print("rbench run: cannot read the newly created plan.json", file=sys.stderr)
+    except (OSError, ValueError, TrialError, ArchiveError) as e:
+        print(f"{command}: {e}", file=sys.stderr)
         return ExitCode.ERROR
-    pending = len(plan.trials)
-    if args.reuse is not None:
+    print(", ".join(f"{n} {state}" for state, n in sorted(counts.items())) or "nothing to run")
+    return ExitCode.OK
+
+
+def _run(args: argparse.Namespace) -> int:
+    with ExitStack() as lock:
         try:
-            pending = sum(
-                read_status(run_dir / TRIALS_DIR / trial.id).state == "pending"
-                for trial in plan.trials
+            run_dir = start_run(
+                args.matrix,
+                args.round,
+                images_path=args.images,
+                engines_dir=args.engines,
+                tasks_root=args.tasks,
+                runs_dir=args.runs,
+                run_id=args.run_id,
+                reuse=args.reuse,
+                lock=lock,
             )
-        except (OSError, ValueError):
-            print("rbench run: cannot read the newly created trial statuses", file=sys.stderr)
+        except (OSError, ValueError) as e:
+            print(f"rbench run: {e}", file=sys.stderr)
             return ExitCode.ERROR
-    label = "run with hidden tasks" if "hidden" in plan.task_sets else str(run_dir)
-    print(f"created {label}: {pending} trials pending")
-    print("rbench run: the trial executor is not implemented yet", file=sys.stderr)
-    return ExitCode.ERROR
+        try:
+            plan = load_plan(run_dir)
+        except (OSError, ValueError):
+            print("rbench run: cannot read the newly created plan.json", file=sys.stderr)
+            return ExitCode.ERROR
+        pending = len(plan.trials)
+        if args.reuse is not None:
+            try:
+                pending = sum(
+                    read_status(run_dir / TRIALS_DIR / trial.id).state == "pending"
+                    for trial in plan.trials
+                )
+            except (OSError, ValueError):
+                print("rbench run: cannot read the newly created trial statuses", file=sys.stderr)
+                return ExitCode.ERROR
+        label = "run with hidden tasks" if "hidden" in plan.task_sets else str(run_dir)
+        print(f"created {label}: {pending} trials pending")
+        return _execute("rbench run", run_dir, plan, args)
 
 
-def _resume(run_dir: Path) -> int:
+def _resume(args: argparse.Namespace) -> int:
+    run_dir = args.run
     try:
         with run_lock(run_dir) as previous:
             if previous:
@@ -180,13 +237,10 @@ def _resume(run_dir: Path) -> int:
             plan = load_plan(run_dir)
             if warning := matrix_warning(plan):
                 print(warning, file=sys.stderr)
-            queue = recover_trials(run_dir, plan)
+            return _execute("rbench resume", run_dir, plan, args)
     except (OSError, ValueError) as e:
         print(f"rbench resume: {e}", file=sys.stderr)
         return ExitCode.ERROR
-    print(f"{run_dir}: {len(queue)} trials ready to rerun")
-    print("rbench resume: the trial executor is not implemented yet", file=sys.stderr)
-    return ExitCode.ERROR
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -197,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         return _run(args)
     if args.command == "resume":
-        return _resume(args.run)
+        return _resume(args)
     if args.command == "tasks" and args.task_command in TASK_RUN:
         return TASK_RUN[args.task_command](args)
     name = " ".join(filter(None, [args.command, getattr(args, "task_command", None)]))

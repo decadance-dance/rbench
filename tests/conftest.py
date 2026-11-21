@@ -78,3 +78,30 @@ def fake_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeBin:
     monkeypatch.delenv("RBENCH_FAKE_SCENARIO", raising=False)
     monkeypatch.delenv("RBENCH_FAKE_ENV", raising=False)
     return FakeBin(log, monkeypatch)
+
+
+@dataclass
+class StubExecutor:
+    """`rbench run` and `rbench resume` with the trial executor replaced: `queues` gets each
+    queue the CLI would run, and nothing starts."""
+
+    queues: list[list[str]] = field(default_factory=list)
+
+
+@pytest.fixture(autouse=True)
+def stub_executor(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> StubExecutor:
+    """Every test but one marked `real_executor` runs the CLI without the trial executor, so no
+    test reaches the operator's Keychain or Docker through `rbench run`."""
+    from rbench.run import executor
+
+    stub = StubExecutor()
+    if request.node.get_closest_marker("real_executor"):
+        return stub
+
+    def run_trials(ctx, queue, **options):
+        stub.queues.append([t.id for t in queue])
+        return {}
+
+    monkeypatch.setattr(executor, "prepare_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "run_trials", run_trials)
+    return stub
