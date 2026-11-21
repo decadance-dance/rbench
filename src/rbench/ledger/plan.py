@@ -39,6 +39,8 @@ from pathlib import Path, PurePosixPath
 from rbench.atomic import atomic_write
 from rbench.engines.declaration import CLIS, Engine, Setting, load_engine, parse_engine
 from rbench.engines.pins import MODELS, FloatingRefError, check_ref
+from rbench.engines.plain import NAME as PLAIN
+from rbench.engines.plain import expected_inputs
 from rbench.ledger.trials import (
     RAW_DIR,
     RUN_ID,
@@ -423,8 +425,11 @@ def parse_plan(data: object, where: str) -> Plan:
         at = f"{where}: configurations[{i}]"
         c = _fields(raw, at, {"id", "providers", "settings"})
         keys = {"engine", "version", "roles"}
-        s = _object(c["settings"], f"{at}.settings")
-        s = _fields(s, f"{at}.settings", keys | ({"normalization"} & s.keys()))
+        if isinstance(c["settings"], dict) and "inputs" in c["settings"]:
+            keys.add("inputs")  # only an engine with input files, such as `plain`, has it
+        if isinstance(c["settings"], dict) and "normalization" in c["settings"]:
+            keys.add("normalization")  # only a Markdown engine has it
+        s = _fields(c["settings"], f"{at}.settings", keys)
         engine = engines.get(s["engine"]) if isinstance(s["engine"], str) else None
         if engine is None:
             raise LedgerError(f"{at}.settings.engine: not an engine of the plan")
@@ -448,8 +453,26 @@ def parse_plan(data: object, where: str) -> Plan:
                 except ValueError as error:
                     raise LedgerError(str(error)) from None
             roles.append((role, RoleSetting(tuple(models), effort)))
-        markdown = declared[s["engine"]].output == "markdown"
-        config = Configuration(s["engine"], s["version"], tuple(roles), markdown)
+        inputs = _object(s.get("inputs", {}), f"{at}.settings.inputs")
+        if s["engine"] == PLAIN and any(len(r.models) != 1 for _, r in roles):
+            raise LedgerError(f"{at}.settings.roles: plain runs one model per configuration")
+        if "inputs" in s:
+            # A plan frozen before the inputs joined the settings has none; its plain trials are
+            # refused at launch. Present, they are exactly the ones plain's provider reads.
+            clis = {MODELS[m] for _, r in roles for m in r.models}
+            if s["engine"] != PLAIN or inputs.keys() != expected_inputs(clis):
+                raise LedgerError(
+                    f"{at}.settings.inputs: not the input files of this configuration"
+                )
+        for name, digest in sorted(inputs.items()):
+            _string(digest, f"{at}.settings.inputs.{name}", _HEX64)
+        config = Configuration(
+            s["engine"],
+            s["version"],
+            tuple(roles),
+            tuple(sorted(inputs.items())),
+            markdown=declared[s["engine"]].output == "markdown",
+        )
         if config.settings.get("normalization") != s.get("normalization"):
             raise LedgerError(
                 f"{at}.settings.normalization: the plan's normalization pin is not this rbench's"

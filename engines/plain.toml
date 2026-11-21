@@ -1,0 +1,16 @@
+# The benchmark's own baseline (spec engine-configurations, Plain baseline; design D12). Its files
+# are in plain/: the prompt and findings schema both CLIs get, and the Codex model catalog of the
+# pinned Codex version (python -m rbench.engines.catalog).
+name = "plain"
+# The SHA-256 of plain/prompt.md: editing the prompt needs a new pin, and every plain
+# configuration gets a new id.
+pin = { kind = "sha256", ref = "1e494793aeb00b0179f7552c0a23b475054adacdfbbaef1726d98797a13232c7" }
+
+[cli]
+claude = "2.1.316"
+codex = "0.171.0"
+
+# One reviewer; the model's provider picks the CLI, and the shims add its model and effort.
+[roles.reviewer]
+delivery = "flag"
+default = { model = "claude-sonnet-5-5", effort = "high" }
