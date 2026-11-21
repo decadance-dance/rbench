@@ -96,9 +96,10 @@ def test_committed_state_in_the_checkout_changes_nothing_the_reader_sees(image, 
             write(f"{repo}/{path}", text)
         run([*git, "add", "-A"])
         run([*git, "commit", "-q", "-m", "reviewed"])
+        assert review_council.check_checkout(run, repo) == []
         for path, data in review_council.launch(ENGINES, settings()).files.items():
             write(path.replace(REPO_DIR, repo, 1), data)
-        review_council.prepare_checkout(run, repo)
+        assert review_council.prepare_checkout(run, repo) == []
         assert run([*git, "status", "--porcelain", "--untracked-files=all"]) == ""
         assert run(["cat", f"{repo}/.review-council/learnings.md"]) == ""
         script = f"{review_council.PLUGIN_DIR}/scripts/rc-config.sh"
