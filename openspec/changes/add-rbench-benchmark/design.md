@@ -822,9 +822,14 @@ not judge them. It runs hermetic, like the judge: the same container setup and s
   whole trial directory, the step's findings included. A contaminated result is excluded from
   scores like any other. A normalization error, a step past its limit or a Docker failure in the
   step makes the trial `failed` with reason `normalization failed: ...`, naming no report text.
-  That state is recorded before the step's evidence is copied and its project removed, so a later
-  failure there keeps it, and it is never retried: a retry would rerun the engine. A token count of
+  That state is recorded once the step's evidence is copied as far as it can be (a failure there
+  is not an error of its own) and before its project is removed, so a failed teardown keeps it;
+  it is never retried, since a retry would rerun the engine. A token count of
   the step at or above 2**53 is a normalization error, naming the `modelUsage` entry by position.
+  The step's own sessions, as its shim log binds them, go through D8's limit detection like the
+  engine's: a usage or terminal rate limit there sets the run's latch and makes the trial
+  `interrupted`, with the engine's and the step's tokens (the step's counted from its transcripts)
+  in `wasted.json`, and the run stops with exit 75; a rate limit the CLI retried past does not.
 
 **Alternative considered:** ask each engine for JSON. That changes the engines being measured.
 

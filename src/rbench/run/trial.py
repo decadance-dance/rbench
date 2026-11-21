@@ -24,9 +24,11 @@ The final state:
 - `failed` with reason `timeout` when the engine ran past its limit;
 - `misconfigured` when the shim log shows the launch did not run as built;
 - `failed` with the adapter's reason for an engine error, invalid output or a PR not eligible,
-  or because the normalization step failed or ran past its limit (recorded before its evidence
-  is copied and its project removed, and never retried: that would rerun the engine);
+  or because the normalization step failed or ran past its limit (never retried: that would
+  rerun the engine);
 - `contaminated` when the audit after the normalization step says so;
+- `interrupted` when the normalization step's own CLI reported a limit, with the engine's and the
+  step's usage as wasted tokens, as for the engine;
 - `done` with the findings and the usage otherwise.
 
 An infrastructure error (`TrialError`, an archive that fails its check, a launch that did not
@@ -301,7 +303,9 @@ def _attempt(ctx: RunContext, trial: PlannedTrial) -> str:
                     report.encode("utf-8")
                 except UnicodeEncodeError:  # a lone surrogate a JSON escape gave
                     raise EngineFailure("invalid output: the report is not valid UTF-8") from None
-                step = _Step(ctx, trial, engine, trial_dir, audit, repository)
+                step = _Step(
+                    ctx, trial, engine, trial_dir, audit, repository, records, codex_stdout
+                )
                 normalization = step.run(report, agent_runner(project, "the trial's agent"))
                 if isinstance(normalization, str):
                     return normalization  # its final state is recorded
@@ -361,12 +365,15 @@ class _Step:
     trial_dir: Path
     engine_audit: Audit
     repository: RepositoryState
+    records: list[dict]  # the engine's shim log, for the wasted tokens
+    codex_stdout: dict[int, Path]
 
     def run(self, report: str, run: Runner) -> Normalization | str:
         """Copy the findings of the engine's Markdown `report` in a fresh normalizer project,
         then audit the trial again with the step's evidence (`run`: the engine's agent, for the
         repository's object count). Returns the normalization, or the final state it recorded:
-        `failed` when the step failed or ran past its limit, `contaminated` by the audit."""
+        `failed` when the step failed or ran past its limit, `contaminated` by the audit,
+        `interrupted` when the step's CLI reported a limit."""
         if not report.strip():
             return Normalization([], [], {})  # no model runs (design D9)
         ctx, trial, engine = self.ctx, self.trial, self.engine
@@ -384,14 +391,17 @@ class _Step:
                 who = label(ctx.plan, trial).removeprefix("trial ")
                 normalization = normalize(project, report, who, timeout=NORMALIZE_TIMEOUT)
             except (NormalizationError, TrialError) as e:
-                # Final before anything else can fail: a retry would rerun the engine.
-                set_state(self.trial_dir, "failed", f"normalization failed: {e}")
                 try:
-                    self._evidence(project, out)
-                except TrialError:
-                    pass  # the step failed; its evidence is kept as far as it was copied
+                    step_records = self._evidence(project, out)
+                except (TrialError, OSError):
+                    # The step failed; its evidence is kept as far as it was copied.
+                    step_records = _shim_records(out / LOG_FILE)
+                if self._interrupted(step_records, out):
+                    return "interrupted"
+                # Never retried: a retry would rerun the engine.
+                set_state(self.trial_dir, "failed", f"normalization failed: {e}")
                 return "failed"
-            self._evidence(project, out)
+            step_records = self._evidence(project, out)
             normalization.write_record(self.trial_dir / RAW_DIR)
             atomic_write(out / FINDINGS_FILE, dump_json(normalization.findings))
             audit = audit_trial(
@@ -412,13 +422,32 @@ class _Step:
                     first.refused_omitted + audit.refused_omitted,
                 ),
             )
-            return "contaminated" if audit.contaminated else normalization
+            if audit.contaminated:
+                return "contaminated"
+            if self._interrupted(step_records, out):
+                return "interrupted"
+            return normalization
         finally:
             _down(project)
 
-    def _evidence(self, project: TrialProject, out: Path) -> None:
-        _collect(project, Image(self.engine.image, self.engine.clis), out)
+    def _evidence(self, project: TrialProject, out: Path) -> list[dict]:
+        """Copy the step's evidence into `out`; its shim log's records."""
+        records = _collect(project, Image(self.engine.image, self.engine.clis), out)
         project.copy_proxy_log(out / PROXY_LOG_FILE)
+        return records
+
+    def _interrupted(self, step_records: list[dict], out: Path) -> bool:
+        """Record the trial `interrupted` when the step's own sessions, as its shim log binds
+        them, report a limit (`detect_limits`): the latch first, so nothing new starts, then
+        the engine's and the step's usage as wasted tokens."""
+        if not (limits := detect_limits(step_records, out / TRANSCRIPTS_DIR)):
+            return False
+        self.ctx.limit.set()
+        raw = self.trial_dir / RAW_DIR
+        add_wasted(self.trial_dir, _wasted(self.records, raw, self.codex_stdout, step_records))
+        reasons = "; ".join(f"normalization: {limit}" for limit in limits)
+        set_state(self.trial_dir, "interrupted", reasons)
+        return True
 
 
 def _archive(ctx: RunContext, task: Task) -> Path:
@@ -432,15 +461,33 @@ def _archive(ctx: RunContext, task: Task) -> Path:
     return ctx.hidden.inside(name)
 
 
-def _wasted(records: list[dict], raw: Path, codex_stdout: dict[int, Path]) -> dict:
-    """The usage of an attempt a limit interrupted; flagged unknown when it cannot be counted."""
+def _wasted(
+    records: list[dict],
+    raw: Path,
+    codex_stdout: dict[int, Path],
+    step: list[dict] | None = None,
+) -> dict:
+    """The usage of an attempt a limit interrupted: the engine's, and with `step` (the
+    normalization step's shim log) the step's, counted from its transcripts since it gave no
+    result; each flagged unknown when it cannot be counted."""
+    unknown = Usage({}, ["the transcripts' usage is malformed, so it is unknown"])
+
+    def count(records: list[dict], transcripts: Path, stdout: dict[int, Path]) -> Usage:
+        try:
+            return count_usage(records, transcripts, stdout)
+        except UsageError:  # its message quotes transcript paths, ids and models
+            return unknown
+
+    engine = count(records, raw / TRANSCRIPTS_DIR, codex_stdout)
+    normalizer = Usage({}, [])
+    if step is not None:
+        normalizer = count(step, raw / NORMALIZER_DIR / TRANSCRIPTS_DIR, {})
+    record = usage_record(engine, normalizer)
     try:
-        record = usage_record(count_usage(records, raw / TRANSCRIPTS_DIR, codex_stdout))
         _check_unicode([], record)
         return record
-    except (UsageError, EngineFailure):
-        # Their messages quote transcript paths, ids and models, all engine output.
-        return usage_record(Usage({}, ["the transcripts' usage is malformed, so it is unknown"]))
+    except EngineFailure:
+        return usage_record(unknown, normalizer if step is None else unknown)
 
 
 def _check_unicode(findings: list[dict], usage: dict) -> None:
@@ -496,8 +543,13 @@ def _collect(project: TrialProject, image: Image, raw: Path) -> list[dict]:
         collect(project, image, raw)
     except SessionError:
         pass  # the transcripts are already copied; the audit fails the unreadable log closed
+    return _shim_records(raw / LOG_FILE)
+
+
+def _shim_records(log: Path) -> list[dict]:
+    """The records of a copied shim log; none when it cannot be read."""
     try:
-        return read_shim_log(raw / LOG_FILE)
+        return read_shim_log(log)
     except (OSError, ValueError):
         return []
 

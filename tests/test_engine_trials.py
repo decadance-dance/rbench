@@ -28,6 +28,7 @@ from test_executor import (
     TRANSCRIPT,
     docker_calls,
     launched,
+    limit_line,
     shim_log,
 )
 from test_ledger import task_sets
@@ -39,7 +40,14 @@ from test_usage import GPT, codex_usage, message, meta, record, turn
 import rbench.ledger.plan as plan_module
 import rbench.run.trial as trial_module
 from rbench.engines import normalization, ponytail_review, review_council
-from rbench.ledger import TRIALS_DIR, load_plan, read_results, read_status, start_run
+from rbench.ledger import (
+    TRIALS_DIR,
+    load_plan,
+    read_results,
+    read_status,
+    read_wasted,
+    start_run,
+)
 from rbench.ledger.plan import run_identity
 from rbench.run import executor
 from rbench.run.adapters import ADAPTERS, EngineFailure, EngineTrial, Output
@@ -531,3 +539,74 @@ def test_a_normalizer_count_past_the_ledgers_bound_fails_without_quoting_its_mod
 
     reason = read_status(run_dir / TRIALS_DIR / trial.id).reason
     assert "modelUsage entry 1: bad " in reason and "side-model" not in reason
+
+
+def normalizer_session(*transcript: str) -> dict:
+    """The normalizer's evidence: its one Claude session, bound to `transcript`'s lines."""
+    log = shim_log(
+        {"kind": "launch", "launch": 1, "cli": "claude", "argv": normalization.argv()[1:]}
+        | {"final_argv": [*CLAUDE_FLAGS, *normalization.argv()[1:]]}
+        | {"added": list(CLAUDE_FLAGS), "rewrites": []},
+        {"kind": "child", "launch": 1, "pid": 101, "start": 1},
+        {"kind": "hook", "session_id": SESSION, "source": "startup"}
+        | {"claude_pid": 101, "claude_start": 1, "transcript_path": TRANSCRIPT},
+        {"kind": "exit", "launch": 1, "status": 1},
+    )
+    copy = {SHIM_LOG: log, f"agent:{TRANSCRIPT}": "".join(transcript)}
+    copy["proxy:/var/log/squid/access.log"] = ""
+    step = f"/{trial_module.NORMALIZER_DIR}/compose.json cp"
+    return {"match": step, "copy": copy}
+
+
+@pytest.mark.real_executor
+def test_a_limit_the_normalizer_reports_interrupts_the_trial_and_stops_the_run(run, fake_bin):
+    run_dir, plan, ctx = run
+    trial, settings = first_trial(plan, "code-review")
+    answers, _ = code_review_case(settings, ctx)
+    used = json.dumps(message(SESSION, "msg-n", SONNET, 7, 1)) + "\n"
+    hit = limit_line("claude/transcript-usage-limit-five-hour.stub.jsonl", sessionId=SESSION)
+    error = json.dumps({"type": "result", "subtype": "success", "is_error": True})
+    answers = with_normalizer(answers, stdout=error, exit=1)
+    fake_bin.scenario("docker", replies=[normalizer_session(used, hit), *answers])
+
+    # LimitReached: the run exits 75 with its resume command (test_executor).
+    with pytest.raises(executor.LimitReached, match="normalization: Claude reported its usage"):
+        executor.run_trials(ctx, [trial], log=lambda _: None)
+
+    assert ctx.limit.is_set()
+    trial_dir = run_dir / TRIALS_DIR / trial.id
+    status = read_status(trial_dir)
+    assert (status.state, status.reason) == (
+        "interrupted",
+        "normalization: Claude reported its usage limit",
+    )
+    (wasted,) = read_wasted(trial_dir)
+    assert wasted["engine"] == {
+        OPUS: {"input": 3, "output": 2, "cache_read": 0, "cache_creation": 0}
+    }
+    assert wasted["normalization"] == {
+        SONNET: {"input": 7, "output": 1, "cache_read": 0, "cache_creation": 0}
+    }
+    assert not (trial_dir / "findings.json").exists()
+    assert len(docker_calls(fake_bin, ENGINE)) == 1
+    identity = run_identity(run_dir)
+    downs = {c[c.index("--project-name") + 1] for c in docker_calls(fake_bin, " down ")}
+    assert downs == {project_name(identity, trial.id), normalizer_name(identity, trial.id)}
+
+
+@pytest.mark.real_executor
+def test_a_rate_limit_the_normalizer_retried_past_does_not_interrupt(run, fake_bin):
+    run_dir, plan, ctx = run
+    trial, settings = first_trial(plan, "code-review")
+    answers, _ = code_review_case(settings, ctx)
+    # A retried API error is a system record; only an assistant record ending the turn is a limit.
+    retried = {"type": "system", "subtype": "api_error", "level": "error", "sessionId": SESSION}
+    retried |= {"error": {"status": 429}, "retryAttempt": 1, "maxRetries": 10}
+    used = json.dumps(message(SESSION, "msg-n", SONNET, 7, 1)) + "\n"
+    fake_bin.scenario(
+        "docker", replies=[normalizer_session(json.dumps(retried) + "\n", used), *answers]
+    )
+
+    assert executor.run_trials(ctx, [trial], log=lambda _: None) == {"done": 1}
+    assert not ctx.limit.is_set()
+    assert read_wasted(run_dir / TRIALS_DIR / trial.id) == []
