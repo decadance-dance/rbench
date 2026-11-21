@@ -979,6 +979,43 @@ measure a different task from the engines, which all read the repository.
   session's `--model` and `--effort` set them. The Codex side is the Codex reviewer and verifier,
   set only through `config.toml`. The Google and Perplexity seats are disabled in
   `.review-council/config.local.yml`.
+  - The adapter (#51, `rbench.engines.review_council`) pins version 0.14.0 to the source of
+    `deployhq/review-council` at `c9a73575503c12277cd46409c7cbdbe452e7c582` (its `plugin.json`
+    says 0.14.0; spike #25 ran it). Its roles are `claude_side` (delivery by flag) and
+    `codex_side` (delivery by config). The trial's shim settings carry only the Claude model and
+    effort, and `config.toml` carries `model` and `model_reasoning_effort` for Codex.
+  - The launch is `claude -p "/review-council:run" --plugin-dir /opt/rbench/plugins/review-council
+    --setting-sources user --allowedTools "Bash Read Grep Glob Agent Skill Write" --output-format
+    stream-json --verbose`, spike #25's, without the PR number: the plugin then finds the PR of
+    the current branch with `gh pr view`, which the gh stub answers. The report is the session's
+    last main-session text, the final `result` included, that holds the pinned report heading
+    `## Review Council Report` with a report after it, from that heading on: Markdown for the D9
+    step. The skill may go on after the report, so a session with no such text, a malformed or
+    ambiguous stream-json event (a repeated key, a truncated line, `NaN` or an infinity) or a
+    `result` that is not the last event is `failed`.
+  - review-council runs as a fresh install: the adapter owns the whole `.review-council/` state
+    the pinned skill reads from the checkout (`config.yml` an empty mapping, `config.local.yml`
+    ours, `learnings.md` empty), written before the launch and replacing committed copies in the
+    work tree only. The trial home's git ignore file hides them while untracked, and the adapter's
+    `prepare_checkout` marks tracked ones skip-worktree, so `git status` and `git diff` show the
+    commits as they are. Limits, each refused as `misconfigured` before the engine starts, with a
+    reason that names the path only: a committed symlink at `.review-council` or at one of the
+    three files, or a directory where a file goes (`check_checkout`, before any write), and a
+    committed ignore rule that negates the trial's, so that `git status` still shows a file
+    (`prepare_checkout`). review-council's config reader ignores both config files without
+    mikefarah yq v4, so the agent image installs a pinned yq with every plugin
+    (`build_agent_image(plugin=...)`, which fetches the plugin by its exact commit into
+    `/opt/rbench/plugins/<name>` and reads its `plugin.json` version back).
+  - Adapter checkout hooks: an adapter may define `check_checkout(run)` and
+    `prepare_checkout(run)`; the executor calls them with `repository.agent_runner`, the first
+    before writing any of `Launch.files`, the second after writing them and before the engine
+    starts. Each returns the reasons that make the trial `misconfigured`; on any, the executor
+    writes nothing more and does not start the engine. They must be idempotent and touch nothing
+    but the adapter's own paths.
+  - `misconfigured`: the shim log shows a Codex session launch with its own model, effort or
+    profile, or `--ignore-user-config` (config.toml then did not apply), a rewrite other than the
+    sandbox, or a Claude session without the Claude side's `--model` and `--effort`; and a
+    session whose applied model (#46) differs from its side's, Codex's default model included.
 - rreview: the panel roles `intent_contracts`, `reliability` and `security` run on Codex with one
   model for the whole panel; the coordinator runs on Claude Code; the judge runs on Codex, because
   rreview refuses a coordinator and judge of the same family.
