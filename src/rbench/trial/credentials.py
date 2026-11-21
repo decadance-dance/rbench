@@ -11,10 +11,14 @@ No value read here goes into an error message.
 import subprocess
 from pathlib import Path
 
-from rbench.trial.images import TrialError
+from rbench.ledger.plan import CHECKOUT_ROOT
+from rbench.trial.images import CLAUDE_TOKEN_ENV, TrialError
+
+__all__ = ["CLAUDE_TOKEN_ENV", "check_login_home", "claude_token"]
 
 KEYCHAIN_SERVICE = "rbench-claude-oauth"
-CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+# `security` exit status for a missing item (errSecItemNotFound).
+ITEM_NOT_FOUND = 44
 LOGIN_FILE = "auth.json"
 # What Codex keeps next to `auth.json` (design D5): its lock and its transient save files.
 LOGIN_LOCK = "auth.json.lock"
@@ -30,11 +34,18 @@ def claude_token() -> str:
             argv, check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
         )
     except OSError as e:
-        raise TrialError(f"{what}: cannot run security (macOS only): {e}") from e
+        raise TrialError(f"{what}: cannot run security (macOS only): {e.strerror}") from None
+    if result.returncode == ITEM_NOT_FOUND:
+        raise TrialError(
+            f"{what}: security exited {result.returncode}: no such item; add it with"
+            f" `security add-generic-password -s {KEYCHAIN_SERVICE} -a <account> -w`"
+        )
     if result.returncode != 0:
-        # stderr names the missing item or the refusal; stdout may hold a value, so it is dropped.
-        detail = result.stderr.strip().splitlines()[-1:] or ["no output"]
-        raise TrialError(f"{what}: security exited {result.returncode}: {detail[0]}")
+        # Neither stream is shown: either may echo a value.
+        raise TrialError(
+            f"{what}: security exited {result.returncode}: the Keychain may be locked or refused"
+            " access; unlock it (`security unlock-keychain`) and allow access to the item"
+        )
     token = result.stdout.removesuffix("\n")
     if not token or not token.isascii() or not token.isprintable() or " " in token:
         raise TrialError(f"{what}: the item does not hold one line of printable ASCII text")
@@ -42,16 +53,19 @@ def claude_token() -> str:
 
 
 def check_login_home(home: Path) -> Path:
-    """Refuse a Codex login home that holds anything but the login; return its absolute path.
+    """Refuse a Codex login home that holds anything but the login; return its resolved path.
 
-    It must be a directory with a regular `auth.json`, and may hold only `auth.json.lock` and
-    transient `.auth-*` files besides it. `codex login` leaves logs and `tmp/` there, which a trial
-    must not get (design D5).
+    It must be a directory outside the checkout, symlinks resolved, with a regular `auth.json`, and
+    may hold only `auth.json.lock` and transient `.auth-*` files besides it. `codex login` leaves
+    logs and `tmp/` there, which a trial must not get (design D5).
     """
-    home = home.absolute()
+    home = home.resolve()
     what = f"Codex login home {home}"
     if not home.is_dir():
         raise TrialError(f"{what}: not a directory")
+    checkout = CHECKOUT_ROOT.resolve()
+    if home.is_relative_to(checkout):
+        raise TrialError(f"{what}: inside the checkout {checkout}; keep the login outside it")
     unexpected = []
     for entry in sorted(home.iterdir()):
         name = entry.name

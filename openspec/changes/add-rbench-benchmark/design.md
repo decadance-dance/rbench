@@ -483,12 +483,17 @@ login made only for the benchmark (its own `codex login`, so its own refresh-tok
 login home no other tool uses. That login home is a dedicated credential directory. It holds
 `auth.json` and the files Codex makes next to it: `auth.json.lock` and transient `.auth-*` save
 files. It holds nothing unrelated; files left by `codex login` (logs, `tmp/`) are removed. The login
-home used in spike #21 still held `auth.lock`, `log/` and `tmp/`. Before each start of a trial's
-project, rbench refuses a login home that is not a directory, has no regular `auth.json`, or holds
-any other entry, a symlink or a directory under an allowed name included, and names every such
-entry (#40). It is mounted as a directory, read-write, at `/rbench/codex-login` in the agent
-container (its only mount), and the trial's `CODEX_HOME/auth.json` is a symlink to the `auth.json`
-in it, made when the trial is prepared. Mounting the file alone does not work: Codex 0.171.0
+home used in spike #21 still held `auth.lock`, `log/` and `tmp/`. rbench resolves the login home's
+symlinks when it creates the trial and mounts that resolved path. Right before each start of the
+trial's project, it refuses a login home that is not a directory, lies inside the checkout, has no
+regular `auth.json`, holds any other entry (a symlink or a directory under an allowed name
+included; every such entry is named), or no longer resolves to the mounted path (#40). It is
+mounted as a directory, read-write, at `/rbench/codex-login` in the agent container (its only
+mount). The bind never creates a missing source, and a literal `$` in its path is escaped, because
+Compose interpolates the file. When the trial is prepared, the trial's user must read `auth.json`,
+create a file in the login home and open an existing `auth.json.lock` for writing, or the trial
+stops with the reason. Only then is the trial's `CODEX_HOME/auth.json` made a symlink to the
+`auth.json` in it. Mounting the file alone does not work: Codex 0.171.0
 replaces `auth.json` by a temporary file and a rename in the target's directory, and a rename onto
 a mount point fails with `EBUSY`. Codex follows the symlink, so the temporary file and its
 `auth.json.lock` both land in the login home. Refreshed tokens therefore go back only to that home.
@@ -499,9 +504,11 @@ stay in the trial's `CODEX_HOME` inside the container.
 The Claude token reaches the agent container by variable name only. The trial's compose file lists
 `CLAUDE_CODE_OAUTH_TOKEN` in the agent's `environment` without a value, so Compose takes it from
 its own environment, and rbench sets it only in the environment of `docker compose up`. A value the
-operator's shell exports is dropped from that environment, so a trial gets only the token rbench
-read for it. The value is never in an argv, the compose file or another file in the run directory,
-or an error message.
+operator's shell exports is dropped from the environment of every docker call rbench makes, so a
+trial gets only the token rbench read for it. The value is never in an argv, the compose file or
+another file in the run directory. Docker's diagnostics and the output of commands rbench runs in
+the agent have it redacted. A failed Keychain read reports the item, the exit status and a hint,
+never the command's output.
 
 The trial homes hold:
 - the policy settings;

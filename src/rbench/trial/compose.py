@@ -14,7 +14,6 @@ trial's retries, and reused only while the caller holds the run's lock (design D
 """
 
 import json
-import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -22,7 +21,7 @@ from pathlib import Path
 
 from rbench.atomic import atomic_write
 from rbench.trial.credentials import CLAUDE_TOKEN_ENV, check_login_home
-from rbench.trial.images import TrialError, docker, image_id
+from rbench.trial.images import TrialError, docker, host_env, image_id, redact
 
 COMPOSE_FILE = "compose.json"
 PROXY_URL = "http://proxy:3128"
@@ -42,7 +41,7 @@ def compose_spec(
     """The compose project of a trial; images are `<name>@sha256:<hex>` and run by digest.
 
     With `claude_token`, the agent's environment names the Claude token variable without a value,
-    so Compose takes it from its own environment. `codex_login` is the absolute path of the Codex
+    so Compose takes it from its own environment. `codex_login` is the resolved path of the Codex
     login home, mounted read-write at `CODEX_LOGIN`.
     """
     proxy_env = {
@@ -83,9 +82,16 @@ def compose_spec(
     if codex_login is not None:
         if not codex_login.is_absolute():
             raise ValueError(f"Codex login home {codex_login}: give an absolute path")
-        # The long syntax never creates a missing source; a file mount would break Codex's
-        # save by rename (EBUSY), so the whole directory is mounted (design D5).
-        mount = {"type": "bind", "source": str(codex_login), "target": CODEX_LOGIN}
+        # A file mount would break Codex's save by rename (EBUSY), so the whole directory is
+        # mounted (design D5). Compose interpolates `$` in the file, so a literal one is doubled,
+        # and a missing source fails the start instead of mounting a new empty directory.
+        source = str(codex_login).replace("$", "$$")
+        mount = {
+            "type": "bind",
+            "source": source,
+            "target": CODEX_LOGIN,
+            "bind": {"create_host_path": False},
+        }
         spec["services"]["agent"]["volumes"] = [mount]
     return spec
 
@@ -115,36 +121,43 @@ class TrialProject:
         """Write the project's compose file into `directory`; start nothing.
 
         `claude_token` is the value from `claude_token()`; `codex_login` the benchmark's Codex
-        login home, checked by `up`. The compose file holds neither value, only the variable's
-        name and the login home's path.
+        login home, symlinks resolved here and checked by `up`. The compose file holds neither
+        value, only the variable's name and the login home's path.
         """
         if not _PROJECT_NAME.fullmatch(name):
             raise ValueError(f"compose project name {name!r}: use [a-z0-9][a-z0-9_-]*")
-        codex_login = codex_login.absolute() if codex_login is not None else None
+        codex_login = codex_login.resolve() if codex_login is not None else None
         directory.mkdir(parents=True, exist_ok=True)
         spec = compose_spec(agent_image, proxy_image, claude_token is not None, codex_login)
         atomic_write(directory / COMPOSE_FILE, json.dumps(spec, indent=2, sort_keys=True) + "\n")
         return cls(name, directory, claude_token, codex_login)
 
+    def redact(self, text: str) -> str:
+        """`text` without the trial's Claude token."""
+        return redact(text, [self.claude_token] if self.claude_token else [])
+
     def _compose(self, *argv: str, what: str, env: dict[str, str] | None = None) -> str:
         file = str(self.directory / COMPOSE_FILE)
         cmd = ("compose", "--project-name", self.name, "--file", file, *argv)
-        return docker(*cmd, what=what, env=env)
+        secrets = [self.claude_token] if self.claude_token else []
+        return docker(*cmd, what=what, env=env, secrets=secrets)
 
     def up(self) -> None:
         """Start a fresh proxy and agent; return once the proxy is healthy.
 
         Compose identifies a project by its name and would adopt containers left under it, so
         whatever an earlier attempt left is removed first. A failed start removes what it created.
-        A Codex login home that holds more than the login is refused before anything starts.
+        The Codex login home is checked right before the start, and refused if it holds more
+        than the login or no longer resolves to the directory the compose file mounts. Only `up`
+        gets the Claude token, and only this trial's.
         """
-        if self.codex_login is not None:
-            check_login_home(self.codex_login)
-        # The token only from this trial: never one the operator's shell happens to export.
-        env = {k: v for k, v in os.environ.items() if k != CLAUDE_TOKEN_ENV}
-        if self.claude_token is not None:
-            env[CLAUDE_TOKEN_ENV] = self.claude_token
         self.down()
+        if self.codex_login is not None and check_login_home(self.codex_login) != self.codex_login:
+            raise TrialError(
+                f"trial project {self.name}: Codex login home {self.codex_login} now resolves"
+                " elsewhere; create the trial again"
+            )
+        env = host_env(self.claude_token)
         try:
             self._compose(
                 "up", "--detach", "--wait", what=f"trial project {self.name}: cannot start", env=env
@@ -159,10 +172,13 @@ class TrialProject:
     def exec_agent(
         self, argv: list[str], stdin: str | None = None
     ) -> subprocess.CompletedProcess[str]:
-        """Run `argv` in the agent container; its exit status is the caller's to judge."""
+        """Run `argv` in the agent container; its exit status is the caller's to judge.
+
+        Its output has the trial's Claude token redacted.
+        """
         file = str(self.directory / COMPOSE_FILE)
         try:
-            return subprocess.run(
+            result = subprocess.run(
                 ["docker", "compose", "--project-name", self.name, "--file", file]
                 + ["exec", "-T", "agent", *argv],
                 check=False,
@@ -171,9 +187,14 @@ class TrialProject:
                 errors="replace",
                 input=stdin,
                 stdin=None if stdin is not None else subprocess.DEVNULL,
+                env=host_env(),
             )
         except OSError as e:
-            raise TrialError(f"trial project {self.name}: cannot run docker: {e}") from e
+            raise TrialError(
+                f"trial project {self.name}: cannot run docker: {e.strerror}"
+            ) from None
+        result.stdout, result.stderr = self.redact(result.stdout), self.redact(result.stderr)
+        return result
 
     def copy_proxy_log(self, dest: Path) -> None:
         """Copy the proxy's access log, every allowed and refused request, to `dest`."""

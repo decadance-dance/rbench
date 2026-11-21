@@ -6,9 +6,10 @@ the digest is the image ID, the content digest of the image's configuration, whi
 layers. Trials run an image by that ID, never by a tag.
 """
 
+import os
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from rbench.engines.declaration import CLIS
@@ -21,17 +22,42 @@ IMAGES_DIR = CHECKOUT_ROOT / "images"
 _ID = re.compile(r"sha256:[0-9a-f]{64}")
 # All that `<cli> --version` prints, e.g. "2.1.316 (Claude Code)" and "codex-cli 0.171.0".
 _VERSION_OUTPUT = {"claude": "{} (Claude Code)", "codex": "codex-cli {}"}
+# The variable that carries the Claude token into a trial (spec trial-isolation, Credentials).
+CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+REDACTED = "<redacted>"
 
 
 class TrialError(RuntimeError):
     """Docker could not build, start, inspect or stop a trial's images or project."""
 
 
-def docker(*argv: str, what: str, env: Mapping[str, str] | None = None) -> str:
+def host_env(claude_token: str | None = None) -> dict[str, str]:
+    """The environment of a host-side docker call: the operator's, never with a Claude token the
+    operator's shell exports; with `claude_token`, this trial's token."""
+    env = {k: v for k, v in os.environ.items() if k != CLAUDE_TOKEN_ENV}
+    return env | ({CLAUDE_TOKEN_ENV: claude_token} if claude_token is not None else {})
+
+
+def redact(text: str, secrets: Iterable[str]) -> str:
+    """`text` with every known credential value replaced."""
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, REDACTED)
+    return text
+
+
+def docker(
+    *argv: str,
+    what: str,
+    env: Mapping[str, str] | None = None,
+    secrets: Iterable[str] = (),
+) -> str:
     """Run `docker <argv>` and return its stdout; raise `TrialError` naming `what` on failure.
 
-    `env`, when given, is docker's whole environment.
+    `env` is docker's whole environment, `host_env()` by default. `secrets` are redacted from the
+    diagnostics an error carries.
     """
+    secrets = tuple(secrets)
     try:
         result = subprocess.run(
             ["docker", *argv],
@@ -39,13 +65,14 @@ def docker(*argv: str, what: str, env: Mapping[str, str] | None = None) -> str:
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
-            env=None if env is None else dict(env),
+            env=dict(env) if env is not None else host_env(),
         )
     except OSError as e:
-        raise TrialError(f"{what}: cannot run docker: {e}") from e
+        raise TrialError(redact(f"{what}: cannot run docker: {e}", secrets)) from None
     if result.returncode != 0:
         detail = result.stderr.strip().splitlines()[-1:] or ["no output"]
-        raise TrialError(f"{what}: docker {argv[0]} exited {result.returncode}: {detail[0]}")
+        message = f"{what}: docker {argv[0]} exited {result.returncode}: {detail[0]}"
+        raise TrialError(redact(message, secrets))
     return result.stdout
 
 

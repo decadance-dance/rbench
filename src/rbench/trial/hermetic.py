@@ -27,7 +27,7 @@ from rbench.engines.declaration import CLIS, Setting
 from rbench.ledger.plan import Image
 from rbench.trial.compose import CODEX_LOGIN, COMPOSE_FILE, TrialProject
 from rbench.trial.credentials import LOGIN_FILE
-from rbench.trial.images import TrialError, docker
+from rbench.trial.images import TrialError, docker, host_env
 from rbench.trial.sessions import launch_record, read_shim_log
 
 SHIM_SETTINGS = "/etc/rbench/shim.json"
@@ -55,6 +55,18 @@ TRANSCRIPT = re.compile(
 )
 # Writes stdin to "$1" with mode "$2", in the container and as the exec's user.
 WRITE = 'umask 077 && cat > "$1" && chmod "$2" "$1"'
+# What Codex needs of its login home, tried as the trial's user (design D5): read `auth.json`,
+# create its temporary save file next to it, and open the lock for writing. Opening touches no
+# content; the probe file is a transient `.auth-*` file and is removed.
+LOGIN_PROBE = f"""\
+cd {CODEX_LOGIN} || exit 1
+{{ : < auth.json; }} 2>/dev/null || {{ echo "cannot read auth.json" >&2; exit 1; }}
+probe=$(mktemp -p . .auth-probe.XXXXXX 2>/dev/null) || {{ echo "cannot create files" >&2; exit 1; }}
+rm -f "$probe"
+if [ -e auth.json.lock ]; then
+  {{ : >> auth.json.lock; }} 2>/dev/null || {{ echo "cannot write auth.json.lock" >&2; exit 1; }}
+fi
+"""
 LOG_FILE = "shim.jsonl"
 TRANSCRIPTS_DIR = "transcripts"
 RECORD_FILE = "launches.json"
@@ -107,11 +119,13 @@ def _exec(
             text=True,
             input=stdin,
             stdin=None if stdin is not None else subprocess.DEVNULL,
+            env=host_env(),
         )
     except OSError as e:
-        raise TrialError(f"trial project {project.name}: {what}: cannot run docker: {e}") from e
+        where = f"trial project {project.name}: {what}"
+        raise TrialError(f"{where}: cannot run docker: {e.strerror}") from None
     if check and result.returncode != 0:
-        detail = (result.stderr.strip().splitlines() or ["no output"])[-1]
+        detail = project.redact((result.stderr.strip().splitlines() or ["no output"])[-1])
         raise TrialError(
             f"trial project {project.name}: {what}: exited {result.returncode}: {detail}"
         )
@@ -133,7 +147,8 @@ def prepare(
 
     `settings` is `shim_settings(...)`; `codex_config` becomes `$CODEX_HOME/config.toml` and
     `claude_settings` `$CLAUDE_CONFIG_DIR/settings.json`. With the project's Codex login home,
-    `$CODEX_HOME/auth.json` links to its `auth.json`.
+    `$CODEX_HOME/auth.json` links to its `auth.json`, once the trial's user is shown to be able
+    to read the login and write the home and its lock.
     """
     _exec(project, [COLLECTOR], what="starting the collector", user=COLLECTOR_USER, detach=True)
     deadline = time.monotonic() + COLLECTOR_WAIT_SECONDS
@@ -144,6 +159,8 @@ def prepare(
     text = json.dumps(settings, indent=2, sort_keys=True) + "\n"
     _write(project, SHIM_SETTINGS, text, "0444", user="0")
     if project.codex_login is not None:
+        what = f"checking that the trial's user can use the Codex login home {CODEX_LOGIN}"
+        _exec(project, ["sh", "-c", LOGIN_PROBE], what=what)
         link = ["ln", "-s", f"{CODEX_LOGIN}/{LOGIN_FILE}", f"{CODEX_HOME}/{LOGIN_FILE}"]
         _exec(project, link, what="linking the Codex login")
     if codex_config is not None:
@@ -151,11 +168,6 @@ def prepare(
     if claude_settings is not None:
         text = json.dumps(claude_settings, indent=2, sort_keys=True) + "\n"
         _write(project, f"{CLAUDE_HOME}/settings.json", text, "0600", user=None)
-
-
-def _compose(project: TrialProject, *argv: str, what: str) -> str:
-    file = str(project.directory / COMPOSE_FILE)
-    return docker("compose", "--project-name", project.name, "--file", file, *argv, what=what)
 
 
 def collect(project: TrialProject, image: Image, dest: Path) -> list[str]:
@@ -167,17 +179,19 @@ def collect(project: TrialProject, image: Image, dest: Path) -> list[str]:
     """
     where = f"trial project {project.name}"
     dest.mkdir(parents=True, exist_ok=True)
-    _compose(project, "cp", f"agent:{SHIM_LOG}", str(dest / LOG_FILE), what=f"{where}: shim log")
-    container = _compose(project, "ps", "--quiet", "agent", what=f"{where}: agent id").strip()
+    compose = project._compose
+    compose("cp", f"agent:{SHIM_LOG}", str(dest / LOG_FILE), what=f"{where}: shim log")
+    container = compose("ps", "--quiet", "agent", what=f"{where}: agent id").strip()
     if not container:
         raise TrialError(f"{where}: no agent container to collect from")
-    changed = docker("diff", container, what=f"{where}: listing written files")
+    secrets = [project.claude_token] if project.claude_token else []
+    changed = docker("diff", container, what=f"{where}: listing written files", secrets=secrets)
     written = (line[2:] for line in changed.splitlines() if line[:2] in ("A ", "C "))
     found = sorted(path for path in written if TRANSCRIPT.search(path))
     for path in found:
         target = dest / TRANSCRIPTS_DIR / path.lstrip("/")
         target.parent.mkdir(parents=True, exist_ok=True)
-        _compose(project, "cp", f"agent:{path}", str(target), what=f"{where}: copying {path}")
+        compose("cp", f"agent:{path}", str(target), what=f"{where}: copying {path}")
     record = launch_record(image, read_shim_log(dest / LOG_FILE))
     atomic_write(dest / RECORD_FILE, json.dumps(record, indent=2, sort_keys=True) + "\n")
     return found

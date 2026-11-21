@@ -19,6 +19,7 @@ from rbench.engines.declaration import Setting
 from rbench.trial import (
     CLAUDE_TOKEN_ENV,
     CODEX_LOGIN,
+    TrialError,
     TrialProject,
     build_agent_image,
     build_proxy_image,
@@ -284,6 +285,9 @@ def credentialed(request, tmp_path_factory, images):
     agent, proxy = images
     login = tmp_path_factory.mktemp("login-home")
     (login / "auth.json").write_text(json.dumps(AUTH))
+    (login / "auth.json.lock").write_text("")
+    for name in ("auth.json", "auth.json.lock"):  # as `codex login` leaves them
+        (login / name).chmod(0o600)
     directory = tmp_path_factory.mktemp("credentialed")
     name = f"rbench-live-{RUN}-credentials"
     project = TrialProject.create(
@@ -340,6 +344,7 @@ def test_a_refresh_writes_back_only_to_the_login_home(credentialed, tmp_path):
     assert refreshed.stdout.strip() == f"{CODEX_LOGIN}/auth.json"
     assert json.loads((login / "auth.json").read_text()) == REFRESHED
     assert sorted(p.name for p in login.iterdir()) == ["auth.json", "auth.json.lock"]
+    assert (login / "auth.json").stat().st_mode & 0o777 == 0o600
     check_login_home(login)
     assert json.loads((operator / "auth.json").read_text()) == AUTH
     # The trial's home still links to the login: no copy of the login lands in the container.
@@ -347,3 +352,24 @@ def test_a_refresh_writes_back_only_to_the_login_home(credentialed, tmp_path):
     assert link == f"{CODEX_LOGIN}/auth.json"
     copies = run(project, "find", "/home/node", "-name", "*auth*", "-type", "f").stdout.split()
     assert copies == []
+
+
+def test_a_login_home_the_trials_user_cannot_write_is_refused(request, tmp_path, images):
+    """Mode 0500: the host-side check passes, but Codex could not save a refresh there."""
+    agent, proxy = images
+    login = tmp_path / "login-home"
+    login.mkdir()
+    (login / "auth.json").write_text(json.dumps(AUTH))
+    (login / "auth.json").chmod(0o600)
+    login.chmod(0o500)
+    request.addfinalizer(lambda: login.chmod(0o700))
+    check_login_home(login)
+    name = f"rbench-live-{RUN}-readonly-login"
+    project = TrialProject.create(tmp_path / "trial", name, agent.ref, proxy, codex_login=login)
+    request.addfinalizer(project.down)
+    project.up()
+
+    with pytest.raises(TrialError, match="can use the Codex login home .*: cannot create files"):
+        prepare(project, shim_settings({}), CODEX_CONFIG)
+    link = run(project, "test", "-e", "/home/node/.codex/auth.json")
+    assert link.returncode != 0
