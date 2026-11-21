@@ -117,7 +117,8 @@ def test_hash_covers_metadata_description_and_archive_hash(tmp_path: Path, name,
         lambda gt: gt["items"][0].update(severity="should"),
         lambda gt: gt["items"][0].update(end_line=6),
         lambda gt: gt["items"].append(item(id="i2")),
-        lambda gt: gt.update(canary=gt["canary"][:-1] + "f"),
+        # Another last digit: the shared canary counter can already end in any of them.
+        lambda gt: gt.update(canary=gt["canary"][:-1] + ("e" if gt["canary"][-1] == "f" else "f")),
     ],
 )
 def test_hash_covers_ground_truth(tmp_path: Path, change) -> None:
