@@ -211,4 +211,8 @@ def load_engine(path: Path) -> Engine:
         from rbench.engines.plain import bind  # plain imports this module
 
         engine = bind(engine, Path(path).parent)
+    elif engine.name == "review-council":
+        from rbench.engines import review_council  # it imports this module
+
+        engine = review_council.bind(engine, Path(path).parent)
     return engine
