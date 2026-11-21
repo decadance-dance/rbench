@@ -10,7 +10,7 @@ from conftest import REPO
 
 from rbench.engines.declaration import DeclarationError, Setting, load_engine
 from rbench.engines.rreview import RreviewOutputError, findings, launch
-from rbench.matrix.expansion import parse_matrix
+from rbench.matrix.expansion import MatrixError, parse_matrix
 
 ENGINES = REPO / "engines"
 COMMIT = "f71d6e171bf47312fd6e564b6cc6a3dcc2d1fe94"  # rreview tag 0.1.1
@@ -169,7 +169,29 @@ def test_each_role_gets_its_own_model_and_effort():
     assert built.requested["security"] == ("codex", Setting(ASTRA, "medium"))
     assert built.requested["coordinator"] == ("claude", Setting(OPUS, "xhigh"))
     assert built.requested["judge"] == ("codex", Setting(SOL, "xhigh"))
-    assert "judge=xhigh" in built.argv and "reliability=medium" in built.argv
+    argv = list(built.argv)
+    pairs = {(argv[i], argv[i + 1]) for i in range(5, len(argv), 2)}
+    for lens in ("intent_contracts", "reliability", "security"):
+        assert {("--role-model", f"{lens}={ASTRA}"), ("--role-effort", f"{lens}=medium")} <= pairs
+    assert {("--role-model", f"judge={SOL}"), ("--role-effort", "judge=xhigh")} <= pairs
+    assert {
+        ("--role-model", f"coordinator={OPUS}"),
+        ("--role-effort", "coordinator=xhigh"),
+    } <= pairs
+    assert ("--role-model", f"judge={ASTRA}") not in pairs
+
+
+@pytest.mark.parametrize(
+    "roles, error",
+    [
+        ({"judge": {"effort": "max"}}, "accepts no effort 'max' on codex"),
+        ({"panel": {"models": [SOL, ASTRA]}}, "exactly one model"),
+    ],
+)
+def test_planning_refuses_what_the_adapter_cannot_launch(roles, error):
+    # Review round 1 of PR #119: the matrix parser planned these, and only launch refused them.
+    with pytest.raises(MatrixError, match=error):
+        settings(roles)
 
 
 @pytest.mark.parametrize(
@@ -191,7 +213,7 @@ def test_launch_refuses_settings_rreview_cannot_run(edit, error):
 
 
 def test_structured_result_becomes_findings_without_a_model_step():
-    judge = FINDING | {"stage": "judge", "priority": 2, "body": " ", "file": "b.py"}
+    judge = FINDING | {"stage": "judge", "priority": 2, "body": " Restored. ", "file": "b.py"}
 
     out = findings(
         json.dumps(result([FINDING, judge], [FINDING, judge, FINDING | {"priority": 3}])), 1
@@ -209,7 +231,7 @@ def test_structured_result_becomes_findings_without_a_model_step():
             "file": "b.py",
             "start_line": 3,
             "end_line": 4,
-            "message": FINDING["title"],
+            "message": f"{FINDING['title']}\n\nRestored.",
             "severity": "P2",
         },
     ]
@@ -229,12 +251,25 @@ def test_clean_review_has_no_findings_and_dropped_candidates_never_become_any():
         (json.dumps(result([])), 1, "exit 1 with 0 gated"),
         (json.dumps(result([]) | {"sandbox": "os"}), 0, "--sandbox external"),
         (json.dumps(result([]) | {"extra": 1}), 0, "exactly the fields"),
+        # Review round 1 of PR #119: values rreview 0.1.1 never writes.
+        (json.dumps(result([FINDING | {"file": "/tmp/unrelated.py"}])), 1, r"\.file: .*relative"),
+        (json.dumps(result([FINDING | {"file": "a/../b.py"}])), 1, r"\.file: .*relative"),
+        (json.dumps(result([FINDING | {"end_line": 2**32}])), 1, r"\.end_line: .*2\^32"),
+        (json.dumps(result([FINDING | {"body": ""}])), 1, r"\.body: .*non-blank"),
+        (json.dumps(result([]) | {"base": None}), 0, r"\$\.base: expected a commit id"),
+        (json.dumps(result([]) | {"passes": [42]}), 0, r"\$\.passes\[0\]"),
+        (json.dumps(result([]) | {"dropped_candidates": [False]}), 0, r"dropped_candidates\[0\]"),
+        (json.dumps(result([FINDING | {"confidence_score": 10**309}])), 1, "confidence_score"),
+        (json.dumps(result([FINDING | {"confidence_score": 1}])), 1, "confidence_score"),
+        # The gated findings must be the default gate applied to the ungated ones.
+        (json.dumps(result([FINDING | {"priority": 3}])), 1, "default gate"),
+        (json.dumps(result([], [FINDING])), 0, "default gate"),
         (json.dumps(result([FINDING | {"priority": 4}])), 1, r"findings\[0\].priority"),
         (json.dumps(result([FINDING | {"priority": True}])), 1, "priority"),
         (json.dumps(result([FINDING | {"start_line": 5}])), 1, "start_line <= end_line"),
         (json.dumps(result([FINDING | {"confidence_score": 1.5}])), 1, "confidence_score"),
         (json.dumps(result([FINDING | {"stage": "panel"}])), 1, "stage"),
-        (json.dumps(result([FINDING | {"file": " "}])), 1, "blank"),
+        (json.dumps(result([FINDING | {"file": " "}])), 1, "relative"),
         (json.dumps(result([{k: v for k, v in FINDING.items() if k != "body"}])), 1, "fields"),
         # A malformed finding below the gate still fails the trial.
         (json.dumps(result([], [FINDING | {"end_line": "4"}])), 0, r"ungated_findings\[0\]"),
