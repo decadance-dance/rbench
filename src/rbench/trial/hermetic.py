@@ -8,8 +8,9 @@ and `CODEX_HOME`, start empty in every container, so no operator file reaches th
 
 Once the trial's project is up and before the engine starts, `prepare` starts the collector under
 its own user, writes the shim settings, read-only to every trial process, and writes the engine's
-own settings into the homes. The Codex login (#40) is linked into `CODEX_HOME` as `auth.json` by
-the step that mounts it. After the engine ends, `collect` copies out the shim log, every
+own settings into the homes. When the trial mounts the Codex login home, `CODEX_HOME/auth.json`
+becomes a symlink into it: Codex follows it, so a refresh, its lock and its temporary save file
+land in the login home and nowhere else (design D5). After the engine ends, `collect` copies out the shim log, every
 transcript the container's writable layer holds and the trial's launch record.
 """
 
@@ -24,7 +25,8 @@ from pathlib import Path
 from rbench.atomic import atomic_write
 from rbench.engines.declaration import CLIS, Setting
 from rbench.ledger.plan import Image
-from rbench.trial.compose import COMPOSE_FILE, TrialProject
+from rbench.trial.compose import CODEX_LOGIN, COMPOSE_FILE, TrialProject
+from rbench.trial.credentials import LOGIN_FILE
 from rbench.trial.images import TrialError, docker
 from rbench.trial.sessions import launch_record, read_shim_log
 
@@ -130,7 +132,8 @@ def prepare(
     """Start the collector, write the shim settings and the engine's settings into the homes.
 
     `settings` is `shim_settings(...)`; `codex_config` becomes `$CODEX_HOME/config.toml` and
-    `claude_settings` `$CLAUDE_CONFIG_DIR/settings.json`.
+    `claude_settings` `$CLAUDE_CONFIG_DIR/settings.json`. With the project's Codex login home,
+    `$CODEX_HOME/auth.json` links to its `auth.json`.
     """
     _exec(project, [COLLECTOR], what="starting the collector", user=COLLECTOR_USER, detach=True)
     deadline = time.monotonic() + COLLECTOR_WAIT_SECONDS
@@ -140,6 +143,9 @@ def prepare(
         time.sleep(0.1)
     text = json.dumps(settings, indent=2, sort_keys=True) + "\n"
     _write(project, SHIM_SETTINGS, text, "0444", user="0")
+    if project.codex_login is not None:
+        link = ["ln", "-s", f"{CODEX_LOGIN}/{LOGIN_FILE}", f"{CODEX_HOME}/{LOGIN_FILE}"]
+        _exec(project, link, what="linking the Codex login")
     if codex_config is not None:
         _write(project, f"{CODEX_HOME}/config.toml", codex_config, "0600", user=None)
     if claude_settings is not None:

@@ -8,6 +8,7 @@ layers. Trials run an image by that ID, never by a tag.
 
 import re
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 from rbench.engines.declaration import CLIS
@@ -26,8 +27,11 @@ class TrialError(RuntimeError):
     """Docker could not build, start, inspect or stop a trial's images or project."""
 
 
-def docker(*argv: str, what: str) -> str:
-    """Run `docker <argv>` and return its stdout; raise `TrialError` naming `what` on failure."""
+def docker(*argv: str, what: str, env: Mapping[str, str] | None = None) -> str:
+    """Run `docker <argv>` and return its stdout; raise `TrialError` naming `what` on failure.
+
+    `env`, when given, is docker's whole environment.
+    """
     try:
         result = subprocess.run(
             ["docker", *argv],
@@ -35,6 +39,7 @@ def docker(*argv: str, what: str) -> str:
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
+            env=None if env is None else dict(env),
         )
     except OSError as e:
         raise TrialError(f"{what}: cannot run docker: {e}") from e

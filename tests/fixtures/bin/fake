@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Fake `claude`, `codex`, `docker` and `gh` for tests; each name is a symlink to this file.
+"""Fake `claude`, `codex`, `docker`, `gh` and `security` for tests; each name is a symlink to this file.
 
 Environment:
-  RBENCH_FAKE_LOG       file that gets one JSON line per call: {"tool", "argv", "stdin", "cwd"}.
+  RBENCH_FAKE_LOG       file that gets one JSON line per call: {"tool", "argv", "stdin", "cwd"},
+                        and "env" when RBENCH_FAKE_ENV is set.
+  RBENCH_FAKE_ENV       comma-separated variable names; "env" maps each to its value in the
+                        call's environment, or null when it is unset.
   RBENCH_FAKE_SCENARIO  JSON object mapping a tool name to its scenario; a tool without one
                         prints nothing and exits 0. Scenario keys, all optional:
                           delay   seconds to sleep before answering
@@ -33,6 +36,8 @@ log = os.environ.get("RBENCH_FAKE_LOG")
 if log:
     with open(log, "a", encoding="utf-8") as f:
         call = {"tool": tool, "argv": sys.argv[1:], "stdin": stdin, "cwd": os.getcwd()}
+        if names := os.environ.get("RBENCH_FAKE_ENV"):
+            call["env"] = {name: os.environ.get(name) for name in names.split(",")}
         f.write(json.dumps(call) + "\n")
 
 scenario = json.loads(os.environ.get("RBENCH_FAKE_SCENARIO") or "{}").get(tool, {})
