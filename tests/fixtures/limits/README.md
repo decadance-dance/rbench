@@ -10,11 +10,33 @@ CLIs: Claude Code 2.1.316 and Codex CLI 0.171.0. The file name gives the source:
   chose the status, headers and body. Reset times come from the stub, in UTC.
 - `*.code.json`: message templates and typed fields taken from the CLI's own code, read offline.
 
-Redactions: ids are the zero UUID, timestamps are `2026-01-01T00:00:00.000Z`, `cwd` is `/work`,
-`entrypoint` is `<entrypoint>`, and every live reset time is a fake epoch (`1900000000` for the
-5-hour window, `1900500000` for the weekly one), with the integer format kept. System lines of
-Claude's stream-json are left out because they carry host paths. The Codex stub runs drop one
-warning about the stub's unknown model name.
+Redactions in every file: ids are the zero UUID, `cwd` is `/work` and `entrypoint` is
+`<entrypoint>`. System lines of Claude's stream-json are left out because they carry host paths.
+The Codex stub runs drop one warning about the stub's unknown model name.
+
+The live files keep only the shape of the account's readings; every value that came from the
+account is replaced, and the formats are kept:
+- `codex/rollout-token-count.live.jsonl`:
+  - `plan_type` and `credits` are null;
+  - `used_percent` is synthetic: 40.0 for `primary`, 20.0 for `secondary`;
+  - `resets_at` is a fake epoch: 1900000000 for `primary`, 1900500000 for `secondary`;
+  - `timestamp` is one hour before the `primary` reset;
+  - the token counts are those of the one-line prompt, not of the account.
+- `claude/stream-json-rate-limit-event.live.jsonl`: every value in `rate_limit_info` is synthetic.
+  - `utilization` is 0.25 for the 5-hour window and 0.8 for the weekly one;
+  - `resetsAt` is 1900000000 and 1900500000;
+  - status and threshold are consistent with those values;
+  - the account's overage fields are left out (the CLI's schema marks them optional).
+
+Reference clock for time-only resets: parser tests use each record's `timestamp` as "now" and UTC
+as the CLI's time zone.
+- Claude stubs: `timestamp` is 3 hours before the stub's reset epoch, so "resets 3:33am (UTC)" is
+  the same day.
+- Codex stubs: `timestamp` is `2026-11-21T00:32:00.000Z`, and "try again at 3:32 AM" means
+  2026-11-21 03:32 UTC.
+- Claude lines without a `timestamp` (`rate_limit_event`, `result`) take the clock of the
+  assistant line in the same file. The Codex `exec --json` files take the clock of the matching
+  rollout file.
 
 | File | Source | What it shows |
 | --- | --- | --- |

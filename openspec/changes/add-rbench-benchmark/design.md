@@ -297,20 +297,48 @@ not always visible.
 - one directory per trial with `status.json`, `findings.json`, `usage.json` and `raw/`;
 - `judge/`.
 
-Writes are atomic (temporary file, then rename). Limit detection is per CLI and keys on the typed
-codes the CLIs write to their session files, not on stdout text (engines own stdout, D7):
-- Claude Code 2.1.316: the transcript's synthetic assistant message has `error: "rate_limit"`,
-  `apiErrorStatus: 429` and `apiError: "usage_limit_reached"` for a subscription limit, and
-  `apiError: null` for a 429 that is not one ("not your usage limit").
-- Codex CLI 0.171.0: the rollout's `task_complete` event has `error.codex_error_info:
-  "usage_limit_exceeded"` (also used for `usage_not_included` and `insufficient_quota`), or
-  `response_too_many_failed_attempts` with `http_status_code: 429` once retries of any other 429
-  run out.
+Writes are atomic (temporary file, then rename).
 
-Both CLIs exit with status 1. The message text, which carries the reset time, is the fallback and
-the source of the reset time for `--wait`. Messages, typed fields and reset time formats are test
-fixtures in `tests/fixtures/limits/`, each marked as captured live, produced by the real CLI against
-a local 429 stub, or taken from the CLI's code.
+Limit detection is per CLI. It reads the error record that ends a turn in the CLI's session file,
+not stdout (engines own stdout, D7):
+- **Usage limit.**
+  - Claude Code 2.1.316: the transcript's synthetic assistant message has `error: "rate_limit"`,
+    `apiErrorStatus: 429` and `apiError: "usage_limit_reached"`.
+  - Codex CLI 0.171.0: the rollout's `task_complete` has `error.codex_error_info:
+    "usage_limit_exceeded"`. Codex also uses this code for `usage_not_included` and
+    `insufficient_quota`.
+- **Terminal rate limit.**
+  - Claude: `error: "rate_limit"` with `apiErrorStatus: 429` and no `apiError` ("not your usage
+    limit"). This holds even when the record says `apiErrorIsTransient: true`: the record ends the
+    turn, so the CLI has given up.
+  - Codex: `codex_error_info.response_too_many_failed_attempts.http_status_code: 429`, recorded
+    after retries run out, or `rate_limit_exceeded`.
+
+Both kinds are a limit under spec `run-ledger` (Limit detection and stop; Waiting for the limit to
+reset). The trial becomes `interrupted` and keeps its tokens as wasted. By default the runner drains
+and exits 75. With `--wait`, only the reporting provider pauses. A throttle that the CLI retries and
+recovers from is not a limit: the turn does not end on such a record.
+
+**Precedence.** The typed classification wins over the message text. Exit status 1 alone selects
+nothing, because both CLIs exit 1 on any failed turn. The text decides only when no typed record
+can be read: Claude's own usage-limit prefixes, and Codex's "You’ve hit your usage limit" and
+"exceeded retry limit, last status: 429" (`messages.code.json` in the fixtures).
+
+**Reset time for `--wait`.**
+- *Claude:* the structured epoch comes first: `quotaLimits.resetsAt`, or
+  `apiErrorParams.rate_limit_info.resetsAt`. It is used when it is an integer in the future and no
+  further away than the limit's window. The rendered text is not parsed.
+- *Codex:* it records only rendered text. "Try again at 3:32 AM." is a time on the CLI process's
+  local date in its time zone: the trial container's `TZ`, UTC unless the image sets one. That date
+  is taken at the record's `timestamp`. "Try again at Nov 22nd, 2026 3:32 AM." gives the full date
+  in the same time zone.
+- *No reset time:* when the time is absent ("try again later"), unparseable or invalid, or the
+  limit is a terminal rate limit without one, the spec's backoff applies: exponential, at most one
+  hour apart.
+
+Messages, typed fields and reset time formats are test fixtures in `tests/fixtures/limits/`. Each
+is marked as captured live, produced by the real CLI against a local 429 stub, or taken from the
+CLI's code.
 
 **Alternative considered:** SQLite. It is not needed at this size, and per-trial files make partial
 copies and inspection trivial.
@@ -412,11 +440,14 @@ limit stops the run by default; waiting for the reset is opt-in (`--wait`).
 
 Where each CLI reports its used share (spike #23, fixtures in `tests/fixtures/limits/`):
 - **Codex CLI 0.171.0: yes, in the session rollout only.** `codex exec --json` stdout has no
-  `rate_limits`. Each turn's `event_msg` `token_count` in
-  `$CODEX_HOME/sessions/.../rollout-*.jsonl` carries `rate_limits.primary` (300-minute window) and
-  `secondary` (10080 minutes), each with `used_percent` (0 to 100, can exceed 100) and `resets_at`
-  (epoch seconds). The runner reads the newest one from the trial's `CODEX_HOME` after each Codex
-  trial. The trial home already lives in the container (D5), so D3 and D5 do not change.
+  `rate_limits`. `event_msg` `token_count` events in `$CODEX_HOME/sessions/.../rollout-*.jsonl`
+  can carry a `rate_limits` snapshot:
+  - `limit_id`;
+  - optional windows `primary` (seen as 300 minutes) and `secondary` (10080 minutes), each with
+    `used_percent` (0 to 100, can exceed 100), `window_minutes` and an optional `resets_at` (epoch
+    seconds).
+
+  A snapshot can have both windows null: the stub runs show one.
 - **Claude Code 2.1.316: yes, on stdout of stream-json only.** `claude -p --output-format
   stream-json --verbose` emits a `rate_limit_event` after the first API response:
   `rate_limit_info.unifiedWindows.five_hour` and `seven_day`, each with `utilization` (0 to 1, can
@@ -424,14 +455,35 @@ Where each CLI reports its used share (spike #23, fixtures in `tests/fixtures/li
   for the limiting window. It is not in the session transcript. `/usage` under `-p` reports only the
   session's cost, and the statusline input (`rate_limits`) exists only in interactive sessions.
 
+**Choice for Codex: read the trial's rollouts.** After a Codex trial ends, and before its container
+is removed, the runner extracts the `rate_limits` observations from the trial's rollouts, with the
+transcripts it keeps for D7. D3 and D5 do not change. The reading:
+- *Per window:* the runner keeps one reading for each window of the `codex` limit: the newest
+  observation where that window is present and `resets_at` has not passed. A later snapshot with
+  the window null does not erase an earlier reading. Other `limit_id`s are recorded but not
+  checked.
+- *Expiry:* a reading expires at its `resets_at`. A window without `resets_at` expires N minutes
+  after it was observed (as for Claude below).
+- *Before the first Codex trial of a run:* there is no reading. The trial starts on the round
+  budget alone, and the run log says the Codex share is unknown.
+- *Expired reading or a window never reported:* the soft threshold is not checked for that window
+  until a new reading arrives, and the run log says so.
+
 **Choice for Claude: runner-owned readings with a throttled probe.** Engines own stdout (D7), so the
 runner reads Claude's share only from stream-json output of its own calls:
-- first the free readings from calls it makes anyway (the judge, any runner-owned `claude -p`);
-- when the newest reading is older than N minutes (default 10, configurable) before a Claude trial
-  starts, one minimal probe call (`haiku`, "Reply OK", the benchmark login). The probe's tokens
-  are run overhead, never attributed to a trial;
-- when the probe fails or reports no `rate_limit_event`, the threshold is not enforced for Claude
-  for that check, and the run log says so (the fallback in Risks).
+- *Free readings:* first those from calls it makes anyway (the judge, any runner-owned
+  `claude -p`).
+- *When it probes:* before a Claude trial starts and there is no reading yet, or the newest is
+  older than N minutes (default 10, configurable), the runner makes one minimal probe call
+  (`haiku`, "Reply OK"). Probes are throttled per login by the last attempt, successful or not: no
+  second probe on that login within N minutes.
+- *How the probe runs:* it is runner-owned and runs like a trial under D3 and D5: the managed
+  policy, the benchmark login, the proxy and an empty workspace with no task input. The runner owns
+  its stdout. Its tokens are run overhead, never attributed to a trial.
+- *Outcomes:* a `rate_limit_event` is a reading. A failed probe, or one with no event, leaves the
+  soft threshold unenforced for Claude for that check, and the run log says so (the fallback in
+  Risks). A typed hard limit in the probe (D8: usage limit or terminal rate limit) goes to the limit
+  handler like a trial's.
 
 The probe was not run as a runner step in the spike; one equivalent manual call produced the event.
 
