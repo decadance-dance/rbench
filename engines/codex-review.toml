@@ -1,0 +1,15 @@
+# Codex's built-in review (spec engine-configurations, Engine adapters; design D13), run headless
+# as `codex exec review` from the reviewed checkout (spike #22). Pinned by the Codex CLI version;
+# its adapter is `rbench.engines.codex_review`.
+name = "codex-review"
+pin = { kind = "cli", ref = "codex" }
+
+[cli]
+codex = "0.171.0"
+
+# One reviewer on Codex. The adapter passes the model (`-m` and `review_model`) and the effort
+# itself, so the shim adds only the policy flags (design D5).
+[roles.reviewer]
+cli = "codex"
+delivery = "flag"
+default = { model = "gpt-6.2-sol", effort = "high" }
