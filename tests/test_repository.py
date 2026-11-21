@@ -542,7 +542,7 @@ def test_gh_pr_diff_is_byte_exact_with_a_file_named_base(tmp_path):
 @needs_node
 def test_gh_pr_view_reports_open_without_comments_or_reviews(trial_root):
     fields = "state,comments,reviews,title,body,number,isDraft,headRefName,baseRefName"
-    result = gh(trial_root, "pr", "view", "7", "--json", fields)
+    result = gh(trial_root, "pr", "view", "7", "--json", fields + ",url,mergeCommit")
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {
@@ -551,13 +551,33 @@ def test_gh_pr_view_reports_open_without_comments_or_reviews(trial_root):
         "comments": [],
         "headRefName": "reviewed",
         "isDraft": False,
+        "mergeCommit": None,
         "number": 7,
         "reviews": [],
         "state": "OPEN",
         "title": "Make x three",
+        "url": "https://github.com/rbench-trial/repo/pull/7",
     }
     text = gh(trial_root, "pr", "view", "--comments").stdout
     assert text == "title:\tMake x three\nstate:\tOPEN\nnumber:\t7\n--\nSets x to 3.\n"
+
+
+@needs_node
+def test_gh_pr_view_answers_rreview(trial_root):
+    # rreview 0.1.1 resolves the PR with exactly these fields (its `view_pr`), by the head branch.
+    fields = "number,title,body,url,headRefName,baseRefName,headRefOid,baseRefOid,state,mergeCommit"
+    result = gh(trial_root, "pr", "view", "reviewed", "--json", fields)
+
+    assert result.returncode == 0, result.stderr
+    pr = json.loads(result.stdout)
+    repo = trial_root / "repo"
+    assert pr["headRefOid"] == git_bytes(repo, "rev-parse", "refs/heads/reviewed").decode().strip()
+    assert pr["baseRefOid"] == git_bytes(repo, "rev-parse", "refs/heads/base").decode().strip()
+    assert (pr["url"], pr["mergeCommit"], pr["state"]) == (
+        "https://github.com/rbench-trial/repo/pull/7",
+        None,
+        "OPEN",
+    )
 
 
 @needs_node
@@ -595,7 +615,7 @@ def test_gh_pr_comment_is_stored_and_sent_nowhere(trial_root, tmp_path):
         ["pr", "diff", "feature"],
         ["pr", "view", "-R", "acme/widget"],
         ["pr", "view", "--json", "title", "--jq", ".title"],
-        ["pr", "view", "--json", "url"],
+        ["pr", "view", "--json", "files"],
         ["pr", "view", "--web"],
         ["pr", "diff", "--patch"],
         ["pr", "diff", "--color", "--patch"],
