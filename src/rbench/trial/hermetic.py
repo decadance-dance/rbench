@@ -10,8 +10,8 @@ Once the trial's project is up and before the engine starts, `prepare` starts th
 its own user, writes the shim settings, read-only to every trial process, and writes the engine's
 own settings into the homes. When the trial mounts the Codex login home, `CODEX_HOME/auth.json`
 becomes a symlink into it: Codex follows it, so a refresh, its lock and its temporary save file
-land in the login home and nowhere else (design D5). After the engine ends, `collect` copies out the shim log, every
-transcript the container's writable layer holds and the trial's launch record.
+land in the login home and nowhere else (design D5). After the engine ends, `collect` copies out
+the shim log, every transcript the container's writable layer holds and the trial's launch record.
 """
 
 import copy
