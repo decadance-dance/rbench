@@ -382,8 +382,13 @@ limit stops the run by default; waiting for the reset is opt-in (`--wait`).
 
 ## Risks / Trade-offs
 
-- **[Claude OAuth token returns 401 in containers (reported upstream).]** → First spike item. If it
-  fails, try the `sbx` microVM, then run Claude on a separate host user with the proxy as fallback.
+- **[Claude OAuth token returns 401 in containers (reported upstream).]** → Spiked (#19): not
+  reproduced. A `claude setup-token` token passed by `--env-file` as `CLAUDE_CODE_OAUTH_TOKEN`
+  authenticates `claude -p` in a Linux container on Docker Desktop (Claude Code 2.1.316,
+  linux/arm64) with an empty `CLAUDE_CONFIG_DIR`, also with D5's managed settings and shim flags.
+  D3 stands; the `sbx` and separate-user fallbacks are not needed. The token is only ever passed
+  from the git-ignored env file, never baked into an image. Not yet checked: the run through the
+  proxy (D3's smoke run) and token expiry over a long run.
 - **[Codex `auth.json` refresh races between processes.]** → One login file per trial, at most one
   Codex trial per login, and a login only the benchmark uses, so Orca and the operator's own Codex
   never share its refresh-token chain. The spike runs several Codex processes in one trial.
