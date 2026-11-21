@@ -1,5 +1,5 @@
 """The trial executor (spec run-ledger: Balanced queue order, Failures and retries, Concurrency per
-provider; design D3, D8).
+provider, Limit detection and stop; design D3, D8).
 
 The queue is `recover_trials`' answer: the trials still to run, in plan order (attempt, then task,
 then configuration). A trial starts once every provider it uses has a free slot: Claude has
@@ -14,6 +14,9 @@ An infrastructure error is retried up to `RETRIES` times. After that, and after 
 the attempt cannot record, the trial goes back to `interrupted`, no new trial starts, running ones
 finish, and `RunStopped` carries the error. An error after the trial's final state, such as a
 project its attempt could not remove, keeps that state but stops the run the same way.
+
+A trial a limit interrupted stops the run too: no new trial starts, running ones finish, and
+`LimitReached` names the limits, unless an error stopped the run as well.
 """
 
 import os
@@ -32,7 +35,7 @@ from rbench.ledger.plan import (
     PlannedTrial,
     run_identity,
 )
-from rbench.ledger.trials import read_status, set_state
+from rbench.ledger.trials import read_status, read_wasted, set_state
 from rbench.run.adapters import ADAPTERS, Adapter
 from rbench.run.trial import PROJECT_DIR, RunContext, project_name, run_attempt
 from rbench.tasks.archive import ArchiveError
@@ -51,6 +54,10 @@ CODEX_LOGIN_ENV = "RBENCH_CODEX_LOGIN"
 
 class RunStopped(Exception):
     """The runner stopped on an error; running trials were let finish."""
+
+
+class LimitReached(RunStopped):
+    """A CLI reported a rate or usage limit; running trials were let finish."""
 
 
 class _Unclean(Exception):
@@ -90,7 +97,8 @@ def execute(
     log: Callable[[str], None] = print,
 ) -> dict[str, int]:
     """Run `queue` with `attempt` and return the count of each final state; raises `RunStopped`
-    once running trials end when a trial could not be run."""
+    once running trials end when a trial could not be run, or `LimitReached` when a trial was
+    interrupted by a limit."""
     if claude_concurrency < 1:
         raise ValueError("the Claude concurrency must be at least 1")
     free = {"claude": claude_concurrency, "codex": 1}
@@ -98,6 +106,7 @@ def execute(
     running: dict[Future, PlannedTrial] = {}
     counts: dict[str, int] = {}
     errors: list[str] = []
+    limits: list[str] = []
     guard = threading.Lock()
 
     def work(trial: PlannedTrial) -> str:
@@ -105,6 +114,7 @@ def execute(
         trial_dir = run_dir / TRIALS_DIR / trial.id
         error, infrastructure = "", False
         for n in range(retries + 1):
+            spent = len(read_wasted(trial_dir))
             try:
                 return attempt(trial)
             except (*INFRASTRUCTURE, OSError, ValueError) as e:  # any other stops the run
@@ -114,7 +124,11 @@ def execute(
                 )
             # An error after the final state, such as removing the project, never reruns the
             # trial, but what it left is unconfirmed: the run stops.
-            if (state := read_status(trial_dir).state) not in ("pending", "running", "interrupted"):
+            # A limit's interrupted state is final too: its wasted tokens show this attempt set it.
+            state = read_status(trial_dir).state
+            if state not in ("pending", "running", "interrupted") or (
+                state == "interrupted" and len(read_wasted(trial_dir)) > spent
+            ):
                 raise _Unclean(state, f"{name}: {state}, then {error}")
             if not infrastructure or n == retries:
                 break
@@ -127,7 +141,7 @@ def execute(
 
     with ThreadPoolExecutor(max_workers=claude_concurrency + 1) as pool:
         while pending or running:
-            if not errors:
+            if not errors and not limits:
                 # The earliest attempt each provider group has queued or running.
                 earliest: dict[frozenset[str], int] = {}
                 for trial in [*pending, *running.values()]:
@@ -159,10 +173,16 @@ def execute(
                         log(str(e))
                     continue
                 counts[state] = counts.get(state, 0) + 1
+                message = f"{label(plan, trial)}: {state}"
+                if state == "interrupted":
+                    message += f": {read_status(run_dir / TRIALS_DIR / trial.id).reason}"
+                    limits.append(message)
                 with guard:
-                    log(f"{label(plan, trial)}: {state}")
+                    log(message)
     if errors:
         raise RunStopped("; ".join(errors))
+    if limits:
+        raise LimitReached("; ".join(limits))
     return counts
 
 

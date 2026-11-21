@@ -32,9 +32,11 @@ from rbench.ledger import (
     STATUS_FILE,
     TRIALS_DIR,
     USAGE_FILE,
+    WASTED_FILE,
     Image,
     LedgerError,
     TrialStatus,
+    add_wasted,
     create_run,
     freeze_plan,
     load_images,
@@ -42,6 +44,7 @@ from rbench.ledger import (
     matrix_warning,
     read_results,
     read_status,
+    read_wasted,
     set_state,
     store_results,
 )
@@ -646,6 +649,36 @@ def test_done_trial_refuses_a_second_store(tmp_path: Path, monkeypatch) -> None:
 
     assert writes == []
     assert read_results(tmp_path) == ([FINDING], USAGE)
+
+
+def test_wasted_tokens_add_up_per_interrupted_attempt_and_outlive_done(tmp_path: Path) -> None:
+    assert read_wasted(tmp_path) == []
+    set_state(tmp_path, "running")
+    add_wasted(tmp_path, USAGE)
+    add_wasted(tmp_path, usage(m=COUNTS | {"input": 9}))
+    store_results(tmp_path, [FINDING], USAGE)
+
+    assert read_wasted(tmp_path) == [USAGE, usage(m=COUNTS | {"input": 9})]
+    assert read_results(tmp_path) == ([FINDING], USAGE)
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        (b"{", "cannot read the wasted tokens"),
+        (b"{}", "expected a list of usage records"),
+        (b'[{"engine": {}}]', "attempt 0: usage must be an object"),
+    ],
+)
+def test_malformed_wasted_tokens_are_refused(tmp_path: Path, content, message) -> None:
+    (tmp_path / WASTED_FILE).write_bytes(content)
+
+    with pytest.raises(LedgerError, match=message):
+        read_wasted(tmp_path)
+    with pytest.raises(LedgerError, match=message):
+        add_wasted(tmp_path, USAGE)
+    with pytest.raises(LedgerError, match="usage must be an object"):
+        add_wasted(tmp_path / "other", {"engine": {}})
 
 
 def test_store_needs_a_readable_status(tmp_path: Path) -> None:

@@ -1,5 +1,6 @@
 """The trial executor (spec run-ledger: Balanced queue order, Failures and retries, Concurrency per
-provider; spec trial-isolation, One fresh sandbox per trial; design D3, D7).
+provider, Limit detection and stop; spec trial-isolation, One fresh sandbox per trial; design D3, D7,
+D8).
 
 The queue and its slots are tested with a stand-in attempt; whole trials run through fake `docker`
 and `security` (tests/fixtures/bin), whose replies stand in for the agent container: the engine's
@@ -19,7 +20,7 @@ from pathlib import Path
 import pytest
 import test_codex_review
 import test_rreview
-from test_ledger import FINDING, cli_inputs
+from test_ledger import FINDING, USAGE, cli_inputs
 from test_usage import GPT, codex_usage, message, meta, record, turn
 
 import rbench.ledger.plan as plan_module
@@ -29,9 +30,11 @@ from rbench.engines import codex_review, plain, rreview
 from rbench.ledger import (
     TRIALS_DIR,
     Plan,
+    add_wasted,
     load_plan,
     read_results,
     read_status,
+    read_wasted,
     set_state,
     start_run,
 )
@@ -60,6 +63,7 @@ ENGINE = "agent sh -c " + trial_module.RUN
 CODEX = "gpt-6.2-sol"
 MARKER = "zz-synthetic-marker-41"
 CLAUDE_FLAGS = POLICY["claude"]["flags"]
+LIMITS = Path(__file__).parent / "fixtures" / "limits"
 
 
 def make_run(root: Path, models: list[str], run_id: str = "r") -> Path:
@@ -278,6 +282,129 @@ def test_an_error_the_attempt_cannot_record_stops_the_run_without_retry(checkout
 
     assert len(tries) == 1
     assert read_status(run_dir / TRIALS_DIR / tries[0]).state == "interrupted"
+
+
+def interrupt(trial_dir: Path) -> str:
+    """What a trial's attempt records when a CLI reported a limit."""
+    add_wasted(trial_dir, USAGE)
+    set_state(trial_dir, "interrupted", "Claude reported its usage limit")
+    return "interrupted"
+
+
+@pytest.mark.real_executor
+def test_a_limit_starts_nothing_new_lets_running_trials_finish_and_stops(checkout):
+    run_dir = make_run(checkout, [OPUS, SONNET])
+    plan = load_plan(run_dir)
+    first, second = plan.trials[:2]
+    started, finished, lines = [], [], []
+
+    def attempt(trial):
+        started.append(trial.id)
+        trial_dir = run_dir / TRIALS_DIR / trial.id
+        set_state(trial_dir, "running")
+        if trial == first:
+            return interrupt(trial_dir)
+        time.sleep(0.3)  # still running when the limit is reported
+        set_state(trial_dir, "failed", "stand-in")
+        finished.append(trial.id)
+        return "failed"
+
+    with pytest.raises(executor.LimitReached) as stopped:
+        executor.execute(run_dir, plan, plan.trials, attempt, log=lines.append)
+
+    assert len(plan.trials) > 2 and sorted(started) == sorted([first.id, second.id])
+    assert finished == [second.id]
+    assert str(stopped.value) == f"trial {first.id}: interrupted: Claude reported its usage limit"
+    assert str(stopped.value) in lines
+    assert read_wasted(run_dir / TRIALS_DIR / first.id) == [USAGE]
+    # Resume reruns the interrupted trial and the ones never started.
+    assert trials_left(run_dir, plan) == [first.id, *[t.id for t in plan.trials[2:]]]
+
+
+@pytest.mark.real_executor
+def test_a_teardown_failure_after_a_limit_stops_the_run_without_rerunning_it(checkout):
+    run_dir = make_run(checkout, [OPUS])
+    plan = load_plan(run_dir)
+    tries = []
+
+    def attempt(trial):
+        tries.append(trial.id)
+        trial_dir = run_dir / TRIALS_DIR / trial.id
+        set_state(trial_dir, "running")
+        interrupt(trial_dir)
+        raise TrialError("removing trial project p failed")
+
+    with pytest.raises(executor.RunStopped, match="interrupted, then infrastructure") as stopped:
+        executor.execute(run_dir, plan, plan.trials, attempt, claude_concurrency=1)
+
+    assert not isinstance(stopped.value, executor.LimitReached)  # an error to fix: exit 1
+    assert tries == [plan.trials[0].id]
+    status = read_status(run_dir / TRIALS_DIR / tries[0])
+    assert (status.state, status.reason) == ("interrupted", "Claude reported its usage limit")
+    assert read_wasted(run_dir / TRIALS_DIR / tries[0]) == [USAGE]
+
+
+@pytest.mark.real_executor
+def test_a_trial_a_limit_interrupted_before_is_retried_on_infrastructure_errors(checkout):
+    run_dir = make_run(checkout, [OPUS])
+    plan = load_plan(run_dir)
+    first = plan.trials[0]
+    interrupt(run_dir / TRIALS_DIR / first.id)  # the previous runner's limit
+    tries = []
+
+    def attempt(trial):
+        tries.append(trial.id)
+        if len(tries) == 1:  # fails before the trial is marked running
+            raise TrialError("listing agents on the Codex login failed")
+        set_state(run_dir / TRIALS_DIR / trial.id, "failed", "engine error")
+        return "failed"
+
+    assert executor.execute(run_dir, plan, [first], attempt, log=lambda _: None) == {"failed": 1}
+    assert tries == [first.id] * 2
+
+
+def test_a_limit_exits_75_and_prints_the_exact_resume_command(checkout, monkeypatch, capsys):
+    def run_trials(ctx, queue, **options):
+        raise executor.LimitReached("trial 1: interrupted: Codex reported its rate limit")
+
+    monkeypatch.setattr(executor, "run_trials", run_trials)
+    runs = checkout / "my runs"  # quoted in the command
+    argv = [
+        *cli_inputs(checkout),
+        "--runs",
+        str(runs),
+        "--run-id",
+        "r",
+        "--claude-concurrency",
+        "1",
+    ]
+
+    assert main(argv) == ExitCode.STOPPED == 75
+
+    err = capsys.readouterr().err
+    run_dir = runs / "r"
+    assert "rbench run: stopped at a limit: trial 1: interrupted: Codex reported its" in err
+    resume = (
+        f"rbench resume '{run_dir}' --engines {checkout / 'engines'}"
+        f" --tasks {checkout / 'tasks'} --claude-concurrency 1"
+    )
+    assert f"resume after the limit resets: {resume}\n" in err
+
+
+def test_resume_after_a_limit_queues_the_interrupted_trial(checkout, stub_executor, capsys):
+    argv = cli_inputs(checkout)
+    run_dir = make_run(checkout, [OPUS])
+    plan = load_plan(run_dir)
+    first = run_dir / TRIALS_DIR / plan.trials[0].id
+    set_state(first, "running")
+    interrupt(first)
+    for trial in plan.trials[1:]:
+        set_state(run_dir / TRIALS_DIR / trial.id, "failed", "engine error")
+    engines, tasks = argv[argv.index("--engines") + 1], argv[argv.index("--tasks") + 1]
+
+    assert main(["resume", str(run_dir), "--engines", engines, "--tasks", tasks]) == ExitCode.OK
+    assert stub_executor.queues == [[plan.trials[0].id]]
+    assert read_wasted(first) == [USAGE]
 
 
 def test_project_names_are_unique_per_run_and_trial_and_hide_the_task(tmp_path):
@@ -620,6 +747,121 @@ def test_an_engine_launch_not_as_built_makes_the_trial_misconfigured(sandbox):
 
     assert counts == {"misconfigured": 1}
     assert "--permission-mode" in read_status(trial_dir).reason
+
+
+def limit_line(fixture: str, **fields) -> str:
+    """The record a pinned CLI ended its turn with at a limit (tests/fixtures/limits/)."""
+    return json.dumps(json.loads((LIMITS / fixture).read_text().splitlines()[-1]) | fields) + "\n"
+
+
+def claude_limit_trial(launch: plain.Launch) -> dict:
+    """A Claude session that used tokens, then hit its 5-hour limit."""
+    trial = claude_trial(launch)
+    line = limit_line("claude/transcript-usage-limit-five-hour.stub.jsonl", sessionId=SESSION)
+    trial["copy"][f"agent:{TRANSCRIPT}"] += line
+    trial["stdout"] = json.dumps({"type": "result", "subtype": "success", "is_error": True})
+    return trial
+
+
+@pytest.mark.real_executor
+def test_a_claude_usage_limit_interrupts_the_trial_keeping_its_tokens_as_wasted(
+    sandbox, fake_bin, checkout
+):
+    def replies(launch):
+        engine = {"exit": 1, "stderr": launched(1)}
+        return docker_replies(claude_limit_trial(launch), engine=engine)
+
+    with pytest.raises(executor.LimitReached, match="Claude reported its usage limit"):
+        sandbox([OPUS], replies)
+
+    trial_dir = first_trial(checkout)
+    status = read_status(trial_dir)
+    assert (status.state, status.reason) == ("interrupted", "Claude reported its usage limit")
+    (wasted,) = read_wasted(trial_dir)
+    assert wasted["engine"] == {
+        OPUS: {"input": 3, "output": 2, "cache_read": 0, "cache_creation": 0}
+    }
+    assert not (trial_dir / "findings.json").exists()
+    assert docker_calls(fake_bin, " down ")  # the project is still removed
+
+    # Resume reruns it from the start; the wasted tokens stay.
+    run_dir = trial_dir.parents[1]
+    plan = load_plan(run_dir)
+    queue = recover_trials(run_dir, plan)
+    assert queue[0].id == trial_dir.name
+    settings = plan.configurations[0].settings
+    launch = plain.launch(checkout / "engines", settings, plan.engines["plain"].clis)
+    fake_bin.scenario("docker", **docker_replies(claude_trial(launch)))
+    ctx = executor.prepare_run(
+        run_dir,
+        plan,
+        engines_dir=checkout / "engines",
+        tasks_root=checkout / "tasks",
+        archives=checkout / "archives",
+    )
+    assert executor.run_trials(ctx, queue[:1], log=lambda _: None) == {"done": 1}
+    assert read_wasted(trial_dir) == [wasted]
+    assert read_results(trial_dir)[1]["engine"] == wasted["engine"]
+
+
+@pytest.mark.real_executor
+@pytest.mark.parametrize(
+    ("fixture", "reason"),
+    [
+        ("codex/rollout-usage-limit-plus.stub.jsonl", "Codex reported its usage limit"),
+        ("codex/rollout-retry-limit-429.stub.jsonl", "Codex reported its rate limit"),
+    ],
+)
+def test_a_codex_limit_interrupts_the_trial_keeping_its_tokens_as_wasted(
+    sandbox, checkout, fixture, reason
+):
+    def replies(launch):
+        trial = codex_trial(launch)
+        trial["copy"][f"agent:{ROLLOUT}"] += limit_line(fixture)
+        return docker_replies(trial, engine={"exit": 1, "stderr": launched(1)})
+
+    with pytest.raises(executor.LimitReached, match=reason):
+        sandbox([CODEX], replies)
+
+    trial_dir = first_trial(checkout)
+    assert read_status(trial_dir).reason == reason
+    (wasted,) = read_wasted(trial_dir)
+    assert wasted["engine"] == {
+        GPT: {"input": 6, "output": 3, "cache_read": 4, "cache_creation": 0}
+    }
+
+
+@pytest.mark.real_executor
+def test_the_audit_wins_over_a_limit(sandbox, checkout):
+    def replies(launch):
+        changed = {
+            "match": "count-objects",
+            "stdout": COUNT_OBJECTS.replace("in-pack: 6", "in-pack: 7"),
+        }
+        return docker_replies(claude_limit_trial(launch), extra=[changed])
+
+    trial_dir, counts, _ = sandbox([OPUS], replies)
+
+    assert counts == {"contaminated": 1}
+    assert read_wasted(trial_dir) == []
+
+
+@pytest.mark.real_executor
+def test_malformed_usage_at_a_limit_is_wasted_as_unknown(sandbox, checkout):
+    def replies(launch):
+        trial = claude_limit_trial(launch)
+        bad = json.dumps(message(SESSION, "msg-2", OPUS, -1, 2)) + "\n"
+        trial["copy"][f"agent:{TRANSCRIPT}"] += bad
+        return docker_replies(trial)
+
+    with pytest.raises(executor.LimitReached):
+        sandbox([OPUS], replies)
+
+    (wasted,) = read_wasted(first_trial(checkout))
+    assert wasted["engine"] == {}
+    assert wasted["incomplete"]["engine"] == [
+        "the transcripts' usage is malformed, so it is unknown"
+    ]
 
 
 @pytest.mark.real_executor

@@ -4,6 +4,7 @@ The command list and exit codes are provisional until each command's issue fixes
 """
 
 import argparse
+import shlex
 import sys
 from contextlib import ExitStack
 from enum import IntEnum
@@ -165,10 +166,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resume_command(run_dir: Path, plan: Plan, args: argparse.Namespace) -> str:
+    """The command that resumes the run with the options this runner was given, where they differ
+    from `rbench resume`'s defaults; a run with hidden tasks keeps its directory unnamed."""
+    words = []
+    for flag, value, default in (
+        ("--engines", args.engines, Path("engines")),
+        ("--tasks", args.tasks, Path("tasks")),
+        ("--archives", args.archives, None),
+        ("--claude-concurrency", args.claude_concurrency, executor.CLAUDE_CONCURRENCY),
+    ):
+        if value != default:
+            words += [flag, str(value)]
+    where = "<its run directory>" if "hidden" in plan.task_sets else shlex.quote(str(run_dir))
+    return " ".join(["rbench resume", where, *map(shlex.quote, words)])
+
+
 def _execute(command: str, run_dir: Path, plan: Plan, args: argparse.Namespace) -> int:
     """Run the trials left in `run_dir`; the caller holds the run lock."""
-    hidden = "hidden" in plan.task_sets
-    resume = "rbench resume <its run directory>" if hidden else f"rbench resume {run_dir}"
+    resume = _resume_command(run_dir, plan, args)
     try:
         queue = recover_trials(run_dir, plan)
         print(f"{len(queue)} trials to run")
@@ -180,6 +196,10 @@ def _execute(command: str, run_dir: Path, plan: Plan, args: argparse.Namespace) 
             archives=args.archives or default_archive_dir(),
         )
         counts = executor.run_trials(ctx, queue, claude_concurrency=args.claude_concurrency)
+    except executor.LimitReached as e:
+        print(f"{command}: stopped at a limit: {e}", file=sys.stderr)
+        print(f"resume after the limit resets: {resume}", file=sys.stderr)
+        return ExitCode.STOPPED
     except executor.RunStopped as e:
         print(f"{command}: stopped: {e}", file=sys.stderr)
         print(f"fix the cause, then resume: {resume}", file=sys.stderr)

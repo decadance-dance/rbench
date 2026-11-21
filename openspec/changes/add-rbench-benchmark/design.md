@@ -698,7 +698,9 @@ not always visible.
 - `plan.json`;
 - `ledger.lock`;
 - `identity`, random hex that names the run's compose projects (D3);
-- one directory per trial with `status.json`, `findings.json`, `usage.json` and `raw/`;
+- one directory per trial with `status.json`, `findings.json`, `usage.json` and `raw/`, and
+  `wasted.json` once a limit interrupted an attempt: one usage record per such attempt, in the form
+  of `usage.json`, kept outside `raw/` so the rerun keeps it;
 - `judge/`.
 
 Writes are atomic (temporary file, then rename).
@@ -720,14 +722,20 @@ not stdout (engines own stdout, D7):
     response stream) is inferred from the pinned source's error enum, not observed in the spike.
 
 Both kinds are a limit under spec `run-ledger` (Limit detection and stop; Waiting for the limit to
-reset). The trial becomes `interrupted` and keeps its tokens as wasted. By default the runner drains
-and exits 75. With `--wait`, only the reporting provider pauses. A throttle that the CLI retries and
+reset). The trial becomes `interrupted` and keeps its tokens as wasted. A contaminated trial stays
+contaminated; otherwise a limit wins over a timeout, a misconfiguration and the engine's result,
+since all of them can follow from it. By default the runner drains and exits 75, printing
+`rbench resume` with the options the runner was given that differ from the defaults. With `--wait`,
+only the reporting provider pauses. A throttle that the CLI retries and
 recovers from is not a limit: the turn does not end on such a record.
 
 **Precedence.** The typed classification wins over the message text. Exit status 1 alone selects
 nothing, because both CLIs exit 1 on any failed turn. The text decides only when no typed record
 can be read: Claude's own usage-limit prefixes, and Codex's "You’ve hit your usage limit" and
-"exceeded retry limit, last status: 429" (`messages.code.json` in the fixtures).
+"exceeded retry limit, last status: 429" (`messages.code.json` in the fixtures). That is a Claude
+API error message without `error` and `apiErrorStatus`, a Codex turn error without
+`codex_error_info`, and, when no rollout holds a turn error, the `turn.failed` messages on the
+`codex exec --json` stdout of the engine's own shim launch.
 
 **Reset time for `--wait`.**
 - *Claude:* the structured epoch comes first: `quotaLimits.resetsAt`, or
