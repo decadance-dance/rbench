@@ -336,3 +336,49 @@ def test_compose_mounts_exactly_the_checked_directory(tmp_path, monkeypatch):
     # `config` prints a compose file again, so a literal `$` comes back doubled.
     assert mount["source"].replace("$$", "$") == str(project.codex_login)
     assert mount["target"] == CODEX_LOGIN
+
+
+def test_a_transcript_path_holding_the_token_is_never_copied(fake_bin, tmp_path):
+    project = credentialed(tmp_path, claude_token=TOKEN)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "shim.jsonl").write_text("")
+    diff = f"A /home/node/.claude/projects/-work-{TOKEN}/0d6e.jsonl\n"
+    replies = [
+        {"match": "ps --quiet agent", "stdout": "abc123\n"},
+        {"match": "diff", "stdout": diff},
+    ]
+    fake_bin.scenario("docker", replies=replies)
+
+    with pytest.raises(TrialError, match="a transcript's path holds the Claude token") as e:
+        collect(project, Image(AGENT, {"claude": "2.1.316"}), raw)
+
+    assert TOKEN not in chain(e.value)
+    assert not (raw / "transcripts").exists()
+    assert not [c for c in fake_bin.calls() if TOKEN in json.dumps(c["argv"])]
+    assert not (raw / "launches.json").exists()
+
+
+def test_undecodable_docker_output_still_fails_cleanly_and_cleans_up(fake_bin, tmp_path):
+    project = credentialed(tmp_path, claude_token=TOKEN)
+    fail = {"match": "up --detach", "binary": True, "exit": 1}
+    fake_bin.scenario("docker", replies=[fail | {"stderr": f"boom \xff {TOKEN}\n"}])
+
+    with pytest.raises(TrialError, match="cannot start.*removed what it created") as e:
+        project.up()
+
+    assert TOKEN not in chain(e.value)
+    assert [c["argv"][5] for c in fake_bin.calls()] == ["down", "up", "down"]
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [(44, "no such item"), (51, "may be locked"), (0, "one line of printable ASCII")],
+)
+def test_undecodable_keychain_output_gets_the_controlled_message(fake_bin, status, message):
+    output = f"\xff{TOKEN}\n"
+    fake_bin.scenario("security", stdout=output, stderr=output, binary=True, exit=status)
+
+    with pytest.raises(TrialError, match=message) as e:
+        claude_token()
+    assert TOKEN not in chain(e.value)

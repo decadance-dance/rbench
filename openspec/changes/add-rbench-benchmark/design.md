@@ -491,8 +491,8 @@ included; every such entry is named), or no longer resolves to the mounted path 
 mounted as a directory, read-write, at `/rbench/codex-login` in the agent container (its only
 mount). The bind never creates a missing source, and a literal `$` in its path is escaped, because
 Compose interpolates the file. When the trial is prepared, the trial's user must read `auth.json`,
-create a file in the login home and open an existing `auth.json.lock` for writing, or the trial
-stops with the reason. Only then is the trial's `CODEX_HOME/auth.json` made a symlink to the
+open `auth.json` for writing (Codex does before it replaces the file), create a file in the login
+home and open an existing `auth.json.lock` for writing, or the trial stops with the reason. Only then is the trial's `CODEX_HOME/auth.json` made a symlink to the
 `auth.json` in it. Mounting the file alone does not work: Codex 0.171.0
 replaces `auth.json` by a temporary file and a rename in the target's directory, and a rename onto
 a mount point fails with `EBUSY`. Codex follows the symlink, so the temporary file and its
@@ -507,7 +507,8 @@ its own environment, and rbench sets it only in the environment of `docker compo
 operator's shell exports is dropped from the environment of every docker call rbench makes, so a
 trial gets only the token rbench read for it. The value is never in an argv, the compose file or
 another file in the run directory. Docker's diagnostics and the output of commands rbench runs in
-the agent have it redacted. A failed Keychain read reports the item, the exit status and a hint,
+the agent have it redacted. A transcript whose path holds the token stops the collection before
+anything is copied. A failed Keychain read reports the item, the exit status and a hint,
 never the command's output.
 
 The trial homes hold:

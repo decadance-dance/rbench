@@ -64,6 +64,7 @@ def docker(
             check=False,
             capture_output=True,
             text=True,
+            errors="replace",
             stdin=subprocess.DEVNULL,
             env=dict(env) if env is not None else host_env(),
         )

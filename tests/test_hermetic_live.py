@@ -354,22 +354,30 @@ def test_a_refresh_writes_back_only_to_the_login_home(credentialed, tmp_path):
     assert copies == []
 
 
-def test_a_login_home_the_trials_user_cannot_write_is_refused(request, tmp_path, images):
-    """Mode 0500: the host-side check passes, but Codex could not save a refresh there."""
+@pytest.mark.parametrize(
+    ("home_mode", "auth_mode", "reason"),
+    [(0o500, 0o600, "cannot create files"), (0o700, 0o444, "cannot write auth.json")],
+)
+def test_a_login_home_the_trials_user_cannot_write_is_refused(
+    request, tmp_path, images, home_mode, auth_mode, reason
+):
+    """The host-side check passes, but Codex could not save a refresh there: a read-only home
+    (no temporary file) or a read-only `auth.json` (Codex opens it for writing first)."""
     agent, proxy = images
     login = tmp_path / "login-home"
     login.mkdir()
     (login / "auth.json").write_text(json.dumps(AUTH))
-    (login / "auth.json").chmod(0o600)
-    login.chmod(0o500)
+    (login / "auth.json").chmod(auth_mode)
+    login.chmod(home_mode)
     request.addfinalizer(lambda: login.chmod(0o700))
     check_login_home(login)
-    name = f"rbench-live-{RUN}-readonly-login"
+    name = f"rbench-live-{RUN}-unwritable-login-{oct(home_mode)[2:]}-{oct(auth_mode)[2:]}"
     project = TrialProject.create(tmp_path / "trial", name, agent.ref, proxy, codex_login=login)
     request.addfinalizer(project.down)
     project.up()
 
-    with pytest.raises(TrialError, match="can use the Codex login home .*: cannot create files"):
+    with pytest.raises(TrialError, match=f"can use the Codex login home .*: {reason}"):
         prepare(project, shim_settings({}), CODEX_CONFIG)
     link = run(project, "test", "-e", "/home/node/.codex/auth.json")
     assert link.returncode != 0
+    assert json.loads((login / "auth.json").read_text()) == AUTH  # the probe changed nothing

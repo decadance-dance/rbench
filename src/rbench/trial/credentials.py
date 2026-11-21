@@ -30,9 +30,8 @@ def claude_token() -> str:
     argv = ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"]
     what = f"reading the Claude token from the Keychain item {KEYCHAIN_SERVICE!r}"
     try:
-        result = subprocess.run(
-            argv, check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
-        )
+        # Bytes: the status decides first, and undecodable output must not surface in an error.
+        result = subprocess.run(argv, check=False, capture_output=True, stdin=subprocess.DEVNULL)
     except OSError as e:
         raise TrialError(f"{what}: cannot run security (macOS only): {e.strerror}") from None
     if result.returncode == ITEM_NOT_FOUND:
@@ -46,9 +45,13 @@ def claude_token() -> str:
             f"{what}: security exited {result.returncode}: the Keychain may be locked or refused"
             " access; unlock it (`security unlock-keychain`) and allow access to the item"
         )
-    token = result.stdout.removesuffix("\n")
-    if not token or not token.isascii() or not token.isprintable() or " " in token:
-        raise TrialError(f"{what}: the item does not hold one line of printable ASCII text")
+    invalid = TrialError(f"{what}: the item does not hold one line of printable ASCII text")
+    try:
+        token = result.stdout.decode("ascii").removesuffix("\n")
+    except UnicodeDecodeError:
+        raise invalid from None
+    if not token or not token.isprintable() or " " in token:
+        raise invalid
     return token
 
 

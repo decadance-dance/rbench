@@ -55,16 +55,19 @@ TRANSCRIPT = re.compile(
 )
 # Writes stdin to "$1" with mode "$2", in the container and as the exec's user.
 WRITE = 'umask 077 && cat > "$1" && chmod "$2" "$1"'
-# What Codex needs of its login home, tried as the trial's user (design D5): read `auth.json`,
-# create its temporary save file next to it, and open the lock for writing. Opening touches no
-# content; the probe file is a transient `.auth-*` file and is removed.
+# What Codex needs of its login home, tried as the trial's user (design D5): read `auth.json` and
+# open it for writing (Codex 0.171.0 does before it replaces it), create its temporary save file
+# next to it, and open the lock for writing. `<>` and `>>` open without truncating, so no content
+# changes; the probe file is a transient `.auth-*` file and is removed. `true`, not `:`: a failed
+# redirection on a special builtin exits the shell without the reason.
 LOGIN_PROBE = f"""\
 cd {CODEX_LOGIN} || exit 1
-{{ : < auth.json; }} 2>/dev/null || {{ echo "cannot read auth.json" >&2; exit 1; }}
+{{ true < auth.json; }} 2>/dev/null || {{ echo "cannot read auth.json" >&2; exit 1; }}
+{{ true 1<> auth.json; }} 2>/dev/null || {{ echo "cannot write auth.json" >&2; exit 1; }}
 probe=$(mktemp -p . .auth-probe.XXXXXX 2>/dev/null) || {{ echo "cannot create files" >&2; exit 1; }}
 rm -f "$probe"
 if [ -e auth.json.lock ]; then
-  {{ : >> auth.json.lock; }} 2>/dev/null || {{ echo "cannot write auth.json.lock" >&2; exit 1; }}
+  {{ true >> auth.json.lock; }} 2>/dev/null || {{ echo "cannot write auth.json.lock" >&2; exit 1; }}
 fi
 """
 LOG_FILE = "shim.jsonl"
@@ -117,6 +120,7 @@ def _exec(
             check=False,
             capture_output=True,
             text=True,
+            errors="replace",
             input=stdin,
             stdin=None if stdin is not None else subprocess.DEVNULL,
             env=host_env(),
@@ -188,6 +192,9 @@ def collect(project: TrialProject, image: Image, dest: Path) -> list[str]:
     changed = docker("diff", container, what=f"{where}: listing written files", secrets=secrets)
     written = (line[2:] for line in changed.splitlines() if line[:2] in ("A ", "C "))
     found = sorted(path for path in written if TRANSCRIPT.search(path))
+    if project.claude_token and any(project.claude_token in path for path in found):
+        # The path itself would reach an argv, the run directory and the result.
+        raise TrialError(f"{where}: a transcript's path holds the Claude token; nothing copied")
     for path in found:
         target = dest / TRANSCRIPTS_DIR / path.lstrip("/")
         target.parent.mkdir(parents=True, exist_ok=True)
