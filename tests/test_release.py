@@ -167,6 +167,39 @@ def test_older_version_targets_the_commit_of_its_own_manifest(
     assert targets == [("tasks-ours-v1", v1), ("tasks-ours-v2", v2)]
 
 
+def test_set_and_manifest_paths_are_literal_for_git(tmp_path: Path, fake_bin: FakeBin) -> None:
+    # As a glob, `tasks[1]` also matches `tasks1`.
+    repo = tmp_path / "repo"
+    set_dir = public_set(repo / "tasks[1]")
+    first = commit(repo, "bracketed set")
+    public_set(repo / "tasks1", content={"t-1": "another archive\n"})
+    commit(repo, "plain set")
+    (repo / "tasks1" / "ours" / "untracked.txt").write_text("not part of the released set\n")
+    archives = local_archives(tmp_path / "archives")
+
+    publish_release(set_dir, "ours", archives)
+
+    [create] = creates(fake_bin)
+    assert create["argv"][create["argv"].index("--target") + 1] == first
+
+
+def test_release_refuses_a_target_commit_without_the_whole_set(
+    tmp_path: Path, fake_bin: FakeBin
+) -> None:
+    repo = tmp_path / "repo"
+    set_dir = public_set(repo / "tasks")
+    git(repo, "init", "-q")
+    git(repo, "add", str(set_dir / MANIFEST_FILE))
+    git(repo, "commit", "-q", "-m", "manifest only")
+    manifest_only = git(repo, "rev-parse", "HEAD")
+    commit(repo, "task directories")
+    archives = local_archives(tmp_path / "archives")
+
+    with pytest.raises(TaskError, match=f"at commit {manifest_only}, which last changed its"):
+        publish_release(set_dir, "ours", archives)
+    assert gh_args(fake_bin) == []
+
+
 def test_release_refuses_a_manifest_commit_missing_on_github(
     tmp_path: Path, fake_bin: FakeBin
 ) -> None:

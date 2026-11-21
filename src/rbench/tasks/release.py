@@ -110,25 +110,40 @@ def _gh(args: list[str], what: str, **kwargs) -> str:
 
 
 def _manifest_commit(set_dir: Path) -> str:
-    """The commit that last changed the manifest of `set_dir`, which must be fully committed."""
+    """The commit that last changed the manifest of `set_dir`, holding the whole set as it is now.
+
+    The set must be committed, and the set directory at that commit must equal the working tree,
+    so the release's source holds every task the manifest lists.
+    """
     found = _git(set_dir, ["rev-parse", "--show-toplevel"], f"{set_dir} is not in a git repository")
     root = Path(found.strip())
-    rel_set = _repo_path(root, set_dir)
-    rel_manifest = _repo_path(root, set_dir / MANIFEST_FILE)
+    # Literal pathspecs: a task root such as `tasks[1]` must not match `tasks1` as a glob.
+    literal_set = f":(literal){_repo_path(root, set_dir)}"
+    literal_manifest = f":(literal){_repo_path(root, set_dir / MANIFEST_FILE)}"
     status = _git(
         root,
-        ["status", "--porcelain", "--untracked-files=all", "--", rel_set],
+        ["status", "--porcelain", "--untracked-files=all", "--", literal_set],
         f"cannot read the git status of {set_dir}",
     )
     if status.strip():
         raise TaskError(f"{set_dir} has uncommitted changes; commit the set before releasing it")
     commit = _git(
         root,
-        ["log", "-1", "--format=%H", "HEAD", "--", rel_manifest],
+        ["log", "-1", "--format=%H", "HEAD", "--", literal_manifest],
         f"cannot find the commit of {set_dir / MANIFEST_FILE}",
     ).strip()
     if not commit:
         raise TaskError(f"{set_dir / MANIFEST_FILE} is not committed")
+    differs = _git(
+        root,
+        ["diff", "--name-only", commit, "--", literal_set],
+        f"cannot compare {set_dir} with commit {commit}",
+    )
+    if differs.strip():
+        raise TaskError(
+            f"{set_dir} at commit {commit}, which last changed its manifest, differs from the set"
+            " being released; commit the tasks together with the manifest change"
+        )
     return commit
 
 

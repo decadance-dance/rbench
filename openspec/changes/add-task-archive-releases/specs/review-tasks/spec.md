@@ -7,7 +7,7 @@
 GitHub release tagged `tasks-<set>-v<version>`, with one asset per distinct archive, named by its
 SHA-256. Every archive SHALL match the SHA-256 its task records before anything is uploaded. The
 release SHALL target the commit that last changed the set's manifest, which SHALL already be on
-GitHub; a set with uncommitted changes SHALL be refused.
+GitHub and SHALL hold the set exactly as released; a set with uncommitted changes SHALL be refused.
 
 #### Scenario: Older version published later
 - **WHEN** version 1 of a set is released from a checkout of the commit that recorded it, after
