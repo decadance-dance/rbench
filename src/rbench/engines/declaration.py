@@ -25,7 +25,8 @@ rreview by commit or tag, code-review by the Claude Code version, ...) is checke
 
 import re
 import tomllib
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from rbench.engines.pins import check_ref, model_cli
@@ -79,11 +80,21 @@ class Engine:
     pin_ref: str
     clis: dict[str, str]  # CLI name -> exact version
     roles: dict[str, Role]
+    # CLI -> {input name -> SHA-256}: content hashes of files a session on that CLI reads, which
+    # join the settings of every configuration on it (`plain`: its schema and Codex catalog).
+    inputs: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @property
     def version(self) -> str:
         """The engine's exact version; for kind `cli`, the version of that CLI."""
         return self.clis[self.pin_ref] if self.pin_kind == "cli" else self.pin_ref
+
+    def inputs_for(self, clis: Iterable[str]) -> tuple[tuple[str, str], ...]:
+        """The input hashes of a configuration whose models run on `clis`, sorted."""
+        merged: dict[str, str] = {}
+        for cli in clis:
+            merged |= self.inputs.get(cli, {})
+        return tuple(sorted(merged.items()))
 
     def default_configuration(self) -> dict[str, Setting]:
         """The declared default of every role (a matrix entry with `default: true`)."""
@@ -176,4 +187,9 @@ def load_engine(path: Path) -> Engine:
         data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise DeclarationError(f"{path}: not a valid UTF-8 TOML file: {e}") from e
-    return parse_engine(data, str(path))
+    engine = parse_engine(data, str(path))
+    if engine.name == "plain":
+        from rbench.engines.plain import bind  # plain imports this module
+
+        engine = bind(engine, Path(path).parent)
+    return engine

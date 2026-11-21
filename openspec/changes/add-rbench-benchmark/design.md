@@ -697,11 +697,19 @@ anywhere.
 ### D12. `plain` through each CLI's own options
 **Choice.**
 - The prompt and schema live in `engines/plain/` (`prompt.md`, `findings.schema.json`).
-- Claude: `claude -p --tools Read,Grep,Glob,Bash --json-schema <schema>`.
+- Claude: `claude -p --tools Read,Grep,Glob,Bash --permission-mode dontAsk --allowedTools Bash
+  --output-format json --json-schema <schema>`. `--tools` limits the built-in tools; `-p` denies
+  a call that asks for permission, and Bash asks, so `--allowedTools Bash` approves the shell
+  and `dontAsk` keeps denying every other call that would ask, instead of approving all of them
+  as `bypassPermissions` would. The container is the sandbox (as in D6). `dontAsk` is a mode of
+  the pinned Claude Code 2.1.316 (`claude --help`). The findings are the result's
+  `structured_output`.
 - Codex: `codex exec --output-schema <schema> -c web_search=disabled -c features.goals=false
   -c features.view_image=false -c features.image_generation=false -c features.apps=false
   -c agents.enabled=false -c tools.experimental_request_user_input.enabled=false
-  -c model_catalog_json=<catalog>`; the container is the sandbox (as in D6).
+  -c model_catalog_json=<catalog>`, with `--sandbox danger-full-access` and
+  `--output-last-message <file>`, whose content is the findings; the container is the sandbox
+  (as in D6).
   - `agents.enabled=false` turns off the subagent tools. That holds because the trial's config
     is clean: an explicit `features.multi_agent_v2=true` would take precedence over it.
   - `features.apps=false` turns off the apps connectors and the plugin-install suggestion, which
@@ -721,8 +729,12 @@ anywhere.
     `code_mode` features;
   - `experimental_supported_tools = []`: no clock, sleep or asynchronous messaging tools.
 
-  The catalog is generated per CLI version. The hash of the transformed file that the trial opens
-  is part of the configuration's settings.
+  The catalog is generated per CLI version and committed as
+  `engines/plain/codex-catalog-<version>.json`, so planning hashes it without Docker and
+  `rbench plan` gives the same ids as the run. `python -m rbench.engines.catalog --image <agent
+  image>` writes it from the real CLI in the agent image, with no network and no login (#47 did
+  so for 0.171.0). The hash of the transformed file that the trial opens is part of the
+  configuration's settings.
 - Checked with Codex CLI 0.167.0 and Claude Code against a local endpoint that records requests:
   - Codex by default sends `apply_patch`, `exec_command`, `write_stdin`, `view_image`,
     `web_search`, the goal tools, `tool_search` and `request_user_input`. With the 0.167.0
@@ -759,6 +771,16 @@ anywhere.
     proxy. The smoke stage reads the request-body tool list for both Codex matrix models through
     the proxy (Risks).
 - Model and effort come from the matrix, and the hermetic shims (D5) apply as for every engine.
+- Settings (#47): the engine's version is the prompt's SHA-256 (`engines/plain.toml` pins it, so
+  editing the prompt needs a new pin), and `inputs` holds the findings schema's hash and, for a
+  Codex model, the catalog's. The prompt goes on stdin. Before a launch the adapter rehashes the
+  three files and refuses any that differ from the frozen plan, so a run never mixes trials of two
+  prompts, schemas or catalogs. The answer is validated against the schema by rbench itself; an
+  answer off the schema, or one whose objects repeat a key, makes the trial `failed`, and the
+  error names the place and the rule, never the answer's text. A reviewer runs one model:
+  planning refuses a `models` set for `plain` (`model = [...]` plans one configuration per
+  model), and the plan reader accepts `inputs` only on `plain`, with exactly its provider's keys.
+  The argv log check requires the schema, the catalog and every switch in the argv the CLI got.
 
 **Alternative considered:** give `plain` only the diff, with no tools. It is cheaper, but it would
 measure a different task from the engines, which all read the repository.

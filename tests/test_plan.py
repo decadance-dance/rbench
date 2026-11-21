@@ -5,11 +5,12 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from conftest import PLAIN_PROMPT_SHA256, write_plain_files
 from test_tasks import HIDDEN, write_task
 
 from rbench.cli import main
 from rbench.engines.declaration import load_engine, parse_engine
-from rbench.matrix.expansion import Configuration, RoleSetting
+from rbench.matrix.expansion import Configuration, RoleSetting, configuration
 from rbench.plan.estimate import (
     DEFAULT_ENGINE_TOKENS,
     DEFAULT_JUDGE_TOKENS,
@@ -22,7 +23,7 @@ from rbench.plan.estimate import (
 )
 from rbench.tasks import HIDDEN_CONFIG_FILE, HIDDEN_DIR_ENV, HIDDEN_ID_PREFIX
 
-PROMPT = "ab" * 32
+PROMPT = PLAIN_PROMPT_SHA256
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 ENGINES = {
     "plain": f"""
@@ -90,6 +91,7 @@ def manifest(task_set: str, ids: list[str]) -> str:
 def bench(tmp_path: Path) -> Path:
     for name, text in ENGINES.items():
         write(tmp_path / "engines" / f"{name}.toml", text)
+    write_plain_files(tmp_path / "engines", "0.167.0")
     core = {"version": 3, "tasks": [f"task-{i}" for i in range(10)]}
     write(tmp_path / "tasks" / "core.json", json.dumps(core))
     write(tmp_path / "tasks" / "reviewbench" / "manifest.json", manifest("reviewbench", ["rb-1"]))
@@ -110,14 +112,12 @@ def plan(bench: Path, matrix: Path, *extra: str) -> list[str]:
 def default_config(bench: Path, name: str) -> Configuration:
     e = load_engine(bench / "engines" / f"{name}.toml")
     roles = sorted(e.default_configuration().items())
-    return Configuration(
-        e.name, e.version, tuple((r, RoleSetting((s.model,), s.effort)) for r, s in roles)
-    )
+    return configuration(e, [(r, RoleSetting((s.model,), s.effort)) for r, s in roles])
 
 
 def plain(bench: Path, model: str, effort: str) -> Configuration:
     e = load_engine(bench / "engines" / "plain.toml")
-    return Configuration("plain", e.version, (("reviewer", RoleSetting((model,), effort)),))
+    return configuration(e, [("reviewer", RoleSetting((model,), effort))])
 
 
 def smoke_file(bench: Path, configurations: dict) -> Path:
