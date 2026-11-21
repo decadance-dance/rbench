@@ -119,9 +119,13 @@ def _run(args: argparse.Namespace) -> int:
             runs_dir=args.runs,
             run_id=args.run_id,
         )
-        trials = len(load_plan(run_dir).trials)
     except (OSError, ValueError) as e:
         print(f"rbench run: {e}", file=sys.stderr)
+        return ExitCode.ERROR
+    try:
+        trials = len(load_plan(run_dir).trials)
+    except (OSError, ValueError):
+        print("rbench run: cannot read the newly created plan.json", file=sys.stderr)
         return ExitCode.ERROR
     print(f"created {run_dir}: {trials} trials pending")
     print("rbench run: the trial executor is not implemented yet", file=sys.stderr)
