@@ -902,6 +902,24 @@ measure a different task from the engines, which all read the repository.
   | `rreview` | panel × coordinator × judge | 2 × 3 × 2 |
   | **Total** | | **33** |
 
+- `code-review` runs Claude Code's built-in `/code-review` on the PR from the `reviewed` checkout
+  (#48). The command goes by stdin, `/code-review <PR number>\n`, to
+  `claude -p --permission-mode bypassPermissions --output-format json`, and the D5 shim adds the
+  model, the effort, the policy flags and the session id. The engine is pinned by the Claude Code
+  version (pin kind `cli`) and outputs Markdown: the result's `result` text goes through D9.
+  Checked offline with Claude Code 2.1.316, against a local recording endpoint with every other
+  connection denied and no model call:
+  - From stdin in `-p`, the command expands inline in the root session (no fork) to a prompt with
+    "Review target: `<n>`". That fixes the target only: no model ran, so which tools the review
+    then calls was not observed. If it reads the PR with `gh`, it gets the D4 stub, which answers
+    the local `gh pr view` and `gh pr diff` forms, rejects other options and fields, and has no
+    network path (its own tests, not this check, establish that).
+  - The request carries the session's `--model` and `--effort`. With no level typed after the
+    command, the review runs at the session's effort, so the adapter types none. A typed level
+    would also be saved in the home and reused by later reviews.
+  - With JSON output it reports in prose, not through its findings tool.
+  - An API error still ends with `subtype` `success` but an empty `modelUsage`, so a result with
+    no model usage fails the trial.
 - `codex-review` runs the built-in review from the `reviewed` checkout:
 
   ```sh
@@ -922,6 +940,21 @@ measure a different task from the engines, which all read the repository.
   record has
   `payload.type = "item_completed"` and `payload.item.type = "ExitedReviewMode"`. The
   `payload.item.review_output` holds the findings with priority and file/line ranges.
+- `codex-review` is a structured engine: each finding of `review_output` (0.171.0
+  `ReviewFinding`) has a file and a line range, so it becomes a finding without the D9 step. The
+  adapter (#49, `rbench.engines.codex_review`) makes `absolute_file_path` relative to the
+  checkout, takes `line_range` as the lines, the title and body as the message, and `P<priority>`
+  as the engine's own label. The result is read from the rollout of the one root thread the launch
+  bound: the collected rollout whose session_meta names no `parent_thread_id` (the review thread
+  names its parent at the top level, with source `subagent: review`). The result must have the
+  pinned `ReviewOutputEvent` shape, with no key repeated in its rollout line; a finding outside
+  the checkout, a priority outside 0 to 3 or a bad range rejects the result whole. The launch
+  check reads the argv the CLI got (only the D5 policy flags added) and the working directory
+  `/rbench/repo`. A `review_output` that is null (an aborted review), or Codex's
+  fallback for a reviewer answer it cannot parse as JSON (no findings and an empty
+  `overall_correctness`, the text kept in `overall_explanation`), fails the trial instead of
+  scoring zero findings. The parent thread (`-m`) and the review thread (`review_model`) both
+  request the role's model and effort; #46 records what applied to each.
 - review-council: the Claude side is the main session (orchestrator and judge) plus the subagents
   `reviewer-claude`, `reviewer-security` and the Claude verifier, all `model: inherit`, so the
   session's `--model` and `--effort` set them. The Codex side is the Codex reviewer and verifier,
