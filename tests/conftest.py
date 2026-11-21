@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 FAKE_BIN = Path(__file__).parent / "fixtures" / "bin"
-FAKE_TOOLS = ("claude", "codex", "docker", "gh")
+FAKE_TOOLS = ("claude", "codex", "docker", "gh", "security")
 REPO = Path(__file__).parents[1]
 # A synthetic `plain` prompt for engine directories built in tmp_path; its hash is the pin.
 PLAIN_PROMPT = b"Review the change and report its defects.\n"
@@ -51,7 +51,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 @dataclass
 class FakeBin:
-    """Fake `claude`, `codex`, `docker` and `gh` first on PATH; see tests/fixtures/bin/fake."""
+    """Fake `claude`, `codex`, `docker`, `gh` and `security` first on PATH; see
+    tests/fixtures/bin/fake."""
 
     log: Path
     monkeypatch: pytest.MonkeyPatch
@@ -75,4 +76,5 @@ def fake_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeBin:
     monkeypatch.setenv("PATH", path)
     monkeypatch.setenv("RBENCH_FAKE_LOG", str(log))
     monkeypatch.delenv("RBENCH_FAKE_SCENARIO", raising=False)
+    monkeypatch.delenv("RBENCH_FAKE_ENV", raising=False)
     return FakeBin(log, monkeypatch)
