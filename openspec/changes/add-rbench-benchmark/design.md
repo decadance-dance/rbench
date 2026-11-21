@@ -265,7 +265,8 @@ server or build step, and opens from disk as the spec requires.
   - adds the model and effort flags for engines whose adapter passes them by flag, and only when
     the engine's argv has none of its own;
   - logs the argv and what binds the launch to its sessions (below);
-  - execs the real binary.
+  - starts the real binary as its own child, with the engine's stdio unchanged, forwards signals to
+    it and exits with its status.
 - Shim settings and log. Before the engine starts, the runner writes one settings file at a fixed
   path in the container, read-only to every trial process. It holds only the trial's public launch
   settings (the policy flags, and the model and effort for roles delivered by flag) and the log
@@ -273,25 +274,46 @@ server or build step, and opens from disk as the spec requires.
   starts in the container under another user, reached through a Unix socket. It stamps each record
   with the sender's process id from the socket's peer credentials (`SO_PEERCRED`) and appends it to
   a file that trial processes cannot write. An engine can add records but cannot change or remove
-  recorded ones, and a record's process id is the kernel's.
-- Session binding. Each session in the trial's transcripts must be bound to exactly one shim
-  launch by a link the engine does not choose:
+  recorded ones.
+- Threat model of the audit (decided). The audit detects a CLI session started without the shims:
+  an engine, or a model's shell command, that runs the real binary by path, by accident or on
+  purpose. It does not defend against a process inside the container that forges the shims' or
+  hooks' records; that is out of scope (Risks). Within this model:
+  - The shim is the launcher. It registers with the collector, starts the CLI as its own child, and
+    records that child's process id from its own `fork`, not from a value a peer reports. Its
+    watcher is a second child of the shim.
+  - The collector accepts launch and binding records only from the shim and watcher pair it
+    registered for that launch. It accepts hook records from any process, because a hook record of
+    an unregistered CLI process is the evidence of a bypass.
+- Session binding. Each root session in the trial's transcripts must have exactly one origin launch:
+  the registered shim launch that started it. It may also have any number of resume launches, each a
+  registered shim launch that reopened the same session. rreview's wrap-up, which resumes a pass
+  (Claude `--resume`, Codex `exec resume`), is the known user of resumes. A resume never stands in
+  for the origin: a session with resumes but no origin marks the trial contaminated.
   - Claude: a SessionStart hook in the managed settings logs each session Claude Code actually
-    starts: its `session_id`, its `source` (`startup`, `resume` or `fork`) and the process id of
-    the `claude` process, which is the shim's, since the shim execs. The hook runs for sessions
-    started without the shim too. Checked offline with Claude Code 2.1.316 (#25): it reported the
-    real id for a fresh session, `--continue`, `--resume` and `--resume --fork-session`, and it
-    still ran with `--safe-mode`, `--setting-sources user` and `disableAllHooks` set in the user
-    settings, in `--settings` and in the project's `.claude/settings.json`. Subagent transcripts lie
-    under their parent session (`<session>/subagents/`) and are bound through it.
+    starts: its `session_id`, its `source` (`startup`, `resume` or `fork`) and the process id of the
+    `claude` process it runs under. The audit joins that process id with the child process ids the
+    shims recorded. `startup` and `fork` make the launch the session's origin, and `resume` a resume
+    launch of the same id. The hook runs for sessions started without the shim too. Checked offline
+    with Claude Code 2.1.316 (#25): it reported the real id for a fresh session, `--continue`,
+    `--resume` and `--resume --fork-session`, and it still ran with `--safe-mode`,
+    `--setting-sources user` and `disableAllHooks` set in the user settings, in `--settings` and in
+    the project's `.claude/settings.json`. Subagent transcripts lie under their parent session
+    (`<session>/subagents/`) and are bound through it.
   - Codex: Codex has no option to set the session id, and the id appears only in the output, in a
-    form that depends on the output mode. Before it execs, the shim forks a watcher that polls the
-    open files of its own process, which becomes Codex (same process id), and of that process's
-    descendants. The watcher logs every rollout file (`sessions/**/rollout-*.jsonl`) they open,
-    with the thread id from its `session_meta`. Checked offline with Codex CLI 0.171.0 (#25):
-    `codex exec` keeps its rollout open for the whole session, and `codex exec review` opens both
-    the parent rollout and the review thread's rollout in the same process. A child thread is bound
-    when the same launch opened it and its `parent_thread_id` names a root thread of that launch.
+    form that depends on the output mode. The shim's watcher polls the open files of the CLI child
+    the shim started, and of that child's descendants. It binds a rollout file
+    (`sessions/**/rollout-*.jsonl`) only while the CLI holds it open for writing: the flags in
+    `/proc/<pid>/fdinfo` must include write or read-write access and append. A file that is only
+    read, such as by Codex's metadata reader for existing rollouts, binds nothing. The watcher logs
+    the thread id from the rollout's `session_meta`. A launch that opens a rollout with no earlier
+    binding is its origin. A launch that reopens a bound rollout for append, as `codex exec resume`
+    does without writing a new `session_meta`, is a resume launch. Checked offline with Codex CLI
+    0.171.0 (#25): `codex exec` keeps its rollout open for read-write and append (`O_RDWR |
+    O_APPEND`) for the whole session, `codex exec resume <id>` reopens the same file the same way,
+    and `codex exec review` holds both the parent rollout and the review thread's rollout in the
+    same process. A child thread is bound when the same launch opened it for writing and its
+    `parent_thread_id` names a root thread of that launch.
     `session_id` and `thread_source` alone are not trusted. If a session ends between two polls,
     its rollout is unbound, and the trial fails closed (see the audit).
   - Rejected: matching rollouts to launches by `CODEX_HOME`, working directory and time. That only
@@ -303,9 +325,9 @@ server or build step, and opens from disk as the spec requires.
     the engine's stdio, and it depends on the output mode.
 - The audit discovers transcripts on its own: every Claude transcript (`projects/**/*.jsonl`) and
   every Codex rollout anywhere in the trial container's writable filesystem, not only in the homes
-  the shim log names. A session with no binding, a session bound to two launches, a hook record or
-  watcher record whose process id matches no shim launch, or a child thread whose lineage does not
-  reach a bound root marks the trial contaminated.
+  the shim log names. Any of these marks the trial contaminated: a session with no origin launch,
+  a session with two origin launches, a hook record whose `claude` process no shim started, or a
+  child thread whose lineage does not reach a bound root.
 - An engine's own model and effort must equal the planned role's. The adapter builds the engine's
   options from the plan: rreview's `--role-model` and `--role-effort`, and `codex-review`'s `-m`,
   `review_model` and `model_reasoning_effort`. The audit reads the model and effort that applied to
@@ -750,7 +772,8 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
 
 **Alternatives considered:**
 - *The `claude` shim tees stdout and logs `rate_limit_event` lines.* It breaks D5's rule that the
-  shim execs the real binary, and it sees the event only for engines that use stream-json.
+  shim leaves the engine's stdio unchanged, and it sees the event only for engines that use
+  stream-json.
 - *Not enforcing the soft threshold for Claude.* The share is available at the cost of one small
   call per check, so this stays only as the fallback.
 
@@ -817,6 +840,12 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
   no proxy. The rreview judge and its wrap-up resume never ran. The D3 proxy, other models and
   efforts, and continuations and forks are left to the smoke stage, and so is a new engine or CLI
   version.
+- **[A process inside the container forges the audit's records.]** → Out of scope (decided). The
+  audit detects sessions started without the shims, not forged shim, watcher or hook records: a
+  process running as the trial's user could send records to the collector or fake a hook's parent.
+  Tolerated because what such a process could gain is small. Engines' writes are not scored, the
+  container is torn down after the trial, and the network policy (D3 proxy, managed configuration)
+  is enforced below the shims, so a forged record cannot reach the network or the ground truth.
 - **[A session can escape the binding.]** → The Codex watcher polls, so a session that opens and
   closes its rollout between two polls stays unbound and fails its trial closed (D5). The smoke
   stage counts such false alarms. The Claude binding depends on the managed SessionStart hook. Only
