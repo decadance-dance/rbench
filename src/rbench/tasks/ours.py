@@ -50,7 +50,7 @@ from rbench.tasks.importing import (
     _title_and_body,
     _write_task,
 )
-from rbench.tasks.license import LicenseError, LicenseLookupError
+from rbench.tasks.license import LicenseError, LicenseLookupError, read_license
 from rbench.tasks.loader import COMMIT, HIDDEN_ID_PREFIX, REPO, TASK_ID, TaskError
 from rbench.tasks.manifest import (
     MANIFEST_FILE,
@@ -100,7 +100,7 @@ SEVERITY_RULE = {
     "should": "every other item",
 }
 NIT = re.compile(r"[\s*_>`]*(?:nits?|nitpick|minor|optional|style|typo)\b", re.IGNORECASE)
-BLOCKING = re.compile(r"\([^)\n]*\bblocking\b[^)\n]*\)", re.IGNORECASE)
+DECORATIONS = re.compile(r"\(([^)\n]*)\)")
 HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@")
 PAGE = 100
 REVIEW_STATES = ("APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING")
@@ -160,7 +160,9 @@ def pre_label(body: str, review_state: str | None) -> str:
     first = body.lstrip().split("\n", 1)[0]
     if NIT.match(body):
         return "nit"
-    if BLOCKING.search(first) or review_state == "CHANGES_REQUESTED":
+    # A Conventional Comments decoration is one token of a comma list: `(blocking, security)`.
+    tokens = {t.strip().lower() for d in DECORATIONS.findall(first) for t in d.split(",")}
+    if "blocking" in tokens or review_state == "CHANGES_REQUESTED":
         return "must"
     return "should"
 
@@ -520,7 +522,10 @@ def _commit_files(repo: str, sha: str, label: str) -> dict[str, tuple[str, str, 
 
 
 def _language(repo: str) -> str:
+    """The primary language of a public `repo`; a private one is refused before anything else."""
     reply = _gh_object(["api", f"repos/{repo}"], repo)
+    if reply.get("private") is not False:
+        raise TaskImportError(f"{repo} is not public; only public repositories are mined")
     language = reply.get("language")
     if not (isinstance(language, str) and language.strip()):
         raise TaskImportError(f"{repo}: GitHub reports no language")
@@ -528,10 +533,12 @@ def _language(repo: str) -> str:
 
 
 def mine(window: Window) -> tuple[list[Mined], dict[str, str]]:
-    """The PRs that make tasks, up to `max_per_repo` per repository, and the skipped ones."""
-    for repo in window.repos:
-        if not REPO.fullmatch(repo):
-            raise TaskImportError(f"{repo!r} is not an owner/name repository")
+    """The PRs that make tasks, up to `max_per_repo` per repository, and the skipped ones.
+
+    A PR spends a repository's slot only once it passed every check: filters, items, D1's title
+    and description rule and the license at its reviewed head.
+    """
+    _check_window(window)
     found, skipped = [], {}
     for repo in window.repos:
         language, taken = _language(repo), 0
@@ -542,9 +549,31 @@ def mine(window: Window) -> tuple[list[Mined], dict[str, str]]:
             if isinstance(result, tuple):
                 skipped[result[0]] = result[1]
             elif result is not None:
+                try:
+                    read_license(repo, result.pr.head)
+                except LicenseLookupError:
+                    raise
+                except LicenseError as err:
+                    skipped[result.task_id] = f"license refused: {err}"
+                    continue
                 found.append(result)
                 taken += 1
     return found, skipped
+
+
+def _check_window(window: Window) -> None:
+    """Refuse a window that reaches outside the approved one, or a malformed one."""
+    for repo in window.repos:
+        if not REPO.fullmatch(repo):
+            raise TaskImportError(f"{repo!r} is not an owner/name repository")
+    if not MERGED_AFTER <= window.merged_after < window.merged_before <= MERGED_BEFORE:
+        raise TaskImportError(
+            f"the window {window.merged_after} to {window.merged_before} must lie inside"
+            f" {MERGED_AFTER} to {MERGED_BEFORE}, after the matrix's training cutoffs (design D15)"
+        )
+    limits = (window.max_per_repo, window.max_changed_lines, window.max_changed_files)
+    if any(type(n) is not int or n < 1 for n in limits):
+        raise TaskImportError("the window's limits must be positive integers")
 
 
 def write_label_sheet(path: Path, window: Window = Window()) -> int:
