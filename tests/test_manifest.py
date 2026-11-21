@@ -19,6 +19,7 @@ from rbench.tasks import (
     GROUND_TRUTH_FILE,
     HIDDEN_CONFIG_FILE,
     HIDDEN_DIR_ENV,
+    HIDDEN_ID_PREFIX,
     MANIFEST_FILE,
     TASK_FILE,
     ChangelogEntry,
@@ -573,14 +574,15 @@ def test_edit_under_the_committed_version_fails(tmp_path: Path) -> None:
 
 
 def test_append_only_error_gives_a_hidden_task_by_position(tmp_path: Path) -> None:
-    changed = {"h-a": "1" * 64, "h-b": "2" * 64}
+    a, b = f"{HIDDEN_ID_PREFIX}a", f"{HIDDEN_ID_PREFIX}b"
+    changed = {a: "1" * 64, b: "2" * 64}
     entry = ChangelogEntry(1, "Initial import.", changed)
     tasks = {k: ManifestTask(v, None) for k, v in changed.items()}
     base = Manifest("hidden", 1, tasks, (entry,), tmp_path / MANIFEST_FILE)
-    edited = replace(entry, changed={**changed, "h-b": "3" * 64})
+    edited = replace(entry, changed={**changed, b: "3" * 64})
     with pytest.raises(TaskError, match=r"\('changed' entries 1 changed\)") as err:
         check_version_history(base, replace(base, changelog=(edited,)))
-    assert "h-b" not in str(err.value)
+    assert b not in str(err.value)
     with pytest.raises(TaskError, match=r"\(its note changed\)"):
         check_version_history(base, replace(base, changelog=(replace(entry, note="Other."),)))
 

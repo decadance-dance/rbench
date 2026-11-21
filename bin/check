@@ -1,9 +1,11 @@
 #!/bin/sh
-# The merge gate (CI job `ci-ok`): format, lints, tests. Every step runs; any failure fails.
+# The merge gate (CI job `ci-ok`): format, lints, tests and the publication guard.
+# Every step runs; any failure fails.
 cd "$(dirname "$0")/.." || exit 1
 [ -f pyproject.toml ] || { echo "bin/check: no pyproject.toml yet, nothing to check"; exit 0; }
 status=0
 uv run --locked ruff format --check || status=1
 uv run --locked ruff check || status=1
 uv run --locked pytest -q || status=1
+uv run --locked python -m rbench.tasks.guard public || status=1
 exit $status
