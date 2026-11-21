@@ -892,12 +892,23 @@ measure a different task from the engines, which all read the repository.
   - The launch is `claude -p "/review-council:run" --plugin-dir /opt/rbench/plugins/review-council
     --setting-sources user --allowedTools "Bash Read Grep Glob Agent Skill Write" --output-format
     stream-json --verbose`, spike #25's, without the PR number: the plugin then finds the PR of
-    the current branch with `gh pr view`, which the gh stub answers. The report is the `result`
-    of the final `result` event, Markdown for the D9 step.
-  - `config.local.yml` is written into the checkout before the launch. review-council's config
-    reader ignores both config files without mikefarah yq v4, so the agent image installs a pinned
-    yq with every plugin (`build_agent_image(plugin=...)`, which fetches the plugin by its exact
-    commit into `/opt/rbench/plugins/<name>` and reads its `plugin.json` version back).
+    the current branch with `gh pr view`, which the gh stub answers. The report is the session's
+    last main-session text, the final `result` included, that holds the pinned report heading
+    `## Review Council Report`, from that heading on: Markdown for the D9 step. The skill may go
+    on after the report, so a session with no such text, a malformed or ambiguous stream-json
+    event (a repeated key, a truncated line) or a `result` that is not the last event is `failed`.
+  - review-council runs as a fresh install: the adapter owns the whole `.review-council/` state
+    the pinned skill reads from the checkout (`config.yml` an empty mapping, `config.local.yml`
+    ours, `learnings.md` empty), written before the launch and replacing committed copies in the
+    work tree only. The trial home's git ignore file hides them while untracked, and the adapter's
+    `prepare_checkout` marks tracked ones skip-worktree, so `git status` and `git diff` show the
+    commits as they are. review-council's config reader ignores both config files without
+    mikefarah yq v4, so the agent image installs a pinned yq with every plugin
+    (`build_agent_image(plugin=...)`, which fetches the plugin by its exact commit into
+    `/opt/rbench/plugins/<name>` and reads its `plugin.json` version back).
+  - Adapter checkout hook: an adapter may define `prepare_checkout(run)`; the executor calls it
+    with `repository.agent_runner` after writing `Launch.files` and before the engine starts. It
+    must be idempotent and touch nothing but the adapter's own paths.
   - `misconfigured`: the shim log shows a Codex session launch with its own model, effort or
     profile, or `--ignore-user-config` (config.toml then did not apply), a rewrite other than the
     sandbox, or a Claude session without the Claude side's `--model` and `--effort`; and a
