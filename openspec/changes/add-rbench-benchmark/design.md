@@ -390,10 +390,10 @@ limit stops the run by default; waiting for the reset is opt-in (`--wait`).
   macOS the operator keeps the token in the Keychain (generic password, service
   `rbench-claude-oauth`). rbench reads it at trial start and passes it to `docker` by variable name
   only (`-e CLAUDE_CODE_OAUTH_TOKEN`, value in the child's environment), so the value never appears
-  on an argv, in a file in the run dir or in an image layer. The env file the spike used
-  (`~/.config/rbench/claude-oauth.env`, outside the repository, mode 600) is a fallback for the
-  spike only. Not yet checked: the run through the proxy (D3's smoke run) and token expiry over a
-  long run.
+  on an argv, in a file in the run dir or in an image (configuration or layer). The env file the
+  spike used (`<env-file>`, outside the repository, mode 600) is a fallback for the spike only. Not
+  yet checked: whether the managed settings are enforced (the spike checked authentication only),
+  the run through the proxy (D3's smoke run) and token expiry over a long run.
 - **[Codex `auth.json` refresh races between processes.]** → One login file per trial, at most one
   Codex trial per login, and a login only the benchmark uses, so Orca and the operator's own Codex
   never share its refresh-token chain. The spike runs several Codex processes in one trial.
