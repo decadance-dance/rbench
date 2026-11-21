@@ -10,10 +10,8 @@ import subprocess
 import uuid
 
 import pytest
-from test_archive import commit, git
+from test_repository import git_bytes, plumbed_archive
 
-from rbench.tasks.archive import build_archive
-from rbench.tasks.loader import PUBLIC_CANARY_PREFIX, Task
 from rbench.trial import (
     RepositoryError,
     TrialError,
@@ -196,23 +194,16 @@ def test_failed_start_leaves_nothing_behind(request, tmp_path_factory, images):
 
 
 def test_scrubbed_repository_and_gh_stub(request, tmp_path_factory, images):
-    # A synthetic source with history before the base and a follow-up after the reviewed head.
+    # A synthetic tree no case-insensitive host could check out (`Foo` and `foo`), with a root file
+    # named `base` like the diff's base ref.
     tmp = tmp_path_factory.mktemp("task")
-    source = tmp / "source"
-    source.mkdir()
-    git(source, "init", "-q", "-b", "main")
-    commit(source, {"app.py": "x = 0\n"}, "earlier history")
-    base = commit(source, {"app.py": "x = 1\n"}, "base")
-    head = commit(source, {"app.py": "x = 2\n", "new.py": "y = 1\n"}, "change")
-    commit(source, {"app.py": "x = 3\n"}, "follow-up")
-    archive = build_archive("acme/widget", str(source), base, head, tmp / "a.bundle", "hidden")
-    task = Task("t-1", "ours", "acme/widget", 7, base, head, archive.sha256, "python",
-                "Make x two", "Sets x to 2.", PUBLIC_CANARY_PREFIX + "0" * 32, (), tmp)  # fmt: skip
+    head_files = {b"app.py": b"x = 2\n", b"Foo": b"upper\n", b"foo": b"lower\n", b"base": b"b\n"}
+    task, archive = plumbed_archive(tmp, {b"app.py": b"x = 1\n"}, head_files)
     project = new_project(request, tmp_path_factory, images, "repo")
     project.up()
     trial_dir = project.directory
 
-    state = prepare_repository(project, task, archive.path, trial_dir)
+    state = prepare_repository(project, task, archive, trial_dir)
     print(f"repository: {state}")
     print(f"repository.json: {(trial_dir / 'repository.json').read_text().strip()}")
 
@@ -225,11 +216,14 @@ def test_scrubbed_repository_and_gh_stub(request, tmp_path_factory, images):
         run(project, "git", "-C", "/rbench/repo", "log", "--format=%s").stdout == "reviewed\nbase\n"
     )
 
+    # The Linux agent keeps both paths the host could not hold.
+    assert run(project, "cat", "/rbench/repo/Foo", "/rbench/repo/foo").stdout == "upper\nlower\n"
     diff = run(project, "gh", "pr", "diff", "7")
-    assert diff.returncode == 0 and diff.stdout == git(source, "diff", base, head) + "\n"
+    expected = git_bytes(tmp / "plumbed", "diff", task.base, task.head, "--").decode()
+    assert diff.returncode == 0 and diff.stdout == expected
     view = run(project, "gh", "pr", "view", "--json", "state,comments,reviews,title")
     assert json.loads(view.stdout) == {
-        "comments": [], "reviews": [], "state": "OPEN", "title": "Make x two",
+        "comments": [], "reviews": [], "state": "OPEN", "title": "Make x three",
     }  # fmt: skip
     posted = project.exec_agent(["gh", "pr", "comment", "7", "--body-file", "-"], stdin="LGTM\n")
     assert posted.returncode == 0, posted.stderr
@@ -246,8 +240,8 @@ def test_scrubbed_repository_and_gh_stub(request, tmp_path_factory, images):
     inside = agent_runner(project, "the live trial")
     assert inspect_repository(inside, "/rbench/repo", "the live trial") == state
 
-    # The check runs inside the trial: a remote added there is refused.
+    # The check runs inside the trial: a remote added there changes the config and is refused.
     run(project, "git", "-C", "/rbench/repo", "remote", "add", "origin", "https://example.com/r")
-    with pytest.raises(RepositoryError, match="it has a remote") as e:
+    with pytest.raises(RepositoryError, match="unexpected git config") as e:
         inspect_repository(inside, "/rbench/repo", "the live trial")
     print(e.value)

@@ -16,7 +16,6 @@ from test_archive import commit, git
 from rbench.tasks.archive import ArchiveError, build_archive
 from rbench.tasks.loader import HIDDEN_ID_PREFIX, PUBLIC_CANARY_PREFIX, Task
 from rbench.trial import (
-    REPO_DIR,
     REPOSITORY_FILE,
     RepositoryError,
     RepositoryState,
@@ -24,8 +23,15 @@ from rbench.trial import (
     copy_comments,
     inspect_repository,
     prepare_repository,
+    repository,
 )
-from rbench.trial.repository import _host_runner, _take_comments, _unpack
+from rbench.trial.repository import (
+    TRIAL_ROOT,
+    _git_env,
+    _host_runner,
+    _take_comments,
+    _unpack,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 STUB = ROOT / "images" / "agent" / "gh"
@@ -80,19 +86,39 @@ def unpacked(tmp_path: Path, archive: Path, name: str = "copy") -> Path:
     return repo
 
 
-def agent_replies(tmp_path: Path, archive: Path) -> list[dict]:
-    """Fake docker replies: what the inspection prints for a copy of the archive at REPO_DIR."""
-    repo = unpacked(tmp_path, archive, "agent-copy")
-    host, replies = _host_runner("test"), []
+def git_bytes(repo: Path, *args: str, input: bytes = b"") -> bytes:
+    env = _git_env() | {
+        "GIT_AUTHOR_NAME": "dev",
+        "GIT_AUTHOR_EMAIL": "dev@example.com",
+        "GIT_COMMITTER_NAME": "dev",
+        "GIT_COMMITTER_EMAIL": "dev@example.com",
+    }
+    argv = ["git", "-C", str(repo), *args]
+    return subprocess.run(argv, env=env, input=input, capture_output=True, check=True).stdout
 
-    def record(argv: list[str]) -> str:
-        out = host(argv)
-        shown = [a.replace(str(repo), REPO_DIR) for a in argv]
-        replies.append({"match": " ".join(shown), "stdout": out})
-        return out
 
-    inspect_repository(record, str(repo), "test")
-    return replies
+def plumbed_archive(
+    tmp_path: Path, base_files: dict[bytes, bytes], head_files: dict[bytes, bytes]
+) -> tuple[Task, Path]:
+    """An archive of trees no file system has to hold: names and contents as raw bytes."""
+    repo = tmp_path / "plumbed"
+    repo.mkdir()
+    git_bytes(repo, "init", "-q")
+
+    def commit_of(files: dict[bytes, bytes], *parent: str) -> str:
+        entries = b""
+        for name, data in sorted(files.items()):
+            blob = git_bytes(repo, "hash-object", "-w", "--stdin", input=data).strip()
+            entries += b"100644 blob " + blob + b"\t" + name + b"\0"
+        tree = git_bytes(repo, "mktree", "-z", input=entries).decode().strip()
+        parents = [arg for p in parent for arg in ("-p", p)]
+        return git_bytes(repo, "commit-tree", tree, *parents, "-m", "c").decode().strip()
+
+    base = commit_of(base_files)
+    head = commit_of(head_files, base)
+    out = tmp_path / "plumbed.bundle"
+    archive = build_archive("acme/widget", str(repo), base, head, out, "hidden")
+    return make_task(tmp_path, base, head, archive.sha256), archive.path
 
 
 @pytest.fixture
@@ -108,9 +134,29 @@ def staged(monkeypatch, tmp_path: Path) -> Path:
     return captured
 
 
-def test_trial_gets_the_two_commit_repository_and_pr(fake_bin, archived, tmp_path, staged):
+@pytest.fixture
+def local_agent(monkeypatch, staged: Path) -> Path:
+    """The agent stood in by this machine: commands run here, on the staged copy of /rbench."""
+
+    def exec_agent(self, argv: list[str], stdin: str | None = None):
+        argv = [arg.replace(TRIAL_ROOT, str(staged)) for arg in argv]
+        return subprocess.run(
+            argv,
+            check=False,
+            env=_git_env(),
+            input=stdin,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+
+    monkeypatch.setattr(TrialProject, "exec_agent", exec_agent)
+    return staged
+
+
+def test_trial_gets_the_two_commit_repository_and_pr(fake_bin, archived, tmp_path, local_agent):
+    staged = local_agent
     task, archive = archived
-    fake_bin.scenario("docker", replies=agent_replies(tmp_path, archive))
     project = TrialProject.create(tmp_path / "trial", "rbench-t1", AGENT, PROXY)
 
     state = prepare_repository(project, task, archive, tmp_path / "trial")
@@ -134,16 +180,13 @@ def test_trial_gets_the_two_commit_repository_and_pr(fake_bin, archived, tmp_pat
     assert git(repo, "status", "--porcelain") == ""
     assert (repo / "app.py").read_text() == "x = 3\n"
     assert git(repo, "remote") == "" and git(repo, "tag") == ""
-    reachable = len(git(repo, "rev-list", "--objects", "--all").splitlines())
+    assert (repo / ".git/config").read_text() == repository.git_config(False)
+    reachable = len(git(repo, "rev-list", "--objects", "--no-object-names", "--all").splitlines())
     assert state == RepositoryState(
         git(repo, "rev-parse", "base"), git(repo, "rev-parse", "reviewed"), reachable
     )
     recorded = json.loads((tmp_path / "trial" / REPOSITORY_FILE).read_text())
     assert recorded == {"base": state.base, "reviewed": state.reviewed, "objects": reachable}
-    # Every check ran in the agent, against the copy there.
-    execs = [c["argv"] for c in fake_bin.calls()]
-    assert all(a[5:8] == ["exec", "-T", "agent"] for a in execs)
-    assert [a[8] for a in execs] == ["git"] * 4 + ["ls"] + ["git"] * 2
 
 
 def test_altered_archive_never_reaches_the_trial(fake_bin, archived, tmp_path, staged):
@@ -210,13 +253,15 @@ def add_object(repo: Path) -> None:
 
 STATE = "unexpected git state: 1 entries in .git"
 MUTATIONS = {
-    "remote": ("it has a remote", lambda r: git(r, "remote", "add", "o", "https://example.com/r")),
+    "remote": ("unexpected git config", lambda r: git(r, "remote", "add", "o", "https://e.com/r")),
+    # An include that defines no remote still changes how git behaves.
+    "include": ("unexpected git config", lambda r: git(r, "config", "include.path", "/elsewhere")),
     "reflog": (STATE, write_reflog),
     "fetch-head": (STATE, lambda r: (r / ".git/FETCH_HEAD").write_text("x\n")),
     "shallow": (STATE, lambda r: (r / ".git/shallow").write_text(git(r, "rev-parse", "base"))),
     "head": (
         "HEAD is not on reviewed",
-        lambda r: git(r, "symbolic-ref", "HEAD", "refs/heads/base"),
+        lambda r: (r / ".git/HEAD").write_text("ref: refs/heads/base\n"),
     ),
     "tag": ("3 refs", lambda r: git(r, "tag", "v1", "base")),
     "alternate": (
@@ -224,6 +269,10 @@ MUTATIONS = {
         lambda r: (r / ".git/objects/info/alternates").write_text(
             str(r.parent / "source/.git/objects")
         ),
+    ),
+    "empty-alternates": (
+        "alternate",
+        lambda r: (r / ".git/objects/info/alternates").write_text(""),
     ),
     "object": (r"\d+ objects, \d+ reachable", add_object),
 }
@@ -244,13 +293,21 @@ def test_inspection_refuses_anything_but_the_scrubbed_repository(archived, tmp_p
 
 def test_unreadable_git_output_is_a_refusal():
     def run(argv: list[str]) -> str:
+        metadata = {
+            ".git": "HEAD\nconfig\nobjects\nrefs\n",
+            ".git/config": repository.git_config(False),
+            ".git/HEAD": "ref: refs/heads/reviewed\n",
+            ".git/objects/info": "",
+        }
+        if argv[0] in ("ls", "cat"):
+            return metadata[argv[-1].removeprefix("/rbench/repo/")]
         return "refs/heads/base\n"  # no object id
 
     with pytest.raises(RepositoryError, match=r"not the scrubbed one: unreadable git output"):
         inspect_repository(run, "/rbench/repo", "task t-1")
 
 
-def test_trial_copy_must_match_the_archive(fake_bin, archived, tmp_path, staged):
+def test_trial_copy_must_match_the_archive(monkeypatch, archived, tmp_path, local_agent):
     task, archive = archived
     # The agent holds a scrubbed repository, but another one: the follow-up as `reviewed`.
     source = tmp_path / "source"
@@ -258,8 +315,15 @@ def test_trial_copy_must_match_the_archive(fake_bin, archived, tmp_path, staged)
         "acme/widget", str(source), task.base, git(source, "rev-parse", "feature"),
         tmp_path / "other.bundle", "hidden",
     )  # fmt: skip
-    fake_bin.scenario("docker", replies=agent_replies(tmp_path, other.path))
     project = TrialProject.create(tmp_path / "trial", "rbench-t1", AGENT, PROXY)
+    copy = TrialProject.copy_to_agent
+
+    def copy_other(self, src: Path, dest: str) -> None:
+        shutil.rmtree(src / "repo")
+        _unpack(other.path, src / "repo", False, "test")
+        copy(self, src, dest)
+
+    monkeypatch.setattr(TrialProject, "copy_to_agent", copy_other)
 
     with pytest.raises(RepositoryError, match="^task t-1: the repository in the trial differs"):
         prepare_repository(project, task, archive, tmp_path / "trial")
@@ -287,6 +351,71 @@ def test_errors_name_no_hidden_task(fake_bin, archived, tmp_path, staged):
 
     assert str(e.value).startswith("a task in set 'hidden', in the trial: ")
     assert HIDDEN_ID not in str(e.value)
+
+
+def test_archive_must_be_the_verified_bundle_bytes(fake_bin, archived, tmp_path, local_agent):
+    # Review M1: a `.git` pointer file hashes like any file, and git fetch follows it to a
+    # repository that can change after the check.
+    task, archive = archived
+    linked = unpacked(tmp_path, archive, "linked")  # holds base and reviewed, and can be amended
+    pointer = tmp_path / "pointer"
+    pointer.write_text(f"gitdir: {linked / '.git'}\n")
+    project = TrialProject.create(tmp_path / "trial", "rbench-t1", AGENT, PROXY)
+    as_pointer = replace(task, archive_sha256=hashlib.sha256(pointer.read_bytes()).hexdigest())
+
+    with pytest.raises(ArchiveError, match="^task t-1: its source archive is not a git bundle"):
+        prepare_repository(project, as_pointer, pointer, tmp_path / "trial")
+    with pytest.raises(ArchiveError, match="^task t-1: cannot read its source archive"):
+        prepare_repository(project, task, tmp_path / "source", tmp_path / "trial")
+
+    assert not local_agent.exists() and fake_bin.calls() == []
+
+
+def test_work_tree_holds_every_path_of_reviewed(fake_bin, tmp_path, local_agent):
+    # Review M2: `Foo` and `foo` are two paths; a case-insensitive checkout keeps one.
+    task, archive = plumbed_archive(
+        tmp_path, {b"a.py": b"a\n"}, {b"a.py": b"a\n", b"Foo": b"upper\n", b"foo": b"lower\n"}
+    )
+    project = TrialProject.create(tmp_path / "trial", "rbench-t1", AGENT, PROXY)
+    (tmp_path / "case").write_text("")
+    case_insensitive = (tmp_path / "CASE").exists()
+
+    if case_insensitive:
+        with pytest.raises(RepositoryError, match="in the trial: the work tree differs from"):
+            prepare_repository(project, task, archive, tmp_path / "trial")
+    else:
+        prepare_repository(project, task, archive, tmp_path / "trial")
+        repo = local_agent / "repo"
+        assert (repo / "Foo").read_text() == "upper\n" and (repo / "foo").read_text() == "lower\n"
+
+
+def test_path_names_do_not_change_the_object_count(tmp_path):
+    # Review M4: `rev-list --objects` prints path names, and one may hold a carriage return.
+    _, archive = plumbed_archive(tmp_path, {b"a": b"a\n"}, {b"a": b"b\n", b"x\ry": b"c\n"})
+    repo = unpacked(tmp_path, archive)
+
+    state = inspect_repository(_host_runner("t"), str(repo), "task t-1")
+
+    assert state.objects == 7  # two commits, two trees, three blobs
+
+
+def test_checkout_size_is_bounded(fake_bin, archived, tmp_path, local_agent, monkeypatch):
+    task, archive = archived
+    monkeypatch.setattr(repository, "MAX_CHECKOUT_BYTES", 10)
+    project = TrialProject.create(tmp_path / "trial", "rbench-t1", AGENT, PROXY)
+
+    with pytest.raises(RepositoryError, match=r"^task t-1: the reviewed tree holds \d+ bytes"):
+        prepare_repository(project, task, archive, tmp_path / "trial")
+    assert not local_agent.exists()
+
+
+def test_unpack_time_is_bounded(fake_bin, archived, tmp_path, local_agent, monkeypatch):
+    task, archive = archived
+    monkeypatch.setattr(repository, "UNPACK_TIMEOUT", 1e-9)
+    project = TrialProject.create(tmp_path / "trial", "rbench-t1", AGENT, PROXY)
+
+    with pytest.raises(RepositoryError, match=r"^task t-1: git init .* ran over"):
+        prepare_repository(project, task, archive, tmp_path / "trial")
 
 
 def test_comments_are_copied_into_raw_output(fake_bin, tmp_path):
@@ -367,6 +496,27 @@ def test_gh_pr_diff_is_base_to_reviewed(trial_root, selector):
 
 
 @needs_node
+def test_gh_pr_diff_is_byte_exact_with_a_file_named_base(tmp_path):
+    # Review M3: a root file named `base` made the diff ambiguous, and a Latin-1 byte came out as
+    # U+FFFD.
+    _, archive = plumbed_archive(
+        tmp_path, {b"base": b"one\n"}, {b"base": b"one\ncaf\xe9\n", b"reviewed": b"x\n"}
+    )
+    root = tmp_path / "rbench"
+    _unpack(archive, root / "repo", False, "test")
+    (root / "pr.json").write_text(json.dumps({"number": 7, "title": "t", "body": "b"}))
+    env = {"PATH": os.environ["PATH"], "RBENCH_TRIAL_ROOT": str(root)}
+
+    result = subprocess.run(
+        ["node", str(STUB), "pr", "diff"], env=env, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    expected = git_bytes(root / "repo", "diff", "refs/heads/base", "refs/heads/reviewed", "--")
+    assert result.stdout == expected and b"+caf\xe9\n" in expected
+
+
+@needs_node
 def test_gh_pr_view_reports_open_without_comments_or_reviews(trial_root):
     fields = "state,comments,reviews,title,body,number,isDraft,headRefName,baseRefName"
     result = gh(trial_root, "pr", "view", "7", "--json", fields)
@@ -425,6 +575,8 @@ def test_gh_pr_comment_is_stored_and_sent_nowhere(trial_root, tmp_path):
         ["pr", "view", "--json", "url"],
         ["pr", "view", "--web"],
         ["pr", "diff", "--patch"],
+        ["pr", "diff", "--color", "--patch"],
+        ["pr", "diff", "--color=invalid"],
         ["pr", "comment", "--edit-last", "-b", "x"],
         ["pr", "comment"],
         ["pr", "comment", "-b", "x", "-F", "-"],

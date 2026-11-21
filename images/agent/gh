@@ -26,9 +26,15 @@ function unavailable() {
   );
 }
 
+// Git's stdout as bytes: a patch may hold any encoding, and it goes out unchanged.
 function git(...argv) {
-  return execFileSync("git", ["-C", repo, ...argv], { encoding: "utf8", maxBuffer: 1 << 30 });
+  return execFileSync("git", ["-C", repo, ...argv], { maxBuffer: 1 << 30 });
 }
+
+// Full ref names, and `--` after them, so a tracked file named `base` cannot be read as either.
+const BASE = "refs/heads/base";
+const REVIEWED = "refs/heads/reviewed";
+const COLORS = ["always", "never", "auto"];
 
 // Splits `rest` into at most one PR selector and the options this stub knows; `valued` names the
 // options that take a value, `flags` those that do not.
@@ -76,8 +82,8 @@ function view(rest) {
     closed: () => false,
     baseRefName: () => "base",
     headRefName: () => "reviewed",
-    baseRefOid: () => git("rev-parse", "base").trim(),
-    headRefOid: () => git("rev-parse", "reviewed").trim(),
+    baseRefOid: () => git("rev-parse", "--verify", "--end-of-options", BASE).toString().trim(),
+    headRefOid: () => git("rev-parse", "--verify", "--end-of-options", REVIEWED).toString().trim(),
     comments: () => [],
     reviews: () => [],
     latestReviews: () => [],
@@ -101,8 +107,11 @@ function view(rest) {
 function diff(rest) {
   const { opts, selector } = parse(rest, { "--color": "color" }, { "--name-only": "nameOnly" });
   loadPr(selector);
+  if (opts.color !== undefined && !COLORS.includes(opts.color)) {
+    fail(`invalid value '${opts.color}' for --color: use ${COLORS.join(", ")}`);
+  }
   const only = opts.nameOnly ? ["--name-only"] : [];
-  process.stdout.write(git("diff", "--no-color", "--no-ext-diff", "--no-textconv", ...only, "base", "reviewed"));
+  process.stdout.write(git("diff", "--no-color", "--no-ext-diff", "--no-textconv", ...only, BASE, REVIEWED, "--"));
 }
 
 function comment(rest) {

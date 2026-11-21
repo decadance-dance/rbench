@@ -16,6 +16,7 @@ from rbench.trial.repository import (
     RepositoryState,
     agent_runner,
     copy_comments,
+    count_objects,
     inspect_repository,
     prepare_repository,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "build_proxy_image",
     "compose_spec",
     "copy_comments",
+    "count_objects",
     "image_id",
     "inspect_repository",
     "prepare_repository",

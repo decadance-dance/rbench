@@ -116,6 +116,7 @@ class TrialProject:
                 check=False,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 input=stdin,
                 stdin=None if stdin is not None else subprocess.DEVNULL,
             )
