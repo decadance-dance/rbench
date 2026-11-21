@@ -1,0 +1,16 @@
+# A review plugin run on both CLIs (spec engine-configurations, Engine adapters; design D13): Claude
+# models on Claude Code, GPT models on Codex. Pinned by the plugin's release; the adapter records
+# its source repository and the commit of the release's tag (rbench.engines.ponytail_review).
+name = "ponytail-review"
+pin = { kind = "version", ref = "5.3.3" }
+# The review is prose; the pinned normalization step copies its findings.
+output = "markdown"
+
+[cli]
+claude = "2.1.316"
+codex = "0.171.0"
+
+# One reviewer; the model's provider picks the CLI, and the shims add its model and effort.
+[roles.reviewer]
+delivery = "flag"
+default = { model = "claude-sonnet-5-5", effort = "high" }

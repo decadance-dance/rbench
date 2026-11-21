@@ -51,7 +51,10 @@ RUN set -eu; if [ -n "$RREVIEW_COMMIT" ]; then \
 # pin), fetched by that exact commit, without its history, into /opt/rbench/plugins/<name>, the
 # name from its .claude-plugin/plugin.json; root-owned and read-only to the trial. With it comes
 # mikefarah yq 4.44.3, checked by SHA-256: a plugin may read YAML config with it (review-council
-# ignores its config files without it). An empty PLUGIN_COMMIT installs neither.
+# ignores its config files without it). /opt/rbench/plugins is also a local Codex marketplace,
+# named rbench, listing the plugin, so a trial installs it into CODEX_HOME offline instead of from
+# the plugin's own marketplace, which follows its default branch. An empty PLUGIN_COMMIT installs
+# none of them.
 ARG PLUGIN_REPO=
 ARG PLUGIN_COMMIT=
 ARG TARGETARCH
@@ -69,6 +72,10 @@ RUN set -eu; if [ -n "$PLUGIN_COMMIT" ]; then \
         rm -rf "$src"; \
         chown -R root:root "/opt/rbench/plugins/$name"; \
         chmod -R u+rwX,go+rX,go-w "/opt/rbench/plugins/$name"; \
+        install -d -m 0755 /opt/rbench/plugins/.agents/plugins; \
+        printf '{"name": "rbench", "plugins": [{"name": "%s", "source": {"source": "local", "path": "./%s"}, "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"}}]}\n' \
+            "$name" "$name" > /opt/rbench/plugins/.agents/plugins/marketplace.json; \
+        chmod 0644 /opt/rbench/plugins/.agents/plugins/marketplace.json; \
         case "$TARGETARCH" in \
             arm64) sum=0e7e1524f68d91b3ff9b089872d185940ab0fa020a5a9052046ef10547023156 ;; \
             amd64) sum=a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7 ;; \
