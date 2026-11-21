@@ -11,6 +11,11 @@ A trial directory holds:
                    {"engine": {"<model>": {"input", "output", "cache_read", "cache_creation"}},
                     "normalization": {"<model>": {...}}}
     raw/           engine output, transcripts and logs
+    audit.json     the contamination audit (`rbench.trial.audit`): {"contaminated": [<reason>],
+                   "refused": [{"method", "target" (destination only), "result",
+                   "count"}], "refused_omitted"},
+                   the refused connection attempts listed in run health; final once the
+                   trial is contaminated
 
 Every file goes through `atomic_write`. `done` is written last and records the SHA-256 of
 `findings.json` and `usage.json`: a runner killed while storing results leaves the trial in its
@@ -35,6 +40,7 @@ NEEDS_REASON = frozenset({"failed", "interrupted", "contaminated", "misconfigure
 STATUS_FILE = "status.json"
 FINDINGS_FILE = "findings.json"
 USAGE_FILE = "usage.json"
+AUDIT_FILE = "audit.json"
 RAW_DIR = "raw"
 RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 FINDING_KEYS = {"file", "start_line", "end_line", "message"}

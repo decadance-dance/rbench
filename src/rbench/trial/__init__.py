@@ -1,6 +1,14 @@
 """One trial's sandbox (spec trial-isolation, design D3, D5): its images, its compose project, its
-hermetic configuration and the audit's session binding."""
+hermetic configuration and the contamination audit."""
 
+from rbench.trial.audit import (
+    ALLOWLIST,
+    Audit,
+    audit_proxy_log,
+    audit_trial,
+    read_allowlist,
+    record_audit,
+)
 from rbench.trial.compose import CODEX_LOGIN, PROXY_LOG, PROXY_URL, TrialProject, compose_spec
 from rbench.trial.credentials import CLAUDE_TOKEN_ENV, check_login_home, claude_token
 from rbench.trial.hermetic import codex_config, collect, prepare, shim_settings
@@ -27,6 +35,7 @@ from rbench.trial.sessions import SessionError, launch_record, read_shim_log, un
 
 __all__ = [
     "AGENT_NAME",
+    "ALLOWLIST",
     "CLAUDE_TOKEN_ENV",
     "CODEX_LOGIN",
     "PROXY_LOG",
@@ -34,12 +43,15 @@ __all__ = [
     "PROXY_URL",
     "REPOSITORY_FILE",
     "REPO_DIR",
+    "Audit",
     "RepositoryError",
     "RepositoryState",
     "SessionError",
     "TrialError",
     "TrialProject",
     "agent_runner",
+    "audit_proxy_log",
+    "audit_trial",
     "build_agent_image",
     "build_proxy_image",
     "check_login_home",
@@ -54,7 +66,9 @@ __all__ = [
     "launch_record",
     "prepare",
     "prepare_repository",
+    "read_allowlist",
     "read_shim_log",
+    "record_audit",
     "shim_settings",
     "unbound_sessions",
 ]
