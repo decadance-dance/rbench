@@ -296,6 +296,8 @@ server or build step, and opens from disk as the spec requires.
   `pr.json` and the repository. `pr diff` is `git diff refs/heads/base refs/heads/reviewed --`,
   passed on as bytes, so a file named `base` or a non-UTF-8 line changes nothing. It reports the
   PR as `OPEN` with no comments or reviews, so engines that skip closed or reviewed PRs still run.
+  Its `url` is `https://github.com/rbench-trial/repo/pull/<n>`, of no real repository, and its
+  `mergeCommit` is null; rreview 0.1.1 asks for both when it resolves the PR (#52).
   `gh pr comment` writes its body to `/rbench/output/comment-<n>.md`. After the engine, the trial
   copies the regular files named so into `raw/pr-comments/`, which normalization reads like any
   other engine output. The stub opens no connection. Anything else fails with exit 1: another
@@ -900,6 +902,24 @@ measure a different task from the engines, which all read the repository.
   | `rreview` | panel × coordinator × judge | 2 × 3 × 2 |
   | **Total** | | **33** |
 
+- `code-review` runs Claude Code's built-in `/code-review` on the PR from the `reviewed` checkout
+  (#48). The command goes by stdin, `/code-review <PR number>\n`, to
+  `claude -p --permission-mode bypassPermissions --output-format json`, and the D5 shim adds the
+  model, the effort, the policy flags and the session id. The engine is pinned by the Claude Code
+  version (pin kind `cli`) and outputs Markdown: the result's `result` text goes through D9.
+  Checked offline with Claude Code 2.1.316, against a local recording endpoint with every other
+  connection denied and no model call:
+  - From stdin in `-p`, the command expands inline in the root session (no fork) to a prompt with
+    "Review target: `<n>`". That fixes the target only: no model ran, so which tools the review
+    then calls was not observed. If it reads the PR with `gh`, it gets the D4 stub, which answers
+    the local `gh pr view` and `gh pr diff` forms, rejects other options and fields, and has no
+    network path (its own tests, not this check, establish that).
+  - The request carries the session's `--model` and `--effort`. With no level typed after the
+    command, the review runs at the session's effort, so the adapter types none. A typed level
+    would also be saved in the home and reused by later reviews.
+  - With JSON output it reports in prose, not through its findings tool.
+  - An API error still ends with `subtype` `success` but an empty `modelUsage`, so a result with
+    no model usage fails the trial.
 - `codex-review` runs the built-in review from the `reviewed` checkout:
 
   ```sh
@@ -920,6 +940,21 @@ measure a different task from the engines, which all read the repository.
   record has
   `payload.type = "item_completed"` and `payload.item.type = "ExitedReviewMode"`. The
   `payload.item.review_output` holds the findings with priority and file/line ranges.
+- `codex-review` is a structured engine: each finding of `review_output` (0.171.0
+  `ReviewFinding`) has a file and a line range, so it becomes a finding without the D9 step. The
+  adapter (#49, `rbench.engines.codex_review`) makes `absolute_file_path` relative to the
+  checkout, takes `line_range` as the lines, the title and body as the message, and `P<priority>`
+  as the engine's own label. The result is read from the rollout of the one root thread the launch
+  bound: the collected rollout whose session_meta names no `parent_thread_id` (the review thread
+  names its parent at the top level, with source `subagent: review`). The result must have the
+  pinned `ReviewOutputEvent` shape, with no key repeated in its rollout line; a finding outside
+  the checkout, a priority outside 0 to 3 or a bad range rejects the result whole. The launch
+  check reads the argv the CLI got (only the D5 policy flags added) and the working directory
+  `/rbench/repo`. A `review_output` that is null (an aborted review), or Codex's
+  fallback for a reviewer answer it cannot parse as JSON (no findings and an empty
+  `overall_correctness`, the text kept in `overall_explanation`), fails the trial instead of
+  scoring zero findings. The parent thread (`-m`) and the review thread (`review_model`) both
+  request the role's model and effort; #46 records what applied to each.
 - review-council: the Claude side is the main session (orchestrator and judge) plus the subagents
   `reviewer-claude`, `reviewer-security` and the Claude verifier, all `model: inherit`, so the
   session's `--model` and `--effort` set them. The Codex side is the Codex reviewer and verifier,
@@ -984,6 +1019,21 @@ measure a different task from the engines, which all read the repository.
 - rreview: the panel roles `intent_contracts`, `reliability` and `security` run on Codex with one
   model for the whole panel; the coordinator runs on Claude Code; the judge runs on Codex, because
   rreview refuses a coordinator and judge of the same family.
+  - Pin: release 0.1.1, tag `0.1.1` at commit `f71d6e171bf47312fd6e564b6cc6a3dcc2d1fe94`, which
+    has `--sandbox external`. The agent image builds that commit with `cargo install --locked` in
+    a build stage and copies only the binary, with `zsh`, which rreview needs for a Claude pass
+    (#52).
+  - `engines/rreview.toml` declares the roles `panel` (Codex), `coordinator` (Claude) and `judge`
+    (Codex); `panel` gives its one model and effort to the three lenses. The adapter runs
+    `rreview reviewed --sandbox external --json` with `--role-agent`, `--role-model` and
+    `--role-effort` for each of rreview's five roles, so rreview passes the model and effort to
+    every pass and the shim adds none. Planning refuses, like the launch, an effort rreview does
+    not accept (Codex: `minimal` to `xhigh`) and a panel of more than one model.
+  - Findings are the `findings` of `result.json` on stdout, at rreview's default gate (P0-P2,
+    confidence at least 0.5), each with its label `P<n>`; dropped candidates are not findings.
+    Exit 2, a result off rreview 0.1.1's types and rules, `findings` that are not its default
+    gate applied to `ungated_findings`, or a result that does not say `sandbox: external` fails
+    the trial.
 - At 10 core tasks and one attempt, one round of all 33 configurations is 330 trials. R1 and R2 run
   all 33; R3 runs only the engine and role-model combinations on the quality-against-cost Pareto
   front after R1 and R2, each once at `xhigh` (O6).

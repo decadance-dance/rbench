@@ -20,9 +20,9 @@ AGENT_NAME = "rbench-agent"
 PROXY_NAME = "rbench-proxy"
 IMAGES_DIR = CHECKOUT_ROOT / "images"
 _ID = re.compile(r"sha256:[0-9a-f]{64}")
-# All that `<cli> --version` prints, e.g. "2.1.316 (Claude Code)" and "codex-cli 0.171.0".
-_VERSION_OUTPUT = {"claude": "{} (Claude Code)", "codex": "codex-cli {}"}
 _COMMIT = re.compile(r"[0-9a-f]{40}")
+# All that `<cli> --version` prints, e.g. "2.1.316 (Claude Code)" and "codex-cli 0.171.0".
+_VERSION_OUTPUT = {"claude": "{} (Claude Code)", "codex": "codex-cli {}", "rreview": "rreview {}"}
 _PLUGIN_REPO = re.compile(r"https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+")
 PLUGINS_DIR = "/opt/rbench/plugins"
 # Prints "<dir> <name> <version>" for each installed plugin, from its .claude-plugin/plugin.json;
@@ -113,15 +113,17 @@ def build_agent_image(
     images_dir: Path = IMAGES_DIR,
     tag: str | None = None,
     plugin: tuple[str, str, str] | None = None,
+    rreview: tuple[str, str] | None = None,
 ) -> Image:
     """Build the agent image with exactly these CLI versions and read them back from it.
 
     `clis` maps each CLI the engine declares to its exact version; a CLI not in it is not
     installed. `plugin` is the (https repository, commit, version) of the engine's Claude Code
     plugin: the image holds that commit in `/opt/rbench/plugins/<name>` (with yq), and its
-    `plugin.json` must give that version. The result is what the ledger pins for an engine.
-    `tag` replaces the default tag, which names the CLI versions (and the plugin's commit); the
-    reference is the digest either way.
+    `plugin.json` must give that version. `rreview` is the (commit, release) of rreview to build
+    into the image, for the rreview engine (`rbench.engines.rreview.RELEASES`); None installs no
+    rreview. The result is what the ledger pins for an engine. `tag` replaces the default tag,
+    which names the CLI versions (and the plugin's commit); the reference is the digest either way.
     """
     if not (isinstance(clis, dict) and clis):
         raise TrialError("agent image: clis must name at least one CLI")
@@ -129,9 +131,20 @@ def build_agent_image(
         if cli not in CLIS:
             raise TrialError(f"agent image: unknown CLI {cli!r}; expected one of {CLIS}")
         check_ref("agent image", "version", version, f"clis.{cli}")
-    # Docker tags allow [A-Za-z0-9_.-]; SemVer build metadata uses "+".
-    default_tag = "-".join(f"{cli}-{clis[cli]}" for cli in sorted(clis)).replace("+", "_")
+    versions = dict(clis)
     build_args = {f"{cli.upper()}_VERSION": clis.get(cli, "") for cli in CLIS}
+    build_args["RREVIEW_COMMIT"] = ""
+    if rreview is not None:
+        commit, release = rreview
+        if not _COMMIT.fullmatch(commit):
+            raise TrialError(f"agent image: rreview {commit!r} is not a full commit id")
+        check_ref("agent image", "version", release, "rreview release")
+        build_args["RREVIEW_COMMIT"] = commit
+        versions["rreview"] = release
+    # Docker tags allow [A-Za-z0-9_.-]; SemVer build metadata uses "+".
+    default_tag = "-".join(f"{name}-{versions[name]}" for name in sorted(versions)).replace(
+        "+", "_"
+    )
     if plugin is not None:
         repo, commit, version = plugin
         if not (isinstance(repo, str) and _PLUGIN_REPO.fullmatch(repo)):
@@ -143,15 +156,15 @@ def build_agent_image(
         tag = tag or f"{default_tag}-plugin-{commit[:12]}"
     tag = tag or default_tag
     ref = _build(AGENT_NAME, tag, images_dir / "agent", build_args)
-    for cli, version in sorted(clis.items()):
-        what = f"reading the {cli} version in {ref}"
+    for name, version in sorted(versions.items()):
+        what = f"reading the {name} version in {ref}"
         # The real binary: the shim on PATH runs only inside a prepared trial (design D5).
-        real = f"/usr/local/bin/{cli}"
+        real = f"/usr/local/bin/{name}"
         out = docker(
             "run", "--rm", "--network", "none", image_id(ref), real, "--version", what=what
         )
-        if out.strip() != _VERSION_OUTPUT[cli].format(version):
-            raise TrialError(f"{ref}: expected {cli} {version}, the image reports {out.strip()!r}")
+        if out.strip() != _VERSION_OUTPUT[name].format(version):
+            raise TrialError(f"{ref}: expected {name} {version}, the image reports {out.strip()!r}")
     if plugin is not None:
         _check_plugin(ref, plugin[2])
     return Image(ref, dict(clis))
