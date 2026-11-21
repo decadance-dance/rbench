@@ -217,6 +217,11 @@ server or build step, and opens from disk as the spec requires.
 - The proxy logs one line per request, allowed or refused: time, client, squid result and status,
   method, target, and the address it connected to. Its own health check is left out.
   `images/proxy` holds the squid configuration, the allowlist and the image that carries both.
+- The contamination audit (#41) reads this log after the trial. A line for anything but `CONNECT`
+  to port 443 of a listed host is a successful connection, which contaminates the trial, when
+  squid connected upstream (an address, not `-`) or answered without a 4xx or 5xx status. Any
+  other such line is a refused attempt: run health lists it from the trial's `audit.json`. A line
+  the audit cannot read contaminates the trial.
 - The compose project's live test (#37) passes on Docker 29.4.1 with no credentials and no model
   call. Refused and logged: `CONNECT github.com:443`, a `CONNECT` to the numeric address of
   `api.anthropic.com`, and plain HTTP. `api.anthropic.com` tunnels. External names and
@@ -279,7 +284,7 @@ server or build step, and opens from disk as the spec requires.
   case-insensitive host file system keeps one of `Foo` and `foo`, Linux keeps both. `git status`
   there must then report nothing. Any failure is an infrastructure error. The object count and
   both commit ids go to the trial's `repository.json`; the audit recounts with `count_objects`
-  after the engine.
+  after the engine, and a changed count, or one it cannot read, contaminates the trial.
 - A `gh` stub (`images/agent/gh`, Node, on `PATH`) answers `pr view` and `pr diff` from
   `pr.json` and the repository. `pr diff` is `git diff refs/heads/base refs/heads/reviewed --`,
   passed on as bytes, so a file named `base` or a non-UTF-8 line changes nothing. It reports the

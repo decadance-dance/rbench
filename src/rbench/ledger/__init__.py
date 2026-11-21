@@ -18,6 +18,7 @@ from rbench.ledger.plan import (
     trial_id,
 )
 from rbench.ledger.trials import (
+    AUDIT_FILE,
     FINDINGS_FILE,
     RAW_DIR,
     STATES,
@@ -32,6 +33,7 @@ from rbench.ledger.trials import (
 )
 
 __all__ = [
+    "AUDIT_FILE",
     "FINDINGS_FILE",
     "LOCK_FILE",
     "PLAN_FILE",
