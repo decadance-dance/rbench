@@ -43,7 +43,7 @@ from rbench.ledger import (
     store_results,
 )
 from rbench.ledger.plan import checkout_path
-from rbench.matrix.expansion import MatrixError
+from rbench.matrix.expansion import Configuration, MatrixError, RoleSetting
 from rbench.tasks import CORE_LIST_FILE, load_core_list, load_task_set
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -57,7 +57,12 @@ PLAIN_TWO_MODELS = {
 BUDGET = {"claude": 1000, "codex": 2000}
 FINDING = {"file": "a.py", "start_line": 1, "end_line": 2, "message": "Off by one."}
 COUNTS = {"input": 3, "output": 2, "cache_read": 0, "cache_creation": 0}
-USAGE = {"claude-opus-5-5": COUNTS}
+USAGE = {"engine": {"claude-opus-5-5": COUNTS}, "normalization": {}}
+
+
+def usage(**models) -> dict:
+    """Engine usage of `models` (model id -> counts), no normalization step."""
+    return {"engine": models, "normalization": {}}
 
 
 def task_sets(root: Path) -> list:
@@ -125,7 +130,13 @@ def test_plan_holds_what_the_spec_freezes(tmp_path: Path) -> None:
             "version": "ab" * 32,
             "clis": CLI,
             "image": f"rbench/plain@{DIGEST}",
-            "roles": {"reviewer": {"cli": None, "delivery": "flag"}},
+            "roles": {
+                "reviewer": {
+                    "cli": None,
+                    "delivery": "flag",
+                    "default": {"model": "claude-opus-5-5", "effort": "high"},
+                }
+            },
         }
     }
     assert plan["matrix"] == {"path": "m.toml", "sha256": "f" * 64}
@@ -274,7 +285,9 @@ DELETE = object()
         (_set(["matrix", "path"], "../m.toml"), r"matrix\.path"),
         (_set(["round", "budget", "claude"], 0), r"round\.budget\.claude"),
         (_set(["round", "budget", "codex"], DELETE), r"round\.budget: expected a budget"),
-        (_set(["attempts"], 2), r"trials: 6 trials, but .* gives 12"),
+        (_set(["attempts"], 2), r"attempts: the screening stage runs 1"),
+        (_set(["stage"], "full"), r"attempts: the full stage runs 3"),
+        (_set(["stage"], "smoke"), r"tasks: the smoke stage plans at most 1"),
         (_set(["stage"], "huge"), r"stage: expected one of"),
     ],
 )
@@ -286,6 +299,133 @@ def test_malformed_plan_is_refused_naming_path_and_field(tmp_path: Path, change,
     with pytest.raises(LedgerError, match=message) as error:
         load_plan(run_dir)
     assert str(run_dir / PLAN_FILE) in str(error.value)
+
+
+def _write(run_dir: Path, plan: dict) -> None:
+    (run_dir / PLAN_FILE).write_text(json.dumps(plan))
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (
+            _set(["engines", "plain", "roles", "reviewer", "delivery"], "config"),
+            r"engines\.plain: not a valid engine declaration: .*config delivery needs cli",
+        ),
+        (
+            _set(["engines", "plain", "clis", "claude"], DELETE),
+            r"engines\.plain: not a valid engine declaration: .*needs a pinned claude CLI",
+        ),
+        (
+            _set(["engines", "plain", "roles", "reviewer", "default", "effort"], "huge"),
+            r"engines\.plain: not a valid engine declaration: .*effort 'huge'",
+        ),
+        (
+            _set(["engines", "plain", "pin"], {"kind": "git", "ref": "refs/tags/v1.0.0"}),
+            r"engines\.plain\.pin\.ref: a tag",
+        ),
+    ],
+)
+def test_frozen_declaration_follows_the_declaration_rules(tmp_path: Path, change, message):
+    run_dir, plan = plan_json(tmp_path)
+    change(plan)
+    _write(run_dir, plan)
+
+    with pytest.raises(LedgerError, match=message):
+        load_plan(run_dir)
+
+
+def test_role_settings_with_consistent_ids_must_still_be_launchable(tmp_path: Path) -> None:
+    run_dir, plan = plan_json(tmp_path)
+    old = plan["configurations"][0]
+    reviewer = old["settings"]["roles"]["reviewer"] | {"effort": "invalid-effort"}
+    config = Configuration(
+        "plain",
+        old["settings"]["version"],
+        (("reviewer", RoleSetting(tuple(reviewer["models"]), reviewer["effort"])),),
+    )
+    old_hash = old["id"].rsplit("-", 1)[1][:12]
+    plan["configurations"][0] = old | {"id": config.id, "settings": config.settings}
+    for trial in plan["trials"]:
+        if trial["configuration"] == old["id"]:
+            trial["configuration"] = config.id
+            trial["id"] = trial["id"].replace(old_hash, config.hash[:12])
+    _write(run_dir, plan)
+
+    with pytest.raises(
+        LedgerError, match=r"configurations\[0\]\.settings\.roles\.reviewer: effort"
+    ):
+        load_plan(run_dir)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (_set(["attempts"], 1000), r"attempts: the screening stage runs 1"),
+        (lambda p: p["trials"].pop(), r"trials: 5 trials, but .* gives 6"),
+        (lambda p: p["trials"].extend(p["trials"] * 1000), r"trials: 6006 trials, but"),
+    ],
+)
+def test_trial_count_is_checked_before_any_queue_entry(tmp_path, monkeypatch, change, message):
+    run_dir, plan = plan_json(tmp_path)
+    change(plan)
+    _write(run_dir, plan)
+    calls = []
+    real = plan_module.trial_id
+    monkeypatch.setattr(plan_module, "trial_id", lambda *a: calls.append(a) or real(*a))
+
+    with pytest.raises(LedgerError, match=message):
+        load_plan(run_dir)
+    assert calls == []
+
+
+def test_nul_in_the_matrix_path_is_refused(tmp_path: Path) -> None:
+    run_dir, plan = plan_json(tmp_path)
+    plan["matrix"]["path"] = "matrices/m\x00.toml"
+    _write(run_dir, plan)
+
+    with pytest.raises(LedgerError, match=r"matrix\.path: expected a plain path"):
+        load_plan(run_dir)
+
+
+DEEP = b"[" * 20000 + b"0" + b"]" * 20000
+
+
+def test_deeply_nested_json_is_refused_with_its_file(tmp_path: Path) -> None:
+    run_dir, _ = plan_json(tmp_path)
+    (run_dir / PLAN_FILE).write_bytes(DEEP)
+    with pytest.raises(LedgerError, match=r"plan\.json: cannot read the plan"):
+        load_plan(run_dir)
+
+    images = tmp_path / "images.json"
+    images.write_bytes(DEEP)
+    with pytest.raises(LedgerError, match=r"images file .*images\.json: cannot read it"):
+        load_images(images)
+
+    trial = tmp_path / "trial"
+    trial.mkdir()
+    (trial / STATUS_FILE).write_bytes(DEEP)
+    with pytest.raises(LedgerError, match=r"status\.json: cannot read the trial status"):
+        read_status(trial)
+
+    (trial / FINDINGS_FILE).write_bytes(DEEP)
+    (trial / USAGE_FILE).write_text(json.dumps(USAGE))
+    status = {
+        "state": "done",
+        "findings_sha256": hashlib.sha256(DEEP).hexdigest(),
+        "usage_sha256": hashlib.sha256((trial / USAGE_FILE).read_bytes()).hexdigest(),
+    }
+    (trial / STATUS_FILE).write_text(json.dumps(status))
+    with pytest.raises(LedgerError, match=r"findings\.json: not valid JSON"):
+        read_results(trial)
+
+
+def test_symlinked_matrix_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "m.toml").write_text("stage = 'screening'\n")
+    (tmp_path / "active.toml").symlink_to("m.toml")
+    with pytest.raises(LedgerError, match=r"active\.toml is a symlink"):
+        checkout_path(tmp_path / "active.toml", tmp_path)
+    assert checkout_path(tmp_path / "m.toml", tmp_path) == "m.toml"
 
 
 def test_plan_with_a_repeated_key_is_refused(tmp_path: Path) -> None:
@@ -487,7 +627,7 @@ def test_done_trial_refuses_a_second_store(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(trials_module, "atomic_write", interrupted)
     with pytest.raises(LedgerError, match=r"already done; its results stay as stored"):
-        store_results(tmp_path, [FINDING | {"file": "new.py"}], {"m": COUNTS | {"input": 9}})
+        store_results(tmp_path, [FINDING | {"file": "new.py"}], usage(m=COUNTS | {"input": 9}))
 
     assert writes == []
     assert read_results(tmp_path) == ([FINDING], USAGE)
@@ -530,11 +670,19 @@ def test_result_file_that_does_not_match_done_is_rejected(tmp_path: Path) -> Non
         ([FINDING | {"start_line": 3, "end_line": 2}], USAGE, r"finding 0: end_line"),
         ([FINDING | {"severity": 1}], USAGE, r"finding 0: severity"),
         ({"file": "a.py"}, USAGE, r"findings must be a list"),
-        ([FINDING], {"input": -1}, r"usage of model 'input': expected exactly"),
+        ([FINDING], {"input": -1}, r"usage must be an object of exactly engine, normalization"),
         ([FINDING], [], r"usage must be an object"),
-        ([FINDING], {"m": COUNTS | {"output": -1}}, r"'m': output: expected a token count"),
-        ([FINDING], {"m": COUNTS | {"output": 1.5}}, r"'m': output: expected a token count"),
-        ([FINDING], {"": COUNTS}, r"usage of model '': expected a model id"),
+        ([FINDING], {"engine": {"m": COUNTS}}, r"usage must be an object of exactly"),
+        ([FINDING], usage(input=-1), r"engine usage of model 'input': expected exactly"),
+        ([FINDING], usage(m=COUNTS | {"output": -1}), r"'m': output: expected a token count"),
+        ([FINDING], usage(m=COUNTS | {"output": 1.5}), r"'m': output: expected a token count"),
+        ([FINDING], {"engine": {"": COUNTS}, "normalization": {}}, r"model '': expected a model"),
+        ([FINDING], USAGE | {"normalization": []}, r"usage\.normalization must be an object"),
+        (
+            [FINDING],
+            USAGE | {"normalization": {"m": {"input": 1}}},
+            r"normalization usage of model 'm': expected exactly",
+        ),
     ],
 )
 def test_invalid_results_are_rejected_whole(tmp_path: Path, findings, usage, message) -> None:
@@ -551,7 +699,11 @@ def test_invalid_results_are_rejected_whole(tmp_path: Path, findings, usage, mes
         (b"42", b"{}", r"findings must be a list"),
         (b"[]", b"[]", r"usage must be an object"),
         (b"[{}]", b"{}", r"finding 0: expected the fields"),
-        (b"[]", b'{"m": {"input": -1}}', r"usage of model 'm': expected exactly"),
+        (
+            b"[]",
+            b'{"engine": {"m": {"input": -1}}, "normalization": {}}',
+            r"engine usage of model 'm': expected exactly",
+        ),
         (b'[{"file": "a", "file": "b"}]', b"{}", r"findings.json: not valid JSON"),
     ],
 )
@@ -721,4 +873,14 @@ def test_run_refuses_a_matrix_outside_the_checkout(checkout: Path, tmp_path_fact
 
     assert main(argv) == ExitCode.ERROR
     assert "outside the rbench checkout" in capsys.readouterr().err
+    assert not (checkout / "runs").exists()
+
+
+def test_run_refuses_a_symlinked_matrix(checkout: Path, capsys) -> None:
+    argv = cli_inputs(checkout)
+    (checkout / "matrices" / "active.toml").symlink_to("m.toml")
+    argv[1] = str(checkout / "matrices" / "active.toml")
+
+    assert main(argv) == ExitCode.ERROR
+    assert "is a symlink" in capsys.readouterr().err
     assert not (checkout / "runs").exists()

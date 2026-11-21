@@ -21,6 +21,7 @@ explicit input here (`Image`) and must match the versions the engine declaration
 
 import dataclasses
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -33,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from rbench.atomic import atomic_write
-from rbench.engines.declaration import CLIS, DELIVERIES, Engine, load_engine
+from rbench.engines.declaration import CLIS, Engine, Setting, load_engine, parse_engine
 from rbench.engines.pins import MODELS, FloatingRefError, check_ref
 from rbench.ledger.trials import RAW_DIR, LedgerError, dump_json, no_repeated_keys, set_state
 from rbench.matrix.expansion import (
@@ -97,6 +98,7 @@ class Pin:
 class PlannedRole:
     cli: str | None  # the declared CLI; None: the model's CLI
     delivery: str  # flag | config
+    default: Setting  # the declared default, so the frozen declaration can be checked whole
 
 
 @dataclass(frozen=True)
@@ -219,7 +221,12 @@ def freeze_plan(
             "image": image.ref,
             # How each role gets its model and effort: a changed declaration changes the launch.
             "roles": {
-                r: {"cli": role.cli, "delivery": role.delivery} for r, role in engine.roles.items()
+                r: {
+                    "cli": role.cli,
+                    "delivery": role.delivery,
+                    "default": {"model": role.default.model, "effort": role.default.effort},
+                }
+                for r, role in engine.roles.items()
             },
         }
     for c in round_.configurations:
@@ -338,44 +345,56 @@ def parse_plan(data: object, where: str) -> Plan:
     m = _fields(d["matrix"], f"{where}: matrix", {"path", "sha256"})
     path = _string(m["path"], f"{where}: matrix.path")
     posix = PurePosixPath(path)
-    if posix.is_absolute() or ".." in posix.parts or "\\" in path or posix.as_posix() != path:
+    bad = posix.is_absolute() or ".." in posix.parts or posix.as_posix() != path
+    if bad or "\\" in path or "\0" in path:
         raise LedgerError(f"{where}: matrix.path: expected a plain path relative to the checkout")
     matrix = MatrixFile(path, _string(m["sha256"], f"{where}: matrix.sha256", _HEX64))
     stage = _one_of(d["stage"], f"{where}: stage", tuple(STAGES))
+    _, max_tasks, stage_attempts = STAGES[stage]
     attempts = _count(d["attempts"], f"{where}: attempts")
+    if attempts != stage_attempts:
+        raise LedgerError(f"{where}: attempts: the {stage} stage runs {stage_attempts}")
 
     engines: dict[str, PlannedEngine] = {}
+    declared: dict[str, Engine] = {}
     for name, raw in sorted(_object(d["engines"], f"{where}: engines").items()):
         at = f"{where}: engines.{name}"
         e = _fields(raw, at, {"pin", "version", "clis", "image", "roles"})
-        pin = _fields(e["pin"], f"{at}.pin", {"kind", "ref"})
         clis = _object(e["clis"], f"{at}.clis")
         image = Image(e["image"], clis)
         check_image(at, image)
-        roles = {}
-        for role, r in sorted(_object(e["roles"], f"{at}.roles").items()):
-            r = _fields(r, f"{at}.roles.{role}", {"cli", "delivery"})
-            cli = None if r["cli"] is None else _one_of(r["cli"], f"{at}.roles.{role}.cli", CLIS)
-            delivery = _one_of(r["delivery"], f"{at}.roles.{role}.delivery", DELIVERIES)
-            roles[role] = PlannedRole(cli, delivery)
-        if not roles:
-            raise LedgerError(f"{at}.roles: expected at least one role")
-        kind = _one_of(pin["kind"], f"{at}.pin.kind", PIN_KINDS)
-        ref = _string(pin["ref"], f"{at}.pin.ref")
-        if kind == "cli":
-            version = clis.get(ref)
-        else:
-            version = _exact(at, kind, ref, "pin.ref")
-            if ref.startswith("refs/tags/"):
-                raise LedgerError(f"{at}.pin.ref: a tag; the plan needs its commit")
-        if e["version"] != version:
+        roles = _object(e["roles"], f"{at}.roles")
+        for role, r in roles.items():
+            _fields(r, f"{at}.roles.{role}", {"cli", "delivery", "default"})
+        # The declaration's own rules (pin, CLI pins, role CLI and delivery, defaults) apply to
+        # the frozen copy, so a hand-edited plan cannot hold a declaration the loader rejects.
+        declaration = {
+            "name": name,
+            "pin": e["pin"],
+            "cli": clis,
+            "roles": {
+                role: {k: v for k, v in r.items() if not (k == "cli" and v is None)}
+                for role, r in roles.items()
+            },
+        }
+        try:
+            engine = parse_engine(declaration, at)
+        except (TypeError, ValueError) as error:
+            raise LedgerError(f"{at}: not a valid engine declaration: {error}") from None
+        if engine.pin_kind == "git" and engine.pin_ref.startswith("refs/tags/"):
+            raise LedgerError(f"{at}.pin.ref: a tag; the plan needs its commit")
+        if e["version"] != engine.version:
             raise LedgerError(f"{at}.version: not the version its pin gives")
+        declared[name] = engine
         engines[name] = PlannedEngine(
-            Pin(kind, ref),
-            version,
-            dict(sorted(clis.items())),
+            Pin(engine.pin_kind, engine.pin_ref),
+            engine.version,
+            dict(sorted(engine.clis.items())),
             image.ref,
-            roles,
+            {
+                role: PlannedRole(r.cli, r.delivery, r.default)
+                for role, r in sorted(engine.roles.items())
+            },
         )
 
     configurations: dict[str, tuple[PlannedConfiguration, Configuration]] = {}
@@ -398,6 +417,13 @@ def parse_plan(data: object, where: str) -> Plan:
             for j, model in enumerate(models):
                 _one_of(model, f"{at}.settings.roles.{role}.models[{j}]", tuple(MODELS))
             effort = _string(r["effort"], f"{at}.settings.roles.{role}.effort")
+            for model in models:
+                try:
+                    declared[s["engine"]].delivery(
+                        role, Setting(model, effort), f"{at}.settings.roles.{role}"
+                    )
+                except ValueError as error:
+                    raise LedgerError(str(error)) from None
             roles.append((role, RoleSetting(tuple(models), effort)))
         config = Configuration(s["engine"], s["version"], tuple(roles))
         if config.settings != s or config.id != c["id"]:
@@ -442,20 +468,21 @@ def parse_plan(data: object, where: str) -> Plan:
         if any(other.id == task.id for other in tasks):
             raise LedgerError(f"{at}.id: repeats an earlier task")
         tasks.append(task)
+    if max_tasks is not None and len(tasks) > max_tasks:
+        raise LedgerError(f"{where}: tasks: the {stage} stage plans at most {max_tasks}")
 
-    expected = [
-        PlannedTrial(trial_id(t.id, c, a), a, t.id, c.id)
-        for a in range(1, attempts + 1)
-        for t in tasks
-        for _, c in configurations.values()
-    ]
     raw_trials = _list(d["trials"], f"{where}: trials")
-    if len(raw_trials) != len(expected):
+    count = attempts * len(tasks) * len(configurations)
+    if len(raw_trials) != count:
         raise LedgerError(
             f"{where}: trials: {len(raw_trials)} trials, but attempts × tasks × configurations"
-            f" gives {len(expected)}"
+            f" gives {count}"
         )
-    for i, (raw, want) in enumerate(zip(raw_trials, expected, strict=True)):
+    expected: list[PlannedTrial] = []
+    queue = itertools.product(range(1, attempts + 1), tasks, configurations.values())
+    for i, (raw, (a, task, (_, c))) in enumerate(zip(raw_trials, queue, strict=True)):
+        want = PlannedTrial(trial_id(task.id, c, a), a, task.id, c.id)
+        expected.append(want)
         at = f"{where}: trials[{i}]"
         t = _fields(raw, at, {"id", "attempt", "task", "configuration"})
         _count(t["attempt"], f"{at}.attempt")
@@ -517,14 +544,20 @@ def load_plan(run_dir: Path) -> Plan:
     path = Path(run_dir) / PLAN_FILE
     try:
         data = json.loads(path.read_bytes(), object_pairs_hook=no_repeated_keys)
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         raise LedgerError(f"{path}: cannot read the plan: {e}") from e
     return parse_plan(data, str(path))
 
 
 def checkout_path(matrix_path: Path, root: Path | None = None) -> str:
-    """`matrix_path` relative to the rbench checkout, as plan.json stores it."""
+    """`matrix_path` relative to the rbench checkout, as plan.json stores it.
+
+    A symlink is refused: the plan would record its target, and retargeting the link later
+    would go unnoticed.
+    """
     root = (root or CHECKOUT_ROOT).resolve()
+    if Path(matrix_path).is_symlink():
+        raise LedgerError(f"matrix {matrix_path} is a symlink; give the matrix file itself")
     try:
         return Path(matrix_path).resolve().relative_to(root).as_posix()
     except ValueError:
@@ -572,7 +605,7 @@ def load_images(path: Path) -> dict[str, Image]:
     """
     try:
         data = json.loads(Path(path).read_bytes(), object_pairs_hook=no_repeated_keys)
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         raise LedgerError(f"images file {path}: cannot read it: {e}") from e
     if not isinstance(data, dict):
         raise LedgerError(f"images file {path}: expected an object of engines")

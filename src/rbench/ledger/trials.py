@@ -6,8 +6,9 @@ A trial directory holds:
                    {"state": "done", "findings_sha256": ..., "usage_sha256": ...}
     findings.json  the trial's findings:
                    [{"file", "start_line", "end_line", "message", "severity"?}]
-    usage.json     its token usage per model:
-                   {"<model>": {"input", "output", "cache_read", "cache_creation"}}
+    usage.json     its token usage, the engine's and the normalization step's apart:
+                   {"engine": {"<model>": {"input", "output", "cache_read", "cache_creation"}},
+                    "normalization": {"<model>": {...}}}
     raw/           engine output, transcripts and logs
 
 Every file goes through `atomic_write`. `done` is written last and records the SHA-256 of
@@ -37,6 +38,9 @@ RAW_DIR = "raw"
 FINDING_KEYS = {"file", "start_line", "end_line", "message"}
 FINDING_OPTIONAL_KEYS = {"severity"}
 USAGE_KEYS = {"input", "output", "cache_read", "cache_creation"}
+# Normalization tokens are recorded apart from the engine's (spec engine-configurations, Findings
+# normalization); one model can serve both in a trial. A step a trial does not run holds {}.
+USAGE_KINDS = ("engine", "normalization")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -93,17 +97,23 @@ def _check_findings(findings: object, where: str) -> None:
 
 
 def _check_usage(usage: object, where: str) -> None:
-    if not isinstance(usage, dict):
-        raise LedgerError(f"{where}: usage must be an object of models")
-    for model, counts in usage.items():
-        at = f"{where}: usage of model {model!r}"
-        if not _text(model):
-            raise LedgerError(f"{at}: expected a model id")
-        if not (isinstance(counts, dict) and counts.keys() == USAGE_KEYS):
-            raise LedgerError(f"{at}: expected exactly {', '.join(sorted(USAGE_KEYS))}")
-        for key, count in counts.items():
-            if type(count) is not int or count < 0:
-                raise LedgerError(f"{at}: {key}: expected a token count from 0")
+    if not (isinstance(usage, dict) and usage.keys() == set(USAGE_KINDS)):
+        raise LedgerError(f"{where}: usage must be an object of exactly {', '.join(USAGE_KINDS)}")
+    for kind in USAGE_KINDS:
+        if not isinstance(usage[kind], dict):
+            raise LedgerError(f"{where}: usage.{kind} must be an object of models")
+        for model, counts in usage[kind].items():
+            _check_counts(model, counts, f"{where}: {kind} usage of model {model!r}")
+
+
+def _check_counts(model: object, counts: object, at: str) -> None:
+    if not _text(model):
+        raise LedgerError(f"{at}: expected a model id")
+    if not (isinstance(counts, dict) and counts.keys() == USAGE_KEYS):
+        raise LedgerError(f"{at}: expected exactly {', '.join(sorted(USAGE_KEYS))}")
+    for key, count in counts.items():
+        if type(count) is not int or count < 0:
+            raise LedgerError(f"{at}: {key}: expected a token count from 0")
 
 
 def set_state(trial_dir: Path, state: str, reason: str | None = None) -> None:
@@ -149,7 +159,7 @@ def read_status(trial_dir: Path) -> TrialStatus:
     path = Path(trial_dir) / STATUS_FILE
     try:
         data = json.loads(path.read_bytes(), object_pairs_hook=no_repeated_keys)
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         raise LedgerError(f"{path}: cannot read the trial status: {e}") from e
     state = data.get("state") if isinstance(data, dict) else None
     if state not in STATES:
@@ -189,7 +199,7 @@ def read_results(trial_dir: Path) -> tuple[list, dict]:
             )
         try:
             results.append(json.loads(payload, object_pairs_hook=no_repeated_keys))
-        except ValueError as e:
+        except (ValueError, RecursionError) as e:
             raise LedgerError(f"{trial_dir / name}: not valid JSON: {e}") from e
     findings, usage = results
     _check_findings(findings, str(trial_dir))
