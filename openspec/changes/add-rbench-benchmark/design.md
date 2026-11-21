@@ -698,13 +698,19 @@ not always visible.
 - `plan.json`;
 - `ledger.lock`;
 - `identity`, random hex that names the run's compose projects (D3);
-- one directory per trial with `status.json`, `findings.json`, `usage.json` and `raw/`;
+- one directory per trial with `status.json`, `findings.json`, `usage.json` and `raw/`, and
+  `wasted.json` once a limit interrupted an attempt: one usage record per such attempt, in the form
+  of `usage.json`, kept outside `raw/` so the rerun keeps it;
 - `judge/`.
 
 Writes are atomic (temporary file, then rename).
 
 Limit detection is per CLI. It reads the error record that ends a turn in the CLI's session file,
-not stdout (engines own stdout, D7):
+not stdout (engines own stdout, D7), and only in a session the shim log binds to a shim launch
+(D5): for Claude, the transcript at the `transcript_path` the SessionStart hook of a shim-started
+`claude` process reported, read for that session's records, and its subagent transcripts beside
+it; for Codex, a rollout in a `binding` record. A file collected only because its path looks like
+a transcript, such as one in the reviewed repository, decides nothing:
 - **Usage limit.**
   - Claude Code 2.1.316: the transcript's synthetic assistant message has `error: "rate_limit"`,
     `apiErrorStatus: 429` and `apiError: "usage_limit_reached"`.
@@ -720,14 +726,28 @@ not stdout (engines own stdout, D7):
     response stream) is inferred from the pinned source's error enum, not observed in the spike.
 
 Both kinds are a limit under spec `run-ledger` (Limit detection and stop; Waiting for the limit to
-reset). The trial becomes `interrupted` and keeps its tokens as wasted. By default the runner drains
-and exits 75. With `--wait`, only the reporting provider pauses. A throttle that the CLI retries and
+reset). The trial becomes `interrupted` and keeps its tokens as wasted. A contaminated trial stays
+contaminated; otherwise a limit wins over a timeout, a misconfiguration and the engine's result,
+since all of them can follow from it. By default the runner drains and exits 75. No trial starts
+from the moment an attempt detects the limit, before its project is removed; trials already
+started finish. Setting the limit and deciding to start a trial take one lock, so every trial
+starts either before the limit was detected or not at all. An error in the same drain, such as that project failing to come down or another
+trial's infrastructure failure, keeps exit 75 and is reported next to the limit, to be fixed
+before resuming. The printed resume command is valid `/bin/sh` that the parser reads back: each
+option the runner was given that differs from the default as one quoted `--option=value`, then
+`--` and the quoted run directory. A run with hidden tasks keeps its directory out of the output,
+as everywhere else: the command reads it from `"${RUN_DIR:?set RUN_DIR to the run directory}"`,
+so the shell refuses to run it with `RUN_DIR` unset or empty, and the line says to set it. With
+`--wait`, only the reporting provider pauses. A throttle that the CLI retries and
 recovers from is not a limit: the turn does not end on such a record.
 
 **Precedence.** The typed classification wins over the message text. Exit status 1 alone selects
 nothing, because both CLIs exit 1 on any failed turn. The text decides only when no typed record
 can be read: Claude's own usage-limit prefixes, and Codex's "You’ve hit your usage limit" and
-"exceeded retry limit, last status: 429" (`messages.code.json` in the fixtures).
+"exceeded retry limit, last status: 429" (`messages.code.json` in the fixtures). That is a Claude
+API error message without `error` and `apiErrorStatus`, a Codex turn error whose
+`codex_error_info` is absent or null (Codex writes an unclassified error as null), and, when no rollout holds a turn error, the `turn.failed` messages on the
+`codex exec --json` stdout of the engine's own shim launch.
 
 **Reset time for `--wait`.**
 - *Claude:* the structured epoch comes first: `quotaLimits.resetsAt`, or
