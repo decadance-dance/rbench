@@ -1,0 +1,145 @@
+{
+  "canary": "rbench-canary-82cae755100148e8a6ec6532a87d88c5",
+  "items": [
+    {
+      "category": "performance",
+      "end_line": 268,
+      "file": "lib/fastimage/fastimage.rb",
+      "id": "sdsykes_fastimage_165-8fc7cd32#0",
+      "message": "When a format has no resolution data, the parser returns nil, which causes parse_packets to raise CannotParseImage (line 488). This is rescued in fetch, but @resolution is never set, so defined?(@resolution) remains false forever. Every subsequent call to fi.resolution or fi.resolution_units triggers a full re-fetch of the image. Verified empirically: calling resolution three times on a GIF produces three fetch invocations. For HTTP URIs this means three network requests per call pair. Fix: explicitly set @resolution = nil (and @resolution_units = nil) before fetching, or set them when CannotParseImage is caught, so the defined? guard can short-circuit on subsequent calls.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 257
+    },
+    {
+      "category": "reliability",
+      "end_line": 44,
+      "file": "lib/fastimage/fastimage_parsing/jpeg.rb",
+      "id": "sdsykes_fastimage_165-8fc7cd32#1",
+      "message": "After reading the JFIF APP0 segment, the code accesses data[7].ord and data[8, 4].unpack without first verifying that the segment is long enough. If a malformed JPEG has an APP0 segment shorter than 8 bytes, data[7] is nil and nil.ord raises NoMethodError. fetch does not rescue NoMethodError, so this exception propagates uncaught to the caller rather than returning nil. A length guard (e.g., next/return :started unless data.length >= 12) is needed before those accesses.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 35
+    },
+    {
+      "category": "reliability",
+      "end_line": 96,
+      "file": "lib/fastimage/fastimage_parsing/exif.rb",
+      "id": "sdsykes_fastimage_165-8fc7cd32#2",
+      "message": "In read_rational_resolution, when absolute_pos < @stream.pos (i.e., the rational value's file offset is behind the current stream position), the code does next if skip_amount < 0, silently dropping that resolution value. The result is x_resolution or y_resolution stays nil, and the caller (tiff.rb or jpeg.rb) returns nil for the whole resolution even though the data exists in the file. This can occur with legal TIFF files where rational values are stored before the IFD. The only correct fix for a forward-only stream would be to raise CannotParseImage or return nil explicitly instead of silently skipping.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 88
+    },
+    {
+      "category": "performance",
+      "end_line": 84,
+      "file": "lib/fastimage/fastimage_parsing/exif.rb",
+      "id": "sdsykes_fastimage_165-8fc7cd32#3",
+      "message": "The early-exit break condition inside parse_exif_ifd is: break if rational_offsets has both X and Y keys && @resolution_unit. ResolutionUnit is an optional TIFF tag (default 2 = inch when absent). When it is absent, @resolution_unit remains nil, so the && @resolution_unit term is falsy and the break never fires even after all needed data is collected. The loop runs through all remaining IFD entries unnecessarily. The condition should break when both rational offsets are collected, separately tracking whether the resolution unit tag was encountered.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 76
+    },
+    {
+      "category": "correctness",
+      "end_line": 26,
+      "file": "lib/fastimage/fastimage_parsing/bmp.rb",
+      "id": "sdsykes_fastimage_165-8fc7cd32#4",
+      "message": "The nil guard only covers the case where both x_ppm and y_ppm are zero (return nil if x_ppm == 0 && y_ppm == 0). If only one dimension is zero — or if either value is negative (the fields are signed 32-bit longs per the BMP spec; some encoders write -1 or other sentinel values) — the code returns a nonsensical resolution like [[0, 2834], :meters] or [[-2834, -2834], :meters]. The guard should be return nil if x_ppm <= 0 || y_ppm <= 0 to reject any non-positive PPM value.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 18
+    },
+    {
+      "category": "api-architecture",
+      "end_line": 62,
+      "file": "lib/fastimage/fastimage_parsing/jpeg.rb",
+      "id": "sdsykes_fastimage_165-8fc7cd32#6",
+      "message": "The resolution method returns Integer values when parsed from a JFIF APP0 segment (via unpack('nn')) but Float values when parsed from EXIF APP1 (num.to_f / den). The same logical value — e.g. 72 DPI — is returned as [72, 72] from JFIF and [72.0, 72.0] from EXIF. This is observable in the test fixtures: test.jpg (JFIF) has [[72, 72], :inches] while test2.jpg (EXIF) has [[72.0, 72.0], :inches]. Callers that compare resolution values or use Integer-specific methods will behave differently depending on which segment is present, without any indication in the API. The return type should be consistent (prefer Float across all paths, or document the distinction and guarantee it).",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 45
+    },
+    {
+      "category": "correctness",
+      "end_line": 34,
+      "file": "lib/fastimage/fastimage_parsing/jpeg.rb",
+      "id": "sdsykes_fastimage_165-8fc7cd32#10",
+      "message": "The JFIF density values are documented to be non-zero. If `x_density` or `y_density` is zero, it should be treated as an invalid or unspecified resolution, and the parser should probably return `nil` or continue searching for EXIF resolution data. The current implementation returns `[[0, 0], :unit]` which is ambiguous.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 34
+    },
+    {
+      "category": "correctness",
+      "end_line": 40,
+      "file": "lib/fastimage/fastimage_parsing/jpeg.rb",
+      "id": "sdsykes_fastimage_165-8fc7cd32#11",
+      "message": "This line returns JFIF resolution as soon as it's found. However, a JPEG file can contain both JFIF and EXIF resolution information. According to the ExifTool documentation, EXIF resolution should be preferred over JFIF when both are present. The current logic prevents this by exiting early.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 40
+    },
+    {
+      "category": "maintainability",
+      "end_line": 454,
+      "file": "lib/fastimage/fastimage.rb",
+      "id": "sdsykes_fastimage_165-8fc7cd32#12",
+      "message": "The result from `parse_resolution` is an array `[[x, y], :units]`. Here, `result` is assigned to `@resolution`, but then `result` itself is also modified. The final line `result = result[0]` makes the method return just `[x, y]`. This is inconsistent with how other properties are handled and could be confusing. It would be clearer to assign the parts to `@resolution` and `@resolution_units` directly and then set the return value.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 454
+    },
+    {
+      "category": "api-architecture",
+      "end_line": 198,
+      "file": "lib/fastimage/fastimage.rb",
+      "id": "sdsykes_fastimage_165-8fc7cd32#23",
+      "message": "This returns both resolution and units. Instance methods return just one or another. It's inconsistent between each other but with class method allows to parse just once. And for instance methods it is parsed just once anyway",
+      "producer": "human",
+      "severity": "nit",
+      "start_line": 198
+    },
+    {
+      "category": "reliability",
+      "end_line": 19,
+      "file": "lib/fastimage/fastimage_parsing/exif.rb",
+      "id": "sdsykes_fastimage_165-8fc7cd32#24",
+      "message": "This introduces Ruby 2.0+ keyword-argument syntax even though the gemspec still declares support for Ruby >= 1.9.2 (`fastimage.gemspec:7`). On supported Ruby 1.9.x, this file will fail to parse before the gem can load; use an options hash or raise the minimum Ruby version.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 19
+    },
+    {
+      "category": "reliability",
+      "end_line": 51,
+      "file": "lib/fastimage/fastimage_parsing/jpeg.rb",
+      "id": "sdsykes_fastimage_165-8fc7cd32#25",
+      "message": "The safe-navigation operator requires Ruby 2.3+, but this gem still advertises Ruby >= 1.9.2 support in `fastimage.gemspec:7`. This will be a syntax error for supported Ruby versions below 2.3; avoid `&.` or update the supported Ruby version.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 51
+    },
+    {
+      "category": "testing",
+      "end_line": 129,
+      "file": "test/test.rb",
+      "id": "sdsykes_fastimage_165-8fc7cd32#26",
+      "message": "The new resolution coverage exercises URLs, file paths, and IOs, but not data URIs, even though data URI handling is a documented FastImage feature and existing tests cover it for size/type. Add a resolution data-URI case so this public API is protected on the same input forms as the rest of the library.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 125
+    },
+    {
+      "category": "documentation",
+      "end_line": 82,
+      "file": "README.md",
+      "id": "sdsykes_fastimage_165-8fc7cd32#27",
+      "message": "This example creates a new remote `FastImage` instance for `resolution_units`, so readers copying it will make a second HTTP request for the same image. Use one instance for both calls to match the instance API and avoid demonstrating unnecessary network fetches.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 79
+    }
+  ]
+}

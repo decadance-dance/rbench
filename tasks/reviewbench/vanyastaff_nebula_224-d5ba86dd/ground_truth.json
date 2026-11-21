@@ -1,0 +1,95 @@
+{
+  "canary": "rbench-canary-7a19f8aaa55241bda0cffeaf5137ccf6",
+  "items": [
+    {
+      "category": "correctness",
+      "end_line": 158,
+      "file": "crates/credential/src/layer/encryption.rs",
+      "id": "vanyastaff_nebula_224-d5ba86dd#0",
+      "message": "Lazy rotation CAS write-back succeeds but returns a credential with the old version number. After `inner.put(updated, CAS{expected_version: credential.version})` succeeds, the backing store version is incremented to N+1, but `credential.version` is still N. The returned `StoredCredential` is therefore stale. Any caller that uses this version for a subsequent CAS write (e.g., the resolver's refresh loop in resolver.rs:306) receives `VersionConflict { actual: N+1 }`. The resolver's 3-attempt retry loop absorbs this, but each lazy rotation consumes one retry slot — under concurrent modifications a legitimate refresh can exhaust the budget and fail. Code paths outside the resolver that do a single-shot CAS after `get()` will always fail when lazy rotation fires.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 133
+    },
+    {
+      "category": "correctness",
+      "end_line": 102,
+      "file": "crates/credential/src/layer/encryption.rs",
+      "id": "vanyastaff_nebula_224-d5ba86dd#1",
+      "message": "`EncryptionLayer::with_keys()` does not register the empty-string key alias that `new()` registers (line 72: `keys.insert(String::new(), key)`). Any `EncryptedData` with `key_id = \"\"` (produced by the public `encrypt()` and `encrypt_with_aad()` functions, which both use `EncryptedData::new(\"\", …)`) cannot be decrypted via a `with_keys()` layer — `key_for_id(\"\")` returns `Err(StoreError::Backend)`. An operator who starts with `new()` mode, has records written by the pre-PR code or by callers of the public `encrypt` API, and then switches to `with_keys()` for key rotation will find those records permanently unreadable.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "must",
+      "start_line": 85
+    },
+    {
+      "category": "api-architecture",
+      "end_line": 205,
+      "file": "crates/credential/src/crypto.rs",
+      "id": "vanyastaff_nebula_224-d5ba86dd#2",
+      "message": "The public `encrypt()` function is still exported from `crates/credential/src/lib.rs` (line 118: `pub use crate::crypto::{EncryptedData, EncryptionKey, decrypt, encrypt}`) but now produces `EncryptedData` with `key_id = \"\"`. Any record written through this public API cannot be read back by an `EncryptionLayer::with_keys()` instance (which has no empty-string key alias). This silently creates data that is durable but unreadable once multi-key rotation is enabled, with no compile-time or runtime warning at write time.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 196
+    },
+    {
+      "category": "maintainability",
+      "end_line": 218,
+      "file": "crates/credential/src/context.rs",
+      "id": "vanyastaff_nebula_224-d5ba86dd#3",
+      "message": "`CredentialContext::resolve_credential` now passes `format!(\"{:?}\", S::pattern())` — a non-unique category string like `\"SecretToken\"` — as the `expected_kind` argument to `CredentialResolverRef::resolve_scheme`. Previously this parameter carried `S::KIND`, a unique per-type string. Two different `AuthScheme` types that share the same `AuthPattern` (e.g., any two custom schemes both returning `AuthPattern::SecretToken`) will now receive the same string, silently breaking any resolver implementation that used the kind string for type-based dispatch. The `downcast::<S>()` call provides type safety, but if the resolver returns the wrong concrete type, the only error is `SchemeMismatch { actual: \"unknown\" }`, which gives no useful diagnostic.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 203
+    },
+    {
+      "category": "maintainability",
+      "end_line": 152,
+      "file": "crates/credential/src/snapshot.rs",
+      "id": "vanyastaff_nebula_224-d5ba86dd#4",
+      "message": "`scheme_pattern` is stored as `format!(\"{:?}\", S::pattern())`. Any two different `AuthScheme` types that both return `AuthPattern::Custom` (the escape hatch for plugin-defined patterns) will have identical `scheme_pattern` strings of `\"Custom\"`. When `project::<S>()` fails for such types the error reports `expected: \"Custom\", actual: \"Custom\"`, which is completely undiagnosable. Since `AuthPattern` is `#[non_exhaustive]`, adding new shared variants has the same problem. The type-safety of `downcast_ref` is unaffected, but error messages become useless.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 152
+    },
+    {
+      "category": "correctness",
+      "end_line": 125,
+      "file": "crates/credential/src/credential.rs",
+      "id": "vanyastaff_nebula_224-d5ba86dd#5",
+      "message": "The `TESTABLE: bool = false` const is now inconsistent with the new `test()` semantics. `test()` returns `Ok(None)` to signal non-testability, making the const redundant and misleading: a credential can return `Ok(Some(TestResult::Success))` from `test()` while still advertising `TESTABLE = false`, or vice versa. Caller code that gates `test()` invocations on `C::TESTABLE` (as suggested in the crate's plans, e.g. `plans/credential-flows-hld.md:542`) will skip testing for credentials that have correctly overridden `test()` but left `TESTABLE = false`.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 125
+    },
+    {
+      "category": "security",
+      "end_line": 240,
+      "file": "crates/credential/src/crypto.rs",
+      "id": "vanyastaff_nebula_224-d5ba86dd#9",
+      "message": "The `decrypt` function returns a `Zeroizing<Vec<u8>>` to ensure the decrypted plaintext is zeroed on drop. However, the calling code in `EncryptionLayer` takes ownership of the inner `Vec<u8>` via `std::mem::take(&mut *plaintext)`, which circumvents the zeroizing behavior. The returned vector `credential.data` is a plain `Vec<u8>` and will not be zeroed when it goes out of scope, leaving sensitive data in memory. The `EncryptionLayer::get` method should return a zeroizing wrapper around the data.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 234
+    },
+    {
+      "category": "correctness",
+      "end_line": 27,
+      "file": "crates/credential/src/credentials/mod.rs",
+      "id": "vanyastaff_nebula_224-d5ba86dd#10",
+      "message": "Changing the built-in `CredentialState::KIND` values here makes existing stored credentials unreadable: `CredentialResolver::load_and_verify` rejects any record whose `state_kind` does not equal the new `C::State::KIND`, so previously stored API key records with `bearer` and basic-auth records with `basic_auth` will now fail resolution (and basic-auth also has a changed JSON field shape). This needs a compatibility path or explicit migration before the old kinds are removed.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 26
+    },
+    {
+      "category": "documentation",
+      "end_line": 64,
+      "file": "crates/webhook/src/rate_limit.rs",
+      "id": "vanyastaff_nebula_224-d5ba86dd#11",
+      "message": "This hard-coded value does not match `DEFAULT_MAX_PATHS`, which is still `10_000` above and is what `new()` assigns to `max_paths`. The docs now understate the cap by 10x and will drift if the constant changes; keep the intra-doc link or use the correct value.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 63
+    }
+  ]
+}

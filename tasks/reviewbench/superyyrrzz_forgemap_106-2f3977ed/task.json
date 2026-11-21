@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "7e44fd27d354fdc21f5d4328e563403801528386b3bb00cf552db2cea540b21f",
+  "base": "2ce83d91f981fc579ec53baf9bce4957fdc240fc",
+  "description": "## Summary\n- Add a custom \"Blacksmith's Forge\" CSS theme for the DocFX documentation site\n- Warm amber/ember tones against dark steel surfaces reflecting ForgeMap's compile-time code generation identity\n- Custom typography: Outfit (headings), DM Sans (body), IBM Plex Mono (code)\n- Full light/dark mode support with smooth transitions\n- Fix theme toggle button visibility on dark navbar\n\n## Test plan\n- [ ] Run `docfx docfx/docfx.json && docfx serve docfx/_site --port 8080` and verify theme renders correctly\n- [ ] Verify light and dark mode toggle works and both themes look good\n- [ ] Verify theme toggle button is visible on the dark navbar\n- [ ] Check landing page gradient title, code blocks, tables, and sidebar styling",
+  "head": "2f3977edabcb8fdf5f947704e727d798a46fe96f",
+  "id": "superyyrrzz_forgemap_106-2f3977ed",
+  "language": "C#",
+  "pr": 106,
+  "repo": "superyyrrzz/ForgeMap",
+  "set": "reviewbench",
+  "title": "docs: add custom Blacksmith's Forge theme for DocFX site"
+}
