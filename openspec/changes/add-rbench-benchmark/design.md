@@ -256,17 +256,29 @@ stays covered by rreview's tests on the host.
 cannot run at all.
 
 ### D7. Token accounting from transcripts
-**Choice.** Usage is summed per session from the trial's transcripts:
-- Claude: per-message usage, deduplicated by `message.id`, because the transcript repeats one
-  message's usage on every streamed chunk;
-- Codex: `turn.completed.usage`. `cached_input_tokens` is probably a subset of `input_tokens`; the
-  spike checks it, and uncached input is `input_tokens - cached_input_tokens` if so.
+**Choice.** Usage is counted per session from the trial's on-disk transcripts, not from stdout
+(checked in the spike on Claude Code 2.1.316 and Codex CLI 0.171.0, issue #24):
+- Claude: the session file under `$CLAUDE_CONFIG_DIR/projects/`. Each message's usage is counted
+  once, deduplicated by `message.id`, because the transcript repeats one message's usage on every
+  content block, and split by `message.model`. The sum matched the billed `modelUsage` exactly on
+  input, output, cache read and cache creation. The stdout `stream-json` assistant events are not
+  used: they under-report output tokens for messages that end in a tool call. Session persistence
+  stays on (no `--no-session-persistence`), or there is no transcript.
+- Codex: the rollout file under `$CODEX_HOME/sessions/`. Its last `token_count` event's
+  `total_token_usage` is the thread's total. `cached_input_tokens` is a subset of `input_tokens`
+  (`total_tokens` = input + output), so uncached input is `input_tokens - cached_input_tokens`;
+  `cache_write_input_tokens` is counted as cache creation (unverified, see Risks).
+
+`modelUsage` and Codex's `turn.completed.usage` are cumulative over a resumed session, so neither is
+summed across the processes of one session.
 
 The quality-against-cost plot uses uncached input plus output, per provider, with cache tokens
 shown apart: cache reads are cheap and would otherwise dominate the axis.
 
-The shim log gives the expected set of sessions. A Claude result event's `modelUsage` is the check,
-for runs where it is visible.
+The shim log gives the expected set of sessions. The check for a Claude session is its cumulative
+`modelUsage`: the transcript's last `cost-state` record (undocumented), or the result event of the
+session's last process where it is visible. On a mismatch, `modelUsage` is used and the trial is
+flagged.
 
 **Alternative considered:** capture each process's final result event. Engines own stdout, so it is
 not always visible.
@@ -412,8 +424,12 @@ limit stops the run by default; waiting for the reset is opt-in (`--wait`).
   with the real login and reads the tool list from the session transcript.
 - **[ReviewBench tasks are public and likely memorized.]** → The report shows task sets apart; `ours`
   and `hidden` carry the weight of the engine decision.
-- **[Transcript usage counts differ from billed usage.]** → The spike compares them with
-  `modelUsage`. If they differ, prefer `modelUsage` where it is visible.
+- **[Transcript usage counts differ from billed usage.]** → The spike (#24) found the on-disk Claude
+  transcript equal to `modelUsage`; a mismatch uses `modelUsage` and flags the trial (D7). Codex's
+  `cache_write_input_tokens` and reasoning tokens were 0 in the spike, so their relation to input
+  and output is unverified; the smoke stage checks them on a real review.
+- **[Codex rollouts carry the ChatGPT account id (`session_meta`).]** → Transcripts stay in the run
+  directory and are never published; only aggregate scores leave it.
 
 ## Migration Plan
 
