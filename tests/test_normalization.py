@@ -22,7 +22,7 @@ from rbench.engines.normalization import (
 from rbench.ledger import PLAN_FILE, LedgerError, create_run, load_plan, store_results
 from rbench.matrix.expansion import MatrixError
 from rbench.plan.estimate import SmokeMedians, default_estimate, trial_estimate
-from rbench.trial import TrialProject
+from rbench.trial import TrialProject, Usage, usage_record
 
 AGENT = "rbench-agent@sha256:" + "a" * 64
 PROXY = "rbench-proxy@sha256:" + "b" * 64
@@ -210,7 +210,7 @@ def test_results_store_in_the_ledger_with_normalization_tokens_apart(fake_bin, t
     (trial_dir / "status.json").write_text('{"state": "running"}')
 
     engine = {"claude-opus-5-5": {"input": 7, "output": 11, "cache_read": 13, "cache_creation": 17}}
-    usage = {"engine": engine, "normalization": got.usage}
+    usage = usage_record(Usage(engine, []), Usage(got.usage, []))
 
     store_results(trial_dir, got.findings, usage)
 
@@ -224,6 +224,7 @@ def test_results_store_in_the_ledger_with_normalization_tokens_apart(fake_bin, t
                 "cache_creation": 800,
             }
         },
+        "incomplete": {"engine": [], "normalization": []},
     }
 
 
