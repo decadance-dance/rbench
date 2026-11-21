@@ -9,7 +9,8 @@ from enum import IntEnum
 from importlib.metadata import version
 from pathlib import Path
 
-from rbench.ledger import load_plan, start_run
+from rbench.ledger import load_plan, matrix_warning, start_run
+from rbench.ledger.resume import recover_trials, run_lock
 from rbench.plan import command as plan_command
 from rbench.tasks import release, reviewbench
 
@@ -102,6 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="on a limit, pause only that provider and resume it after the reset",
             )
+        if name == "resume":
+            sub.add_argument("run", type=Path, help="the run directory to resume")
     return parser
 
 
@@ -125,6 +128,22 @@ def _run(args: argparse.Namespace) -> int:
     return ExitCode.ERROR
 
 
+def _resume(run_dir: Path) -> int:
+    try:
+        with run_lock(run_dir) as previous:
+            plan = load_plan(run_dir)
+            if previous:
+                print(f"warning: recovered stale run lock from {previous}", file=sys.stderr)
+            if warning := matrix_warning(plan):
+                print(warning, file=sys.stderr)
+            queue = recover_trials(run_dir, plan)
+    except (OSError, ValueError) as e:
+        print(f"rbench resume: {e}", file=sys.stderr)
+        return ExitCode.ERROR
+    print(f"{run_dir}: {len(queue)} trials ready to rerun once the trial executor is implemented")
+    return ExitCode.OK
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -132,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
         return plan_command.run(args)
     if args.command == "run":
         return _run(args)
+    if args.command == "resume":
+        return _resume(args.run)
     if args.command == "tasks" and args.task_command in TASK_RUN:
         return TASK_RUN[args.task_command](args)
     name = " ".join(filter(None, [args.command, getattr(args, "task_command", None)]))
