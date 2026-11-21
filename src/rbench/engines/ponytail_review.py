@@ -157,9 +157,10 @@ def _claude_report(stdout: str, where: str) -> str:
     usage = result.get("modelUsage")
     if not (isinstance(usage, dict) and usage):
         raise PluginReviewOutputError(f"{where}: the session made no model call")
-    for model, counts in usage.items():
+    # By position: the model key is engine output too.
+    for n, counts in enumerate(usage.values(), 1):
         if not (isinstance(counts, dict) and _counts(counts, CLAUDE_TOKENS)):
-            raise PluginReviewOutputError(f"{where}: modelUsage of {model!r} has no token counts")
+            raise PluginReviewOutputError(f"{where}: modelUsage entry {n} has no token counts")
     text = result.get("result")
     if not isinstance(text, str):
         raise PluginReviewOutputError(f"{where}: the result has no text")
@@ -175,7 +176,7 @@ def _codex_report(stdout: str, answer: str | None, where: str) -> str:
     with its usage and no failed one, and the file holds the session's last message. A top-level
     `error` event alone fails nothing: Codex also emits it for an error it retries, and only its
     exit status tells the two apart (`report`)."""
-    completed = message = False
+    completed, last = False, None  # `last`: the text of the last agent message
     # JSONL records end at LF only: a JSON string may hold U+2028, which splitlines() splits on.
     for i, line in enumerate(stdout.split("\n")):
         if not line.strip():
@@ -184,6 +185,8 @@ def _codex_report(stdout: str, answer: str | None, where: str) -> str:
         if not isinstance(event, dict):
             raise PluginReviewOutputError(f"{where}: stdout line {i + 1} is not an event")
         kind, item = event.get("type"), event.get("item")
+        if not isinstance(kind, str):
+            raise PluginReviewOutputError(f"{where}: stdout line {i + 1}: the event has no type")
         if kind == "turn.failed":
             raise PluginReviewOutputError(f"{where}: the session reported turn.failed")
         if kind == "turn.completed":
@@ -198,16 +201,22 @@ def _codex_report(stdout: str, answer: str | None, where: str) -> str:
             and isinstance(item, dict)
             and item.get("type") == "agent_message"
         ):
-            if not isinstance(item.get("text"), str):
+            last = item.get("text")
+            if not isinstance(last, str):
                 raise PluginReviewOutputError(f"{where}: stdout line {i + 1}: message has no text")
-            message = True
     if not completed:
         raise PluginReviewOutputError(f"{where}: the session completed no turn")
     if answer is None:
         raise PluginReviewOutputError(f"{where}: the session wrote no {OUTPUT_PATH}")
     # With no last message the CLI writes an empty file: that is no review, not a blank one (D9).
-    if not (answer.strip() or message):
-        raise PluginReviewOutputError(f"{where}: the session gave no final message")
+    # A blank file is a blank review only when the last message is blank too.
+    if not answer.strip():
+        if last is None:
+            raise PluginReviewOutputError(f"{where}: the session gave no final message")
+        if last.strip():
+            raise PluginReviewOutputError(
+                f"{where}: {OUTPUT_PATH} is blank but the last message is not blank"
+            )
     return answer
 
 

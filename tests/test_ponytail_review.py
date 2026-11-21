@@ -308,7 +308,7 @@ def test_a_blank_review_has_no_findings_and_runs_no_normalizer(fake_bin, tmp_pat
     [
         # A success envelope whose usage entry is not counts, with an empty result.
         ("claude-sonnet-5-5", claude_result(modelUsage={"claude-sonnet-5-5": None}, result=""),
-         None, "modelUsage of 'claude-sonnet-5-5' has no token counts"),
+         None, "modelUsage entry 1 has no token counts"),
         # A completion without its required usage, and the empty file.
         ("gpt-6.2-sol", codex_stdout("turn.completed"), "", "turn.completed has no token usage"),
         # A valid completion with no agent message: the CLI's empty placeholder file.
@@ -336,6 +336,8 @@ def test_a_session_without_evidence_of_a_review_is_not_scored_as_zero_findings(
         (claude_result(modelUsage={}), "made no model call"),
         (claude_result(modelUsage={"claude-opus-5-5": {"inputTokens": 1}}), "no token counts"),
         (claude_result(modelUsage={"x": dict.fromkeys(CLAUDE_TOKENS, -1)}), "no token counts"),
+        # The key is engine output too: the entry is named by its position.
+        (claude_result(modelUsage=MODEL_USAGE | {SECRET: None}), "modelUsage entry 2 has no"),
         (claude_result(result=None), "has no text"),
     ],
 )
@@ -352,6 +354,8 @@ def test_claude_output_without_a_review_fails_the_trial_without_quoting_it(stdou
         (SECRET + "\n", REPORT, "stdout line 1 is not JSON"),
         ('{"type": "turn.started", "x": NaN}\n', REPORT, "stdout line 1 is not JSON"),
         (CODEX_OK + "[1]\n", REPORT, "stdout line 5 is not an event"),
+        (CODEX_OK + '{"type": []}\n', REPORT, "stdout line 5: the event has no type"),
+        (CODEX_OK + '{"item": {}}\n', REPORT, "stdout line 5: the event has no type"),
         (codex_stdout("turn.started", "turn.failed"), REPORT, "reported turn.failed"),
         (codex_stdout(*STARTED, message(REPORT), "turn.failed", COMPLETED), REPORT, "turn.failed"),
         (codex_stdout(*STARTED, message(REPORT)), REPORT, "completed no turn"),
@@ -361,6 +365,10 @@ def test_claude_output_without_a_review_fails_the_trial_without_quoting_it(stdou
          "line 3: turn.completed has no token usage"),
         (codex_stdout({"type": "item.completed", "item": {"type": "agent_message"}}, COMPLETED),
          REPORT, "line 1: message has no text"),
+        # A blank file stands only for a blank last message, never for a nonblank one.
+        (codex_stdout(*STARTED, message(SECRET), COMPLETED), "", "last message is not blank"),
+        (codex_stdout(*STARTED, message(""), message(SECRET), COMPLETED), "\n",
+         "last message is not blank"),
     ],
 )  # fmt: skip
 def test_codex_output_without_a_review_fails_the_trial_without_quoting_it(stdout, answer, message):
