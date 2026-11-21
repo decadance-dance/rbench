@@ -20,12 +20,13 @@ mapped from, which is never stored itself:
                "severity_map": {"high": "must", ...}, "producer_map": {"human_review": "human", ...}}
     "tasks": {"<task-id>": {"sha256": ..., "license": ..., "golden": {"path": ..., "sha256": ...}}}
 
-A changed `source` needs a higher version, like a changed task. Changelog entries number the versions 1 to `version`; each
-names the tasks it changed with their new hash, or null for a task it removed. A task's hash in
-`tasks` must equal the one in the latest changelog entry naming it, so a new hash cannot be
-recorded without a changelog entry. Against the manifest committed at a base revision
-(`check_version_history`), a changed, added or removed task needs a higher version, and
-changelog entries are append-only.
+A changed `source` needs a higher version, like a changed task.
+
+Changelog entries number the versions 1 to `version`; each names the tasks it changed with
+their new hash, or null for a task it removed or an import skipped. A task's hash in `tasks` must
+equal the one in the latest changelog entry naming it, so a new hash cannot be recorded without a
+changelog entry. Against the manifest committed at a base revision (`check_version_history`), a
+changed, added or removed task needs a higher version, and changelog entries are append-only.
 
 A task's content hash is the SHA-256 of the canonical JSON of its `task.json` (metadata, PR title
 and description, archive hash) and `ground_truth.json`: formatting and key order do not change it,
