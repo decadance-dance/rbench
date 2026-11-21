@@ -1,16 +1,21 @@
 """The `codex-review` adapter (design D13): declaration, launch, shim merge and findings."""
 
 import json
+import os
+import shutil
+import socket
 import subprocess
 from pathlib import Path
 
 import pytest
-from test_shims import CODEX, CODEX_FLAGS, shim
+from test_shims import CODEX, CODEX_FLAGS, collector, fake_proc, shim
 
 from rbench.engines import codex_review
 from rbench.engines.codex_review import ReviewOutputError
 from rbench.engines.declaration import DeclarationError, Setting, load_engine, parse_engine
 from rbench.matrix.expansion import Configuration, RoleSetting
+from rbench.trial import unbound_sessions
+from rbench.trial.repository import REPO_DIR
 
 ENGINES = Path(__file__).parents[1] / "engines"
 MODEL, EFFORT = "gpt-6.2-astra", "medium"
@@ -97,15 +102,25 @@ def test_fake_codex_gets_the_launch_unchanged_from_the_checkout(fake_bin, tmp_pa
     assert (call["argv"], call["stdin"], call["cwd"]) == (ARGV, "", str(tmp_path))
 
 
+def launch_record(**change) -> dict:
+    """The launch record the real shim logs for the default launch, run from the checkout."""
+    final, added, rewrites = shim.codex_launch(ARGV, CODEX)
+    record = {"kind": "launch", "cli": "codex", "argv": ARGV, "cwd": REPO_DIR, "added": added}
+    record |= {"rewrites": rewrites, "final_argv": final}
+    record["homes"] = {"CLAUDE_CONFIG_DIR": None, "CODEX_HOME": None}
+    return collector.check(record | change, ("launch",))
+
+
 def records(*bindings: tuple[str, dict]) -> list[dict]:
-    log = [{"seq": 1, "kind": "launch", "launch": 1, "cli": "codex", "argv": ARGV, "rewrites": []}]
+    log = [{"seq": 1, "launch": 1, **launch_record()}]
     for n, (path, meta) in enumerate(bindings, 2):
         log.append({"seq": n, "kind": "binding", "launch": 1, "path": path, "meta": meta})
     return log
 
 
 ROOT_META = {"id": "t1", "source": "exec"}
-CHILD_META = {"id": "t2", "source": {"subagent": {"thread_spawn": {"parent_thread_id": "t1"}}}}
+# Codex 0.171.0's review thread: its parent at the top level, which the shim log's meta drops.
+CHILD_META = {"id": "t2", "parent_thread_id": "t1", "source": {"subagent": "review"}}
 
 
 def finding(path: str = "/rbench/repo/src/app.py", start: int = 3, end: int = 4, **extra) -> dict:
@@ -127,57 +142,132 @@ def review(*findings: object, correctness: str = "patch is incorrect") -> dict:
     }
 
 
-def rollout(transcripts: Path, path: str, *outputs: object) -> None:
-    lines = [{"type": "session_meta", "payload": {"id": "t1"}}]
-    lines.append({"type": "event_msg", "payload": {"type": "agent_message", "message": "x"}})
-    lines.append([1])  # a line that is no record is skipped
+def rollout(transcripts: Path, path: str, *outputs: object, meta: dict = ROOT_META) -> Path:
+    lines = [json.dumps({"type": "session_meta", "payload": meta})]
+    lines.append(json.dumps({"type": "event_msg", "payload": {"type": "agent_message"}}))
+    lines += ["[1]", '{"cut short']  # a line that is no record, or no JSON, is skipped
     for output in outputs:
         item = {"type": "ExitedReviewMode", "id": "r", "review_output": output}
-        lines.append({"type": "event_msg", "payload": {"type": "item_completed", "item": item}})
+        payload = {"type": "item_completed", "item": item}
+        lines.append(json.dumps({"type": "event_msg", "payload": payload}))
     file = transcripts / path.lstrip("/")
     file.parent.mkdir(parents=True, exist_ok=True)
-    file.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    file.write_text("".join(line + "\n" for line in lines))
+    return file
+
+
+TWO_FINDINGS = [
+    {"file": "src/app.py", "start_line": 3, "end_line": 4, "severity": "P1",
+     "message": "[P1] Off-by-one in the loop\n\nThe loop skips the last item."},
+    {"file": "lib/b.py", "start_line": 7, "end_line": 7, "severity": "P0",
+     "message": "[P1] Off-by-one in the loop\n\nThe loop skips the last item."},
+]  # fmt: skip
 
 
 def test_findings_come_from_the_parent_rollouts_review_output(tmp_path: Path):
     rollout(tmp_path, ROOT, review(finding(), finding("lib/b.py", 7, 7, priority=0)))
-    rollout(tmp_path, CHILD)  # the review thread's own rollout holds no result
-    log = records((ROOT, ROOT_META), (CHILD, CHILD_META))
+    rollout(tmp_path, CHILD, meta=CHILD_META)  # the review thread's own rollout holds no result
+    log = records((ROOT, ROOT_META), (CHILD, {"id": "t2", "source": {"subagent": "review"}}))
 
-    output = codex_review.review_output(log, tmp_path)
+    output = codex_review.review_output(log, tmp_path, "trial x")
 
-    assert codex_review.findings(output, "trial x") == [
-        {"file": "src/app.py", "start_line": 3, "end_line": 4, "severity": "P1",
-         "message": "[P1] Off-by-one in the loop\n\nThe loop skips the last item."},
-        {"file": "lib/b.py", "start_line": 7, "end_line": 7, "severity": "P0",
-         "message": "[P1] Off-by-one in the loop\n\nThe loop skips the last item."},
-    ]  # fmt: skip
+    assert codex_review.findings(output, "trial x") == TWO_FINDINGS
+
+
+def test_default_launch_carries_from_the_shim_records_to_findings(tmp_path: Path, monkeypatch):
+    """The pinned review delegate's rollout, bound by the real shim watcher and accepted by the
+    collector: the review thread still counts as a child, so the root's review is scored."""
+    container, transcripts = tmp_path / "container", tmp_path / "transcripts"
+    root = rollout(
+        container, "/home/node/.codex/sessions/2026/11/21/rollout-root.jsonl",
+        review(finding(), finding("lib/b.py", 7, 7, priority=0)),
+    )  # fmt: skip
+    child = rollout(
+        container, "/home/node/.codex/sessions/2026/11/21/rollout-child.jsonl", meta=CHILD_META
+    )
+    append = 0o2102002  # O_RDWR | O_APPEND | O_CLOEXEC
+    fake_proc(
+        tmp_path / "proc", {10: 1, 11: 10}, {10: {"3": (root, append)}, 11: {"3": (child, append)}}
+    )
+    monkeypatch.setattr(shim, "PROC", str(tmp_path / "proc"))
+    ours, theirs = socket.socketpair()
+    stop, go = os.pipe()
+    os.close(go)  # the CLI has exited: the watcher reports once and returns
+    with ours, theirs:
+        shim.watch(10, ours, stop)
+        ours.shutdown(socket.SHUT_WR)
+        sent = [json.loads(line) for line in theirs.makefile("r", encoding="utf-8")]
+    os.close(stop)
+    bindings = [collector.check(r, ("binding",)) for r in sent]
+    log = [{"seq": 1, "launch": 1, **launch_record()}]
+    log += [{"seq": n, "launch": 1, **r} for n, r in enumerate(bindings, 2)]
+    exit_ = collector.check({"kind": "exit", "status": 0}, ("exit",))
+    log.append({"seq": len(log) + 1, "launch": 1, **exit_})
+    for file in (root, child):
+        target = transcripts / str(file).lstrip("/")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(file, target)
+
+    assert [b["meta"] for b in bindings if b["path"] == str(child)] == [
+        {"id": "t2", "source": {"subagent": "review"}}
+    ]
+    assert unbound_sessions(log, transcripts) == []
+    assert codex_review.check_launches(log, codex_review.launch(settings())) == []
+    output = codex_review.review_output(log, transcripts, "trial x")
+    assert codex_review.findings(output, "trial x") == TWO_FINDINGS
 
 
 def test_a_review_with_no_findings_has_none(tmp_path: Path):
     rollout(tmp_path, ROOT, review(correctness="patch is correct"))
 
-    output = codex_review.review_output(records((ROOT, ROOT_META)), tmp_path)
+    output = codex_review.review_output(records((ROOT, ROOT_META)), tmp_path, "trial x")
 
     assert codex_review.findings(output, "trial x") == []
 
 
 @pytest.mark.parametrize(
-    ("outputs", "bindings", "message"),
+    ("outputs", "child", "bindings", "message"),
     [
-        ([None], [(ROOT, ROOT_META)], "without a result"),
-        ([], [(ROOT, ROOT_META)], "found 0"),
-        ([review(), review()], [(ROOT, ROOT_META)], "found 2"),
-        ([review()], [(ROOT, ROOT_META), (CHILD, {"id": "t3"})], "found 2"),
-        ([review()], [], "found 0"),
+        ([None], CHILD_META, [ROOT], "record 2: the review ended without a result"),
+        ([], CHILD_META, [ROOT], "found 0"),
+        ([review(), review()], CHILD_META, [ROOT], "found 2"),
+        ([review()], {"id": "t3"}, [ROOT, CHILD], "trial x: expected one root .*, found 2"),
+        ([review()], CHILD_META, [], "found 0"),
+        ([review()], CHILD_META, [CHILD], "found 0"),  # only the review thread was bound
     ],
 )
-def test_no_single_completed_review_fails_the_trial(tmp_path, outputs, bindings, message):
+def test_no_single_completed_review_fails_the_trial(tmp_path, outputs, child, bindings, message):
     rollout(tmp_path, ROOT, *outputs)
-    rollout(tmp_path, CHILD)
+    rollout(tmp_path, CHILD, meta=child)
+    log = records(*((path, {}) for path in bindings))
 
     with pytest.raises(ReviewOutputError, match=message):
-        codex_review.review_output(records(*bindings), tmp_path)
+        codex_review.review_output(log, tmp_path, "trial x")
+
+
+def test_a_repeated_key_in_the_review_line_fails_the_trial(tmp_path: Path):
+    file = rollout(tmp_path, ROOT, review(finding()))
+    line = json.dumps({"type": "event_msg", "payload": {"type": "item_completed"}})
+    # A second `findings` key: json would keep the last one and score it.
+    file.write_text(file.read_text().replace('{"findings": [', '{"findings": [], "findings": ['))
+    with file.open("a") as f:
+        f.write(line + "\n")
+
+    with pytest.raises(ReviewOutputError, match=r"^trial x: rollout bound by shim log record 2, "
+                       r"line 5: a key is repeated$"):  # fmt: skip
+        codex_review.review_output(records((ROOT, ROOT_META)), tmp_path, "trial x")
+
+
+def test_an_uncollected_rollout_fails_without_naming_its_file(tmp_path: Path):
+    path = "/home/node/.codex/sessions/rollout-secret-name.jsonl"
+
+    with pytest.raises(ReviewOutputError) as e:
+        codex_review.review_output(records((path, ROOT_META)), tmp_path, "trial x")
+
+    assert (
+        str(e.value)
+        == "trial x: rollout bound by shim log record 2: the bound rollout was not collected"
+    )
 
 
 @pytest.mark.parametrize(
@@ -187,14 +277,23 @@ def test_no_single_completed_review_fails_the_trial(tmp_path, outputs, bindings,
         (review(correctness="") | {"overall_explanation": "prose"}, "not a structured review"),
         (review(finding("/etc/passwd")), "finding 0: the file is not inside"),
         (review(finding(), finding("../x.py")), "finding 1: the file is not inside"),
+        (review(finding("/rbench/repo/a\0b.py")), "finding 0: the file is not inside"),
         (review(finding(start=0, end=0)), "finding 0: start_line"),
         (review(finding(start=5, end=4)), "finding 0: end_line"),
+        (review(finding(start=2**32, end=2**32)), "finding 0: line_range: expected .* u32"),
+        (review(finding(start=-1, end=3)), "finding 0: line_range"),
+        (review(finding(end=4.0)), "finding 0: line_range"),
         (review(finding(priority=4)), "priority"),
         (review(finding(priority=True)), "priority"),
         (review(finding(code_location=None)), "code_location"),
         (review(finding(body=None)), "body"),
+        (review(finding(confidence_score="high")), "finding 0: expected .*confidence_score"),
+        (review(finding(confidence_score=float("nan"))), "confidence_score"),
         (review("not an object"), "code_location"),
-        ({"findings": None}, "expected a list"),
+        ({"findings": None}, "review_output: expected findings"),
+        ({"findings": []}, "review_output: expected findings"),
+        (review() | {"overall_confidence_score": None}, "overall_confidence_score"),
+        (review() | {"overall_explanation": 1}, "overall_explanation"),
     ],
 )
 def test_malformed_review_output_is_rejected_whole(output: dict, message: str):
@@ -211,9 +310,23 @@ def test_argv_log_check():
     ]
     other = codex_review.launch(settings(effort="high"))
     assert codex_review.check_launches(records(), other) == [
-        "the launch is not the argv the codex-review adapter built"
+        "the launch is not the argv the codex-review adapter built",
+        "the CLI did not get the codex-review argv with only the policy flags added",
     ]
     rewritten = [records()[0] | {"rewrites": [{"index": 1}]}]
     assert codex_review.check_launches(rewritten, launch) == [
         "the shim rewrote the codex-review launch's argv"
+    ]
+
+
+def test_launch_check_reads_the_argv_the_cli_got_and_its_directory():
+    launch = codex_review.launch(settings())
+    final = launch_record()["final_argv"]
+    other_model = [a.replace(f'review_model="{MODEL}"', 'review_model="other"') for a in final]
+
+    assert codex_review.check_launches([launch_record(final_argv=other_model)], launch) == [
+        "the CLI did not get the codex-review argv with only the policy flags added"
+    ]
+    assert codex_review.check_launches([launch_record(cwd="/rbench")], launch) == [
+        "the codex-review launch did not run in the reviewed checkout /rbench/repo"
     ]

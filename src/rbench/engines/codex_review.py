@@ -15,12 +15,15 @@ and the stdout JSONL are kept for diagnostics only.
 """
 
 import json
-from collections.abc import Mapping
+import math
+from collections.abc import Iterator, Mapping
 from pathlib import Path, PurePosixPath
 
 from rbench.engines.declaration import DeclarationError, Engine, Setting
 from rbench.engines.normalization import NormalizationError, parse_findings
 from rbench.engines.plain import Launch
+from rbench.ledger.trials import no_repeated_keys
+from rbench.trial.hermetic import POLICY
 from rbench.trial.repository import REPO_DIR
 from rbench.trial.sessions import _find
 
@@ -30,6 +33,8 @@ ROLE = "reviewer"
 OUTPUT_PATH = "/home/node/codex-review.md"
 # Codex's built-in review prompt asks for priorities 0 to 3 (P0 most severe).
 PRIORITIES = range(4)
+# The pinned `ReviewLineRange` holds `u32` lines.
+U32 = range(2**32)
 
 
 class ReviewOutputError(ValueError):
@@ -77,7 +82,9 @@ def launch(settings: Mapping) -> Launch:
 
 def check_launches(records: list[dict], launch: Launch) -> list[str]:
     """What in the shim log shows that the trial did not run `launch` as built: exactly one
-    launch, with the argv the adapter built and nothing rewritten."""
+    launch, with the argv the adapter built, nothing rewritten, the CLI given that argv with only
+    the policy flags added (design D5), and run from the reviewed checkout, where `base` is the
+    PR's base."""
     launches = [r for r in records if r.get("kind") == "launch"]
     if len(launches) != 1:
         return [f"expected one launch in the shim log, found {len(launches)}"]
@@ -87,49 +94,86 @@ def check_launches(records: list[dict], launch: Launch) -> list[str]:
         problems.append(f"the launch is not the argv the {NAME} adapter built")
     if record.get("rewrites"):
         problems.append(f"the shim rewrote the {NAME} launch's argv")
+    policy = POLICY["codex"]
+    final = [*policy["flags"], launch.argv[1], *policy["exec_flags"], *launch.argv[2:]]
+    if record.get("final_argv") != final:
+        problems.append(f"the CLI did not get the {NAME} argv with only the policy flags added")
+    if record.get("cwd") != REPO_DIR:
+        problems.append(f"the {NAME} launch did not run in the reviewed checkout {REPO_DIR}")
     return problems
 
 
-def review_output(records: list[dict], transcripts: Path) -> dict:
+def _records(file: Path, where: str) -> Iterator[tuple[int, dict]]:
+    """The JSON object lines of a collected rollout, numbered from 1. A line that is not JSON is
+    skipped (a write cut short); one that repeats a key is ambiguous and fails the trial."""
+    try:
+        with file.open(encoding="utf-8") as f:
+            for n, line in enumerate(f, 1):
+                try:
+                    record = json.loads(line, object_pairs_hook=no_repeated_keys)
+                except json.JSONDecodeError:
+                    continue
+                except ValueError:
+                    raise ReviewOutputError(f"{where}, line {n}: a key is repeated") from None
+                if isinstance(record, dict):
+                    yield n, record
+    except (OSError, UnicodeDecodeError):
+        raise ReviewOutputError(f"{where}: cannot read the collected rollout") from None
+
+
+def _collected(transcripts: Path, path: str, where: str) -> Path:
+    """The collected copy of the rollout at container `path`: a regular file below `transcripts`."""
+    p = PurePosixPath(path)
+    file = Path(transcripts, *p.parts[1:])
+    if not p.is_absolute() or ".." in p.parts or file.is_symlink() or not file.is_file():
+        raise ReviewOutputError(f"{where}: the bound rollout was not collected")
+    return file
+
+
+def review_output(records: list[dict], transcripts: Path, where: str) -> dict:
     """The `review_output` of the trial's review, from the rollout of the root thread its launch
     bound (`transcripts` holds the collected rollouts at their container paths, as `collect` lays
-    them out). Raises `ReviewOutputError` when there is no single completed review."""
-    roots = sorted({
-        r["path"] for r in records
-        if r.get("kind") == "binding" and isinstance(r.get("meta"), dict)
-        and _find(r["meta"], "parent_thread_id") is None
-    })  # fmt: skip
+    them out). Raises `ReviewOutputError`, naming `where` (the trial) and the shim log record or
+    rollout line, when there is no single completed review.
+
+    A thread is a root when the session_meta of its collected rollout names no `parent_thread_id`:
+    Codex 0.171.0's review thread names its parent at the top level (source `subagent: review`),
+    which the shim log's binding metadata does not keep."""
+    roots: dict[str, str] = {}  # container path -> where it was bound
+    for r in records:
+        if r.get("kind") != "binding" or not isinstance(r.get("path"), str):
+            continue
+        at = f"{where}: rollout bound by shim log record {r.get('seq')}"
+        file = _collected(transcripts, r["path"], at)
+        first = next(_records(file, at), (0, {}))[1]
+        meta = first.get("payload") if first.get("type") == "session_meta" else None
+        if not isinstance(meta, dict):
+            raise ReviewOutputError(f"{at}: no session_meta on its first line")
+        if _find(meta, "parent_thread_id") is None:
+            roots.setdefault(r["path"], at)
     if len(roots) != 1:
-        raise ReviewOutputError(f"expected one root thread bound to the launch, found {len(roots)}")
-    rollout = Path(transcripts) / roots[0].lstrip("/")
+        raise ReviewOutputError(
+            f"{where}: expected one root thread bound to the launch, found {len(roots)}"
+        )
+    ((path, at),) = roots.items()
     outputs = []
-    try:
-        with rollout.open(encoding="utf-8") as f:
-            for line in f:
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                payload = record.get("payload")
-                if (
-                    record.get("type") == "event_msg"
-                    and isinstance(payload, dict)
-                    and payload.get("type") == "item_completed"
-                    and isinstance(payload.get("item"), dict)
-                    and payload["item"].get("type") == "ExitedReviewMode"
-                ):
-                    outputs.append(payload["item"].get("review_output"))
-    except (OSError, UnicodeDecodeError) as e:
-        raise ReviewOutputError(f"cannot read the parent rollout {roots[0]}: {e}") from None
+    for _, record in _records(_collected(transcripts, path, at), at):
+        payload = record.get("payload")
+        if (
+            record.get("type") == "event_msg"
+            and isinstance(payload, dict)
+            and payload.get("type") == "item_completed"
+            and isinstance(payload.get("item"), dict)
+            and payload["item"].get("type") == "ExitedReviewMode"
+        ):
+            outputs.append(payload["item"].get("review_output"))
     if len(outputs) != 1:
         raise ReviewOutputError(
-            f"expected one completed review in the parent rollout, found {len(outputs)}"
+            f"{at}: expected one completed review in the parent rollout, found {len(outputs)}"
         )
     (output,) = outputs
     if not isinstance(output, dict):
-        raise ReviewOutputError("the review ended without a result (interrupted or aborted)")
+        raise ReviewOutputError(f"{at}: the review ended without a result (interrupted or aborted)")
     return output
 
 
@@ -146,15 +190,29 @@ def _relative(path: object) -> str | None:
     return None if ".." in p.parts or str(p) == "." else str(p)
 
 
+def _number(value: object) -> bool:
+    """A finite JSON number, as the pinned `f32` confidence scores are."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def findings(output: dict, where: str) -> list[dict]:
     """The trial's findings from `review_output`, in the ledger's format: the file relative to the
     checkout, the line range, the title and body as the message, and the priority as the label
-    `P0`..`P3`. Engine output is untrusted: one bad item rejects the whole result, naming `where`
-    (the trial) and the item."""
-    items = output.get("findings")
-    if not isinstance(items, list):
-        raise ReviewOutputError(f"{where}: review_output.findings: expected a list")
-    if not items and output.get("overall_correctness") == "":
+    `P0`..`P3`. Engine output is untrusted: the result must have the pinned `ReviewOutputEvent`
+    shape, and one bad item rejects the whole result, naming `where` (the trial) and the item."""
+    if not (
+        isinstance(output, dict)
+        and isinstance(output.get("findings"), list)
+        and isinstance(output.get("overall_correctness"), str)
+        and isinstance(output.get("overall_explanation"), str)
+        and _number(output.get("overall_confidence_score"))
+    ):
+        raise ReviewOutputError(
+            f"{where}: review_output: expected findings (a list), overall_correctness, "
+            "overall_explanation and overall_confidence_score"
+        )
+    items = output["findings"]
+    if not items and output["overall_correctness"] == "":
         # Codex keeps an answer it cannot parse as text, with no findings and no verdict.
         raise ReviewOutputError(f"{where}: the reviewer's answer was not a structured review")
     converted = []
@@ -162,20 +220,29 @@ def findings(output: dict, where: str) -> list[dict]:
         at = f"{where}: review finding {i}"
         location = item.get("code_location") if isinstance(item, dict) else None
         lines = location.get("line_range") if isinstance(location, dict) else None
-        if not (isinstance(lines, dict) and isinstance(item.get("title"), str)):
-            raise ReviewOutputError(f"{at}: expected title, body and a code_location line_range")
-        file = _relative(location.get("absolute_file_path"))
+        if not (
+            isinstance(location, dict)
+            and isinstance(lines, dict)
+            and isinstance(item.get("title"), str)
+            and isinstance(item.get("body"), str)
+            and _number(item.get("confidence_score"))
+        ):
+            raise ReviewOutputError(
+                f"{at}: expected title, body, confidence_score and a code_location line_range"
+            )
+        start, end = lines.get("start"), lines.get("end")
+        if not all(type(n) is int and n in U32 for n in (start, end)):
+            raise ReviewOutputError(f"{at}: line_range: expected start and end as u32 integers")
+        path = location.get("absolute_file_path")
+        file = _relative(path) if isinstance(path, str) and "\0" not in path else None
         if file is None:
             raise ReviewOutputError(f"{at}: the file is not inside the reviewed checkout")
         priority = item.get("priority")
         if type(priority) is not int or priority not in PRIORITIES:
             raise ReviewOutputError(f"{at}: priority: expected an integer from 0 to 3")
-        body = item.get("body")
-        if not isinstance(body, str):
-            raise ReviewOutputError(f"{at}: body: expected a string")
-        message = "\n\n".join(t for t in (item["title"].strip(), body.strip()) if t)
+        message = "\n\n".join(t for t in (item["title"].strip(), item["body"].strip()) if t)
         converted.append({
-            "file": file, "start_line": lines.get("start"), "end_line": lines.get("end"),
+            "file": file, "start_line": start, "end_line": end,
             "message": message, "severity": f"P{priority}",
         })  # fmt: skip
     try:
