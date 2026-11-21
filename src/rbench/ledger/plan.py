@@ -39,6 +39,8 @@ from pathlib import Path, PurePosixPath
 from rbench.atomic import atomic_write
 from rbench.engines.declaration import CLIS, Engine, Setting, load_engine, parse_engine
 from rbench.engines.pins import MODELS, FloatingRefError, check_ref
+from rbench.engines.plain import NAME as PLAIN
+from rbench.engines.plain import expected_inputs
 from rbench.ledger.trials import (
     RAW_DIR,
     RUN_ID,
@@ -415,7 +417,10 @@ def parse_plan(data: object, where: str) -> Plan:
     for i, raw in enumerate(_list(d["configurations"], f"{where}: configurations")):
         at = f"{where}: configurations[{i}]"
         c = _fields(raw, at, {"id", "providers", "settings"})
-        s = _fields(c["settings"], f"{at}.settings", {"engine", "version", "roles"})
+        keys = {"engine", "version", "roles"}
+        if isinstance(c["settings"], dict) and "inputs" in c["settings"]:
+            keys.add("inputs")  # only an engine with input files, such as `plain`, has it
+        s = _fields(c["settings"], f"{at}.settings", keys)
         engine = engines.get(s["engine"]) if isinstance(s["engine"], str) else None
         if engine is None:
             raise LedgerError(f"{at}.settings.engine: not an engine of the plan")
@@ -439,7 +444,22 @@ def parse_plan(data: object, where: str) -> Plan:
                 except ValueError as error:
                     raise LedgerError(str(error)) from None
             roles.append((role, RoleSetting(tuple(models), effort)))
-        config = Configuration(s["engine"], s["version"], tuple(roles))
+        inputs = _object(s.get("inputs", {}), f"{at}.settings.inputs")
+        if s["engine"] == PLAIN and any(len(r.models) != 1 for _, r in roles):
+            raise LedgerError(f"{at}.settings.roles: plain runs one model per configuration")
+        if "inputs" in s:
+            # A plan frozen before the inputs joined the settings has none; its plain trials are
+            # refused at launch. Present, they are exactly the ones plain's provider reads.
+            clis = {MODELS[m] for _, r in roles for m in r.models}
+            if s["engine"] != PLAIN or inputs.keys() != expected_inputs(clis):
+                raise LedgerError(
+                    f"{at}.settings.inputs: not the input files of this configuration"
+                )
+        for name, digest in sorted(inputs.items()):
+            _string(digest, f"{at}.settings.inputs.{name}", _HEX64)
+        config = Configuration(
+            s["engine"], s["version"], tuple(roles), tuple(sorted(inputs.items()))
+        )
         if config.settings != s or config.id != c["id"]:
             raise LedgerError(f"{at}.id: does not match its settings")
         if c["providers"] != sorted(config.providers):
