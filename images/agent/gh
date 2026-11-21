@@ -91,6 +91,10 @@ function view(rest) {
     latestReviews: () => [],
     reviewRequests: () => [],
     reviewDecision: () => "",
+    // A URL of no real repository, so it names nothing of the PR's history; rreview 0.1.1 reads
+    // it for its run directory's name. The PR is open, so it has no merge commit.
+    url: () => `https://github.com/rbench-trial/repo/pull/${pr.number}`,
+    mergeCommit: () => null,
   };
   if (opts.json === undefined) {
     process.stdout.write(`title:\t${pr.title}\nstate:\tOPEN\nnumber:\t${pr.number}\n--\n${pr.body}\n`);
