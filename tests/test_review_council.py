@@ -273,3 +273,14 @@ def test_session_without_a_report_fails_without_quoting_it(lines, message):
     with pytest.raises(ReviewCouncilOutputError, match=message) as e:
         review_council.report(events(*lines))
     assert "secret" not in str(e.value)
+
+
+def test_image_plugin_is_the_pinned_commit_installed_under_its_name():
+    assert review_council.plugin("0.14.0") == (
+        "https://github.com/deployhq/review-council",
+        "c9a73575503c12277cd46409c7cbdbe452e7c582",
+        "0.14.0",
+    )
+    assert review_council.PLUGIN_DIR == "/opt/rbench/plugins/review-council"
+    with pytest.raises(ValueError, match="no release"):
+        review_council.plugin("0.13.0")

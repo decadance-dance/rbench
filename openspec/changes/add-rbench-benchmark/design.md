@@ -884,6 +884,24 @@ measure a different task from the engines, which all read the repository.
   session's `--model` and `--effort` set them. The Codex side is the Codex reviewer and verifier,
   set only through `config.toml`. The Google and Perplexity seats are disabled in
   `.review-council/config.local.yml`.
+  - The adapter (#51, `rbench.engines.review_council`) pins version 0.14.0 to the source of
+    `deployhq/review-council` at `c9a73575503c12277cd46409c7cbdbe452e7c582` (its `plugin.json`
+    says 0.14.0; spike #25 ran it). Its roles are `claude_side` (delivery by flag) and
+    `codex_side` (delivery by config). The trial's shim settings carry only the Claude model and
+    effort, and `config.toml` carries `model` and `model_reasoning_effort` for Codex.
+  - The launch is `claude -p "/review-council:run" --plugin-dir /opt/rbench/plugins/review-council
+    --setting-sources user --allowedTools "Bash Read Grep Glob Agent Skill Write" --output-format
+    stream-json --verbose`, spike #25's, without the PR number: the plugin then finds the PR of
+    the current branch with `gh pr view`, which the gh stub answers. The report is the `result`
+    of the final `result` event, Markdown for the D9 step.
+  - `config.local.yml` is written into the checkout before the launch. review-council's config
+    reader ignores both config files without mikefarah yq v4, so the agent image installs a pinned
+    yq with every plugin (`build_agent_image(plugin=...)`, which fetches the plugin by its exact
+    commit into `/opt/rbench/plugins/<name>` and reads its `plugin.json` version back).
+  - `misconfigured`: the shim log shows a Codex session launch with its own model, effort or
+    profile, or `--ignore-user-config` (config.toml then did not apply), a rewrite other than the
+    sandbox, or a Claude session without the Claude side's `--model` and `--effort`; and a
+    session whose applied model (#46) differs from its side's, Codex's default model included.
 - rreview: the panel roles `intent_contracts`, `reliability` and `security` run on Codex with one
   model for the whole panel; the coordinator runs on Claude Code; the judge runs on Codex, because
   rreview refuses a coordinator and judge of the same family.

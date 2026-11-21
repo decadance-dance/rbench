@@ -2,7 +2,7 @@
 
 `engines/review-council.toml` declares it, pinned by the plugin version; `RELEASES` records the
 source commit of each version this adapter was written against. The agent image holds the plugin
-at that commit in `PLUGIN_DIR`.
+at that commit in `PLUGIN_DIR` (`plugin`).
 
 A trial runs one Claude Code session, `claude -p "/review-council:run"`, from the trial's
 repository. The command has no argument: review-council then finds the PR of the current branch
@@ -32,14 +32,17 @@ from pathlib import Path
 from rbench.engines.declaration import DeclarationError, Engine, Setting
 from rbench.engines.plain import CLAUDE_SUBTYPES, Launch
 from rbench.trial.hermetic import codex_config, shim_settings
+from rbench.trial.images import PLUGINS_DIR
 from rbench.trial.repository import REPO_DIR
 
 NAME = "review-council"
-# Plugin version -> the commit of https://github.com/deployhq/review-council it was read at. A
-# new version joins here after its launches and config keys are checked.
+REPOSITORY = "https://github.com/deployhq/review-council"
+# Plugin version -> the commit of REPOSITORY it was read at. A new version joins here after its
+# launches and config keys are checked.
 RELEASES = {"0.14.0": "c9a73575503c12277cd46409c7cbdbe452e7c582"}
 ROLES = {"claude_side": "claude", "codex_side": "codex"}
-PLUGIN_DIR = "/opt/rbench/plugins/review-council"
+# Where `build_agent_image(plugin=plugin(version))` installs it: the name in its plugin.json.
+PLUGIN_DIR = f"{PLUGINS_DIR}/review-council"
 COMMAND = "/review-council:run"
 # The tools of the session spike #25 ran; the plugin dispatches its reviewers with Agent and runs
 # its scripts (the Codex reviewer among them) with Bash.
@@ -75,6 +78,13 @@ def bind(engine: Engine, engines_dir: Path) -> Engine:
     if not config.is_file():
         raise DeclarationError(f"{where}: no {config}")
     return engine
+
+
+def plugin(version: str) -> tuple[str, str, str]:
+    """The plugin `rbench.trial.build_agent_image` installs for this version of the engine."""
+    if version not in RELEASES:
+        raise ValueError(f"{NAME}: no release {version!r} this adapter knows")
+    return REPOSITORY, RELEASES[version], version
 
 
 def requested(settings: Mapping) -> dict[str, Setting]:
