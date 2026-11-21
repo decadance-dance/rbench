@@ -1,4 +1,4 @@
-"""The shims, the watcher, the collector and the SessionStart hook in images/agent/lib (design D5).
+"""The shims, the watcher, the collector and the session hook in images/agent/lib (design D5).
 
 Their argv merging, record checks and /proc reading are tested on any platform; the launch flow
 through a real collector needs Linux (SO_PEERCRED, /proc) and runs in CI.
@@ -293,10 +293,15 @@ BINDING = {"kind": "binding", "path": "/s/rollout-a.jsonl", "pid": 3}
         ({**BINDING, "meta": {"instructions": "x"}}, ("binding",), "meta: unknown field"),
         ({**BINDING, "meta": {"id": "t", "source": ["x"]}}, ("binding",), "'source' has type"),
         ({**BINDING, "meta": {"id": "t", "source": {"subagent": {}}}}, ("binding",), None),
+        ({"kind": "effort", "event": "Stop", "session_id": "s", "effort": "high"}, None, None),
+        ({"kind": "effort", "event": "Stop", "session_id": "s", "agent_id": "a"}, None, None),
+        ({"kind": "effort", "event": "Stop", "session_id": "s", "effort": 3}, None, "has type int"),
+        ({"kind": "effort", "session_id": "s"}, None, "missing event"),
+        ({"kind": "effort", "event": "Stop", "session_id": "s", "text": "x"}, None, "unknown"),
     ],
 )
 def test_collector_accepts_only_well_formed_records(record, kinds, error):
-    kinds = kinds or ("launch", "watch", "hook")
+    kinds = kinds or ("launch", "watch", "hook", "effort")
     if error is None:
         assert collector.check(record, kinds) == record
     else:
@@ -316,6 +321,38 @@ def test_hook_ignores_input_that_is_not_an_event():
     assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
 
 
+session_hook = load("session_hook")
+
+
+@pytest.mark.parametrize(
+    ("event", "record"),
+    [
+        (
+            {"hook_event_name": "Stop", "session_id": "s1", "effort": {"level": "high"}},
+            {"kind": "effort", "event": "Stop", "session_id": "s1", "effort": "high"},
+        ),
+        (
+            {"hook_event_name": "SubagentStop", "session_id": "s1", "agent_id": "a1"}
+            | {"agent_type": "Explore", "effort": {"level": "low"}},
+            {"kind": "effort", "event": "SubagentStop", "session_id": "s1", "agent_id": "a1"}
+            | {"effort": "low"},
+        ),
+        (  # a model without effort support: the event names no level
+            {"hook_event_name": "Stop", "session_id": "s1"},
+            {"kind": "effort", "event": "Stop", "session_id": "s1"},
+        ),
+        (
+            {"hook_event_name": "Stop", "session_id": "s1", "effort": {"level": 5}},
+            {"kind": "effort", "event": "Stop", "session_id": "s1"},
+        ),
+    ],
+)
+def test_hook_logs_the_stop_effort_and_never_the_message(event, record):
+    event |= {"last_assistant_message": "review text", "transcript_path": "/t", "cwd": "/w"}
+
+    assert session_hook.effort_record(event) == record
+
+
 def test_managed_files_pin_the_hermetic_policy():
     """Every managed key, also those no request to the provider stub can show (D5)."""
     settings = json.loads((LIB.parent / "managed-settings.json").read_text())
@@ -333,9 +370,8 @@ def test_managed_files_pin_the_hermetic_policy():
             "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
         },
         "hooks": {
-            "SessionStart": [
-                {"hooks": [{"type": "command", "command": "/opt/rbench/lib/session_hook.py"}]}
-            ]
+            event: [{"hooks": [{"type": "command", "command": "/opt/rbench/lib/session_hook.py"}]}]
+            for event in ("SessionStart", "Stop", "SubagentStop")
         },
         "permissions": {"deny": ["WebFetch", "WebSearch"]},
         "sandbox": {"enableWeakerNestedSandbox": True},
@@ -356,6 +392,10 @@ if "FAKE_SESSION" in os.environ:  # a Claude session: run the SessionStart hook 
     event = {"session_id": os.environ["FAKE_SESSION"], "source": "startup", "cwd": os.getcwd()}
     hook = [sys.executable, "-c", os.environ["FAKE_HOOK"]]
     subprocess.run(hook, input=json.dumps(event), text=True, check=True)
+    if "FAKE_EFFORT" in os.environ:  # the end of the turn: the Stop hook with the applied effort
+        stop = {"hook_event_name": "Stop", "session_id": os.environ["FAKE_SESSION"]}
+        stop |= {"effort": {"level": os.environ["FAKE_EFFORT"]}, "last_assistant_message": "zz-text"}
+        subprocess.run(hook, input=json.dumps(stop), text=True, check=True)
 else:  # a Codex session: hold a rollout open for appending
     thread = os.environ["FAKE_THREAD"]
     path = os.path.join(os.environ["FAKE_HOME"], "sessions", "rollout-" + thread + ".jsonl")
@@ -507,6 +547,19 @@ def test_claude_hook_binds_a_shim_launch_and_exposes_a_bypass(trial):
     assert len(problems) == 2
     assert "Claude session s2: its claude process" in problems[0]
     assert "Claude session s2 (" in problems[1] and "no origin launch" in problems[1]
+
+
+@linux
+def test_claude_stop_hook_logs_the_applied_effort_of_its_session(trial):
+    launch, log, _, _ = trial
+    assert launch("claude", "-p", "hi", FAKE_SESSION="s1", FAKE_EFFORT="high").returncode == 0
+
+    records = wait_for_log(log, 5)
+    (effort,) = [r for r in records if r["kind"] == "effort"]
+    child = next(r for r in records if r["kind"] == "child")
+    assert (effort["event"], effort["session_id"], effort["effort"]) == ("Stop", "s1", "high")
+    assert (effort["claude_pid"], effort["claude_start"]) == (child["pid"], child["start"])
+    assert "zz-text" not in log.read_text()
 
 
 @linux

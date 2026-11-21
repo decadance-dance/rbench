@@ -1,10 +1,16 @@
 #!/usr/bin/python3 -I
-"""Claude Code's SessionStart hook in the managed settings (design D5).
+"""Claude Code's SessionStart, Stop and SubagentStop hook in the managed settings (design D5).
 
 Claude runs it for every session it starts, through the shim or not. It reports the session id,
 its source (`startup`, `resume`, `fork`, ...) and the `claude` process it runs under, as pid and
 start time, to the trial's collector. The audit joins that process with the CLI children the
 shims started.
+
+At the end of each turn (`Stop`) and of each subagent (`SubagentStop`) it reports the effort that
+applied to that turn, after any downgrade for the model: Claude Code 2.1.316 gives it
+(`effort.level`) to these hooks, not to SessionStart, the transcript or the stream-json init event
+(#46). That record holds the session id, the subagent's id and the level only, never the
+message text the event also carries.
 
 It prints nothing, because Claude adds a SessionStart hook's output to the model's context, and it
 always exits 0: a missing record leaves the session unbound, which fails the trial closed.
@@ -21,6 +27,7 @@ SETTINGS = "/etc/rbench/shim.json"
 CLAUDE = "/usr/local/bin/claude"
 PROC = "/proc"
 FIELDS = ("session_id", "source", "transcript_path", "cwd", "model")
+STOPS = ("Stop", "SubagentStop")
 
 
 def stat(pid: int) -> list[str]:
@@ -44,13 +51,26 @@ def claude_process() -> tuple[int | None, int | None]:
     return None, None
 
 
+def effort_record(data: dict) -> dict:
+    """The applied effort of a Stop or SubagentStop event: no level when the event names none."""
+    record = {"kind": "effort", "event": data["hook_event_name"]}
+    record |= {k: data[k] for k in ("session_id", "agent_id") if isinstance(data.get(k), str)}
+    effort = data.get("effort")
+    if isinstance(effort, dict) and isinstance(effort.get("level"), str):
+        record["effort"] = effort["level"]
+    return record
+
+
 def main() -> None:
     try:
         data = json.load(sys.stdin)
         if not isinstance(data, dict):  # not a hook event: nothing to report
             return
-        record = {k: data[k] for k in FIELDS if isinstance(data.get(k), str)}
-        record["kind"] = "hook"
+        if data.get("hook_event_name") in STOPS:
+            record = effort_record(data)
+        else:
+            record = {k: data[k] for k in FIELDS if isinstance(data.get(k), str)}
+            record["kind"] = "hook"
         record["claude_pid"], record["claude_start"] = claude_process()
         with open(SETTINGS, encoding="utf-8") as f:
             path = json.load(f)["socket"]

@@ -13,7 +13,9 @@ A connection's first record says what it is:
 - `watch`: a Codex shim's watcher, accepted only from a direct child of a shim whose launch is
   registered and open; it then sends `binding` records for that launch;
 - `hook`: one record from Claude's SessionStart hook, accepted from any process, because a hook
-  of a CLI process no shim started is the evidence the audit looks for.
+  of a CLI process no shim started is the evidence the audit looks for;
+- `effort`: one record from the same hook at a Stop or SubagentStop, with the applied effort,
+  accepted from any process like `hook`.
 Anything else is logged as `rejected` and the connection closed.
 
 Python 3.11 (Debian bookworm), standard library only.
@@ -58,6 +60,14 @@ FIELDS = {
         "claude_pid": NUM_OR_NONE,
         "claude_start": NUM_OR_NONE,
     },
+    "effort": {
+        "event": STR,
+        "session_id": STR,
+        "agent_id": STR,
+        "effort": STR,
+        "claude_pid": NUM_OR_NONE,
+        "claude_start": NUM_OR_NONE,
+    },
 }
 # A binding's `meta`: the shim's META_KEYS of the rollout's session_meta. `source` is a string or,
 # for a child thread, an object that names its parent.
@@ -75,6 +85,7 @@ REQUIRED = {
     "exit": {"status"},
     "binding": {"path", "pid"},
     "hook": {"session_id", "source"},
+    "effort": {"event", "session_id"},
 }
 
 
@@ -170,7 +181,7 @@ class Handler(socketserver.StreamRequestHandler):
         pid, uid, _gid = struct.unpack("3i", creds)
         peer = {"sender_pid": pid, "sender_uid": uid}
         launch = shim = None
-        kinds: tuple[str, ...] = ("launch", "watch", "hook")
+        kinds: tuple[str, ...] = ("launch", "watch", "hook", "effort")
         try:
             while line := self.rfile.readline(MAX_RECORD + 1):
                 if len(line) > MAX_RECORD or not line.endswith(b"\n"):
@@ -189,9 +200,9 @@ class Handler(socketserver.StreamRequestHandler):
                         raise Rejected("watch: the sender's parent has no open launch")
                     kinds = ("binding",)
                 log.write({**record, **peer, **({"launch": launch} if launch else {})})
-                if kind in ("launch", "watch", "hook"):
+                if kind in ("launch", "watch", "hook", "effort"):
                     self.wfile.write(b'{"ok": true}\n')
-                if kind == "hook":
+                if kind in ("hook", "effort"):
                     return
         except Rejected as e:
             log.write({"kind": "rejected", "reason": str(e), **peer})

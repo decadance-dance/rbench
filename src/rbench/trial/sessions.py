@@ -5,6 +5,8 @@ The collector's log holds, in `seq` order:
   and rewritten), `child` (the CLI's pid and start time, from the shim's own fork) and `exit`;
 - `binding`: a Codex rollout the CLI of a launch held open for appending, with its session_meta;
 - `hook`: a Claude session start, with the pid and start time of the `claude` process it ran under;
+- `effort`: the effort that applied to a Claude turn (`Stop`) or subagent (`SubagentStop`), as the
+  CLI reports it to the hook (#46);
 - `rejected`: a record the collector refused.
 
 Binding (spec trial-isolation, Policy enforced below the shims): every root session in the
@@ -47,10 +49,18 @@ RECORD_FIELDS: dict[str, dict[str, tuple[type, ...]]] = {
         "claude_pid": (int, type(None)),
         "claude_start": (int, type(None)),
     },
+    "effort": {
+        "event": (str,),
+        "session_id": (str,),
+        "agent_id": (str,),
+        "effort": (str,),
+        "claude_pid": (int, type(None)),
+        "claude_start": (int, type(None)),
+    },
     "watch": {},
     "rejected": {},
 }
-OPTIONAL_FIELDS = {"start", "meta", "claude_pid", "claude_start"}
+OPTIONAL_FIELDS = {"start", "meta", "claude_pid", "claude_start", "agent_id", "effort"}
 
 
 def _typed(value: object, types: tuple[type, ...]) -> bool:

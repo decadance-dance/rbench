@@ -425,17 +425,24 @@ def _read_stdout(file: Path) -> tuple[list[dict], str | None]:
 
 def _argv_model(argv: Iterable[str]) -> str | None:
     """The one model a Codex argv sets (`-m`, `--model`, `-c model=...`) before `--`, or None."""
+    return argv_setting(argv, ("-m", "--model"), "model")
+
+
+def argv_setting(argv: Iterable[str], flags: tuple[str, ...], key: str | None) -> str | None:
+    """The one value an argv sets before `--` with one of `flags` (`--flag value` or
+    `--flag=value` for a long one) or, for Codex, with `-c <key>=...`; None when it sets none,
+    or more than one."""
     argv = list(argv)
     found = set()
     for i, a in enumerate(argv):
         if a == "--":
             break
         value = argv[i + 1] if i + 1 < len(argv) else ""
-        if a in ("-m", "--model"):
+        if a in flags:
             found.add(value)
-        elif a.startswith("--model="):
+        elif a.startswith("--") and a.split("=", 1)[0] in flags and "=" in a:
             found.add(a.split("=", 1)[1])
-        elif a in ("-c", "--config") and value.split("=", 1)[0].strip() == "model":
+        elif key and a in ("-c", "--config") and value.split("=", 1)[0].strip() == key:
             setting = value.split("=", 1)[1].strip()
             # limit: a TOML basic or literal string, or a bare word, as Codex's own `-c` takes it
             try:

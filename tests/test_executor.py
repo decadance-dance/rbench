@@ -349,13 +349,14 @@ def shim_log(*records: dict) -> str:
 
 def claude_trial(launch: plain.Launch) -> dict:
     """What the agent container holds after a `plain` Claude session: replies for fake docker."""
-    final = [*CLAUDE_FLAGS, *launch.argv[1:]]
+    added = [*CLAUDE_FLAGS, "--model", OPUS, "--effort", "medium"]  # the shim's, as in D5
     log = shim_log(
         {"kind": "launch", "launch": 1, "cli": "claude", "argv": list(launch.argv[1:])}
-        | {"final_argv": final, "added": list(CLAUDE_FLAGS), "rewrites": []},
+        | {"final_argv": [*added, *launch.argv[1:]], "added": added, "rewrites": []},
         {"kind": "child", "launch": 1, "pid": 101, "start": 1},
         {"kind": "hook", "session_id": SESSION, "source": "startup"}
         | {"claude_pid": 101, "claude_start": 1},
+        {"kind": "effort", "event": "Stop", "session_id": SESSION, "effort": "medium"},
         {"kind": "exit", "launch": 1, "status": 0},
     )
     findings = [FINDING | {"severity": "must_fix"}]
@@ -371,14 +372,15 @@ def claude_trial(launch: plain.Launch) -> dict:
 
 def codex_trial(launch: plain.Launch) -> dict:
     """The same for a `plain` Codex session, which writes its answer to a file."""
+    added = ["--strict-config", "-c", f"model={json.dumps(CODEX)}"]  # the shim's, as in D5
     log = shim_log(
         {"kind": "launch", "launch": 1, "cli": "codex", "argv": list(launch.argv[1:])}
-        | {"final_argv": list(launch.argv[1:]), "added": ["--strict-config"], "rewrites": []},
+        | {"final_argv": [*added, *launch.argv[1:]], "added": added, "rewrites": []},
         {"kind": "child", "launch": 1, "pid": 101, "start": 1},
         {"kind": "binding", "launch": 1, "path": ROLLOUT, "meta": {"id": "t1", "source": "exec"}},
         {"kind": "exit", "launch": 1, "status": 0},
     )
-    rollout = [meta("t1"), turn("u1", GPT), record("t1", "u1", "r1", codex_usage(10, 4, 3))]
+    rollout = [meta("t1"), turn("u1", CODEX), record("t1", "u1", "r1", codex_usage(10, 4, 3))]
     answer = {"findings": [FINDING | {"severity": "nit"}]}
     return {
         "stdout": "",
@@ -473,6 +475,20 @@ def test_a_claude_trial_runs_in_its_project_and_stores_findings_and_usage(sandbo
     assert TOKEN not in json.dumps(up["argv"])
     assert docker_calls(fake_bin, "down")[-1][2] == name  # removed after the trial
     assert json.loads((trial_dir / "audit.json").read_text())["contaminated"] == []
+    applied = json.loads((trial_dir / "sessions.json").read_text())
+    assert applied == {
+        "sessions": [
+            {
+                "cli": "claude",
+                "session": SESSION,
+                "launch": 1,
+                "requested": {"model": OPUS, "effort": "medium"},
+                "applied": {"models": [OPUS], "efforts": ["medium"]},
+            }
+        ],
+        "misconfigured": [],
+        "flagged": [],
+    }
 
 
 @pytest.mark.real_executor
@@ -484,7 +500,9 @@ def test_a_plain_codex_trial_stores_usage_with_its_model_unverified(sandbox):
     assert counts == {"done": 1}
     findings, usage = read_results(trial_dir)
     assert findings == [FINDING | {"severity": "nit"}]
-    assert usage["engine"] == {GPT: {"input": 6, "output": 3, "cache_read": 4, "cache_creation": 0}}
+    assert usage["engine"] == {
+        CODEX: {"input": 6, "output": 3, "cache_read": 4, "cache_creation": 0}
+    }
     # plain's launch has no `--json`: no stdout events can verify the model (D7).
     unverified = "Codex thread t1: no clean stdout of a launch shows it, so the model its usage"
     assert usage["incomplete"]["engine"] == [f"{unverified} ran on is unverified"]
@@ -816,7 +834,7 @@ def test_a_failing_count_objects_does_not_quote_the_agent(sandbox):
 def test_malformed_usage_does_not_quote_the_transcript(sandbox):
     def replies(launch):
         trial = claude_trial(launch)
-        again = message(SESSION, "msg-1", f"claude-{MARKER}", 3, 2)  # same id, another model
+        again = message(SESSION, f"msg-{MARKER}", OPUS, -1, 2)  # not a token count
         trial["copy"][f"agent:{TRANSCRIPT}"] += json.dumps(again) + "\n"
         return docker_replies(trial)
 
@@ -825,6 +843,28 @@ def test_malformed_usage_does_not_quote_the_transcript(sandbox):
     assert counts == {"failed": 1}
     assert read_status(trial_dir).reason == "invalid output: the transcripts' usage is malformed"
     assert MARKER not in (trial_dir / "status.json").read_text()
+
+
+@pytest.mark.real_executor
+@pytest.mark.parametrize(("model", "named"), [(SONNET, SONNET), (f"claude-{MARKER}", None)])
+def test_a_session_on_another_model_makes_the_trial_misconfigured(sandbox, model, named):
+    def replies(launch):
+        trial = claude_trial(launch)
+        other = message(SESSION, "msg-2", model, 1, 1)
+        trial["copy"][f"agent:{TRANSCRIPT}"] += json.dumps(other) + "\n"
+        return docker_replies(trial)
+
+    trial_dir, counts, _ = sandbox([OPUS], replies)
+
+    assert counts == {"misconfigured": 1}
+    ran = named or "an unlisted value (see sessions.json)"
+    assert read_status(trial_dir).reason == (
+        f"claude session 0 of sessions.json (launch 1) ran {ran}; it requested {OPUS}"
+    )
+    assert MARKER not in (trial_dir / "status.json").read_text()
+    (session,) = json.loads((trial_dir / "sessions.json").read_text())["sessions"]
+    assert session["requested"] == {"model": OPUS, "effort": "medium"}
+    assert session["applied"] == {"models": sorted([OPUS, model]), "efforts": ["medium"]}
 
 
 @pytest.mark.real_executor

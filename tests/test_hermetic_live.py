@@ -31,6 +31,7 @@ from rbench.trial import (
     shim_settings,
     unbound_sessions,
 )
+from rbench.trial.applied import applied_sessions
 
 pytestmark = pytest.mark.live
 
@@ -177,6 +178,18 @@ def test_policy_holds_with_and_without_the_shims_and_every_session_is_bound(tria
     assert claude_sessions[0]["session_id"] == record["launches"][0]["session_id"]
     assert [s["launch"] for s in codex_sessions] == [2]
     assert codex_sessions[0]["meta"]["cli_version"] == "0.171.0"
+
+    # The Stop hook logs the effort that applied to each Claude session (#46): the shim's `low`.
+    records = read_shim_log(dest / "shim.jsonl")
+    efforts = [r for r in records if r["kind"] == "effort"]
+    print("effort records:", efforts)
+    stops = {r["session_id"]: r.get("effort") for r in efforts if r["event"] == "Stop"}
+    assert stops[claude_sessions[0]["session_id"]] == "low"
+    applied = applied_sessions(records, dest / "transcripts", CODEX_CONFIG)
+    print("applied:", json.dumps(applied.sessions), applied.mismatched, applied.flagged)
+    shim_session = next(s for s in applied.sessions if s["launch"] == 1)
+    assert shim_session["requested"] == {"model": "claude-sonnet-5-5", "effort": "low"}
+    assert shim_session["applied"]["efforts"] == ["low"]
 
     # Only the sessions that bypassed the shims fail to bind.
     problems = unbound_sessions(read_shim_log(dest / "shim.jsonl"), dest / "transcripts")

@@ -19,6 +19,11 @@ A trial directory holds:
                    "count"}], "refused_omitted"},
                    the refused connection attempts listed in run health; final once the
                    trial is contaminated
+    sessions.json  the model and effort each CLI session requested and the ones that applied
+                   (`rbench.trial.applied`): {"sessions": [{"cli", "session", "launch",
+                   "requested": {"model", "effort"}, "applied": {"models", "efforts"}}],
+                   "misconfigured": [<reason>], "flagged": [<effort drift>]}, written after
+                   the audit of each attempt
 
 Every file goes through `atomic_write`. `done` is written last and records the SHA-256 of
 `findings.json` and `usage.json`: a runner killed while storing results leaves the trial in its
@@ -44,6 +49,7 @@ STATUS_FILE = "status.json"
 FINDINGS_FILE = "findings.json"
 USAGE_FILE = "usage.json"
 AUDIT_FILE = "audit.json"
+SESSIONS_FILE = "sessions.json"
 RAW_DIR = "raw"
 RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 FINDING_KEYS = {"file", "start_line", "end_line", "message"}
