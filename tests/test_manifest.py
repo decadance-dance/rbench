@@ -756,3 +756,123 @@ def test_manifest_entry_needs_the_tasks_checked_archive(
     (task,) = load_tasks(tmp_path / "ours")
     with pytest.raises(TaskError, match=message):
         manifest_task(task, built)
+
+
+SOURCE = {
+    "repo": "review-bench/ReviewBench",
+    "commit": "a" * 40,
+    "subset": "corpus/test/test.json",
+    "severity_map": {"high": "must", "medium": "should", "low": "nit"},
+    "producer_map": {"human_review": "human"},
+}
+
+
+def sourced_set(tmp_path: Path) -> Path:
+    """A `reviewbench` set whose manifest records its pinned source and golden files."""
+    set_dir = tmp_path / "reviewbench"
+    write_task(set_dir, "rb-1", task_set="reviewbench", items=[item(source=None)])
+    write_task(set_dir, "rb-2", task_set="reviewbench", items=[item(source=None)])
+    write_manifest(set_dir, task_set="reviewbench", source=SOURCE)
+
+    def golden(m: dict) -> None:
+        for task_id in m["tasks"]:
+            m["tasks"][task_id]["golden"] = {"path": f"golden/{task_id}.json", "sha256": "b" * 64}
+
+    edit(set_dir / MANIFEST_FILE, golden)
+    return set_dir
+
+
+def test_reviewbench_manifest_records_source_and_golden(tmp_path: Path) -> None:
+    manifest, _ = load_task_set(sourced_set(tmp_path), "reviewbench")
+    assert manifest.source is not None
+    assert manifest.source.commit == "a" * 40
+    assert manifest.source.severity_map["high"] == "must"
+    assert manifest.tasks["rb-1"].golden is not None
+    assert manifest.tasks["rb-1"].golden.path == "golden/rb-1.json"
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda m: m["source"].pop("commit"), r"'source': missing commit"),
+        (lambda m: m["source"].update(extra=1), r"'source': 1 unknown keys"),
+        (lambda m: m["source"].update(commit="a" * 39), r"'commit' must be 40 lowercase hex"),
+        (lambda m: m["source"].update(commit="A" * 40), r"'commit' must be 40 lowercase hex"),
+        (lambda m: m["source"].update(repo="ReviewBench"), r"'repo' must be an owner/name"),
+        (lambda m: m["source"].update(subset="../x.json"), r"'subset' must be a relative path"),
+        (lambda m: m["source"].update(subset="/x.json"), r"'subset' must be a relative path"),
+        (lambda m: m["source"].update(severity_map={}), r"'severity_map' must be a non-empty"),
+        (
+            lambda m: m["source"].update(severity_map={"high": "critical"}),
+            r"'severity_map' values must be one of must, should, nit",
+        ),
+        (lambda m: m["source"].update(producer_map={"x": ""}), r"'producer_map': keys and values"),
+        (lambda m: m.update(source=[]), r"'source' must be an object"),
+        (lambda m: m["tasks"]["rb-1"]["golden"].pop("sha256"), r"'golden': missing sha256"),
+        (lambda m: m["tasks"]["rb-1"]["golden"].update(x=1), r"'golden': 1 unknown keys"),
+        (
+            lambda m: m["tasks"]["rb-1"]["golden"].update(path="golden/../x"),
+            r"'golden': 'path' must be a relative path",
+        ),
+        (
+            lambda m: m["tasks"]["rb-1"]["golden"].update(sha256="b" * 63),
+            r"'golden': 'sha256' must be 64 lowercase hex",
+        ),
+    ],
+)
+def test_malformed_source_or_golden_is_rejected(tmp_path: Path, change, message) -> None:
+    set_dir = sourced_set(tmp_path)
+    edit(set_dir / MANIFEST_FILE, change)
+    with pytest.raises(TaskError, match=message):
+        load_task_set(set_dir, "reviewbench")
+
+
+def test_only_reviewbench_records_source_or_golden(tmp_path: Path) -> None:
+    set_dir = two_task_set(tmp_path)
+    edit(set_dir / MANIFEST_FILE, lambda m: m.update(source=SOURCE))
+    with pytest.raises(TaskError, match=r"only the reviewbench set records 'source'"):
+        load_task_set(set_dir, "ours")
+    edit(set_dir / MANIFEST_FILE, lambda m: m.pop("source"))
+    golden = {"path": "golden/t-1.json", "sha256": "b" * 64}
+    edit(set_dir / MANIFEST_FILE, lambda m: m["tasks"]["t-1"].update(golden=golden))
+    with pytest.raises(TaskError, match=r"only the reviewbench set records 'golden'"):
+        load_task_set(set_dir, "ours")
+
+
+def test_changed_source_needs_a_higher_version(tmp_path: Path) -> None:
+    set_dir = sourced_set(tmp_path)
+    base, _ = load_task_set(set_dir, "reviewbench")
+    assert base.source is not None
+    moved = replace(base, source=replace(base.source, commit="c" * 40))
+    with pytest.raises(TaskError, match=r"'source' changed since the committed version 1"):
+        check_version_history(base, moved)
+    check_version_history(base, replace(moved, version=2))
+    check_version_history(base, base)
+
+
+def test_reimport_entry_naming_unchanged_and_skipped_tasks_loads(tmp_path: Path) -> None:
+    # The importer's shape for a new commit: every re-imported task with its (unchanged) hash, a
+    # skipped task that never had a directory with null.
+    set_dir = sourced_set(tmp_path)
+    base, _ = load_task_set(set_dir, "reviewbench")
+    current = hashes(set_dir)
+
+    def reimport(m: dict) -> None:
+        m["version"] = 2
+        m["source"]["commit"] = "c" * 40
+        m["changelog"].append(
+            {
+                "version": 2,
+                "note": "Re-import; skipped: rb-3.",
+                "changed": {**current, "rb-3": None},
+            }
+        )
+
+    edit(set_dir / MANIFEST_FILE, reimport)
+    manifest, _ = load_task_set(set_dir, "reviewbench")
+    assert manifest.changelog[-1].changed["rb-3"] is None
+    check_version_history(base, manifest)
+    # A task still in 'tasks' cannot be named as skipped.
+    edit(set_dir / MANIFEST_FILE, lambda m: m["changelog"][-1]["changed"].update({"rb-1": None}))
+    with pytest.raises(TaskError, match=r"task 'rb-1': its hash differs from changelog version 2"):
+        load_task_set(set_dir, "reviewbench")

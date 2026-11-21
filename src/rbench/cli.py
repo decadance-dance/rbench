@@ -8,6 +8,8 @@ import sys
 from enum import IntEnum
 from importlib.metadata import version
 
+from rbench.tasks import reviewbench
+
 
 class ExitCode(IntEnum):
     OK = 0
@@ -53,7 +55,9 @@ def build_parser() -> argparse.ArgumentParser:
         dest="task_command", metavar="<task-command>", required=True
     )
     for name, help_ in TASK_COMMANDS:
-        task_commands.add_parser(name, help=help_, description=help_, **common)
+        sub = task_commands.add_parser(name, help=help_, description=help_, **common)
+        if name == "import":
+            reviewbench.add_arguments(sub)
 
     for name, help_ in COMMANDS:
         sub = commands.add_parser(name, help=help_, description=help_, **common)
@@ -69,6 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "tasks" and args.task_command == "import":
+        return reviewbench.run(args)
     name = " ".join(filter(None, [args.command, getattr(args, "task_command", None)]))
     print(f"rbench {name}: not implemented yet", file=sys.stderr)
     return ExitCode.ERROR
