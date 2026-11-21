@@ -278,8 +278,20 @@ not always visible.
 - one directory per trial with `status.json`, `findings.json`, `usage.json` and `raw/`;
 - `judge/`.
 
-Writes are atomic (temporary file, then rename). Limit detection is per CLI, and the exact messages
-are captured as test fixtures.
+Writes are atomic (temporary file, then rename). Limit detection is per CLI and keys on the typed
+codes the CLIs write to their session files, not on stdout text (engines own stdout, D7):
+- Claude Code 2.1.316: the transcript's synthetic assistant message has `error: "rate_limit"`,
+  `apiErrorStatus: 429` and `apiError: "usage_limit_reached"` for a subscription limit, and
+  `apiError: null` for a 429 that is not one ("not your usage limit").
+- Codex CLI 0.171.0: the rollout's `task_complete` event has `error.codex_error_info:
+  "usage_limit_exceeded"` (also used for `usage_not_included` and `insufficient_quota`), or
+  `response_too_many_failed_attempts` with `http_status_code: 429` once retries of any other 429
+  run out.
+
+Both CLIs exit with status 1. The message text, which carries the reset time, is the fallback and
+the source of the reset time for `--wait`. Messages, typed fields and reset time formats are test
+fixtures in `tests/fixtures/limits/`, each marked as captured live, produced by the real CLI against
+a local 429 stub, or taken from the CLI's code.
 
 **Alternative considered:** SQLite. It is not needed at this size, and per-trial files make partial
 copies and inspection trivial.
@@ -376,9 +388,39 @@ does not fit any budget the maintainer is willing to spend.
 hits one. The matrix is split into rounds by importance, each with a token budget per provider. The
 runner starts a trial only if its estimate fits, and stops at a soft threshold of the subscription
 window where the CLI reports its used share. O6 sets the round order, the budget rule and the
-threshold value. Codex reports `rate_limits` in its events; whether
-Claude Code reports anything is a spike item. Checkpoint and resume stay as the safety net, and a
+threshold value. Checkpoint and resume stay as the safety net, and a
 limit stops the run by default; waiting for the reset is opt-in (`--wait`).
+
+Where each CLI reports its used share (spike #23, fixtures in `tests/fixtures/limits/`):
+- **Codex CLI 0.171.0: yes, in the session rollout only.** `codex exec --json` stdout has no
+  `rate_limits`. Each turn's `event_msg` `token_count` in
+  `$CODEX_HOME/sessions/.../rollout-*.jsonl` carries `rate_limits.primary` (300-minute window) and
+  `secondary` (10080 minutes), each with `used_percent` (0 to 100, can exceed 100) and `resets_at`
+  (epoch seconds). The runner reads the newest one from the trial's `CODEX_HOME` after each Codex
+  trial. The trial home already lives in the container (D5), so D3 and D5 do not change.
+- **Claude Code 2.1.316: yes, on stdout of stream-json only.** `claude -p --output-format
+  stream-json --verbose` emits a `rate_limit_event` after the first API response:
+  `rate_limit_info.unifiedWindows.five_hour` and `seven_day`, each with `utilization` (0 to 1, can
+  exceed 1), `resetsAt` and `status`, plus a top-level `status`, `rateLimitType` and `utilization`
+  for the limiting window. It is not in the session transcript. `/usage` under `-p` reports only the
+  session's cost, and the statusline input (`rate_limits`) exists only in interactive sessions.
+
+**Choice for Claude: runner-owned readings with a throttled probe.** Engines own stdout (D7), so the
+runner reads Claude's share only from stream-json output of its own calls:
+- first the free readings from calls it makes anyway (the judge, any runner-owned `claude -p`);
+- when the newest reading is older than N minutes (default 10, configurable) before a Claude trial
+  starts, one minimal probe call (`haiku`, "Reply OK", the benchmark login). The probe's tokens
+  are run overhead, never attributed to a trial;
+- when the probe fails or reports no `rate_limit_event`, the threshold is not enforced for Claude
+  for that check, and the run log says so (the fallback in Risks).
+
+The probe was not run as a runner step in the spike; one equivalent manual call produced the event.
+
+**Alternatives considered:**
+- *The `claude` shim tees stdout and logs `rate_limit_event` lines.* It breaks D5's rule that the
+  shim execs the real binary, and it sees the event only for engines that use stream-json.
+- *Not enforcing the soft threshold for Claude.* The share is available at the cost of one small
+  call per check, so this stays only as the fallback.
 
 ## Risks / Trade-offs
 
@@ -389,8 +431,17 @@ limit stops the run by default; waiting for the reset is opt-in (`--wait`).
   never share its refresh-token chain. The spike runs several Codex processes in one trial.
 - **[`codex-review` may not run non-interactively.]** → Codex's built-in review is a TUI command;
   the spike finds a non-interactive way to run it. Without one, `codex-review` leaves the matrix.
-- **[Claude Code may not report the used share of its subscription window.]** → The spike checks.
-  Without it, the soft threshold is not enforced for Claude, and the round budget is the only stop.
+- **[Claude Code reports its used share only on stream-json stdout (spike #23).]** → The runner
+  reads it from its own calls and a throttled probe (D14). When no reading is available, the soft
+  threshold is not enforced for Claude for that check, the run log says so, and the round budget is
+  the only stop.
+- **[Codex's `rate_limits` lives in an undocumented rollout format, and Claude's
+  `unifiedWindows` is marked internal in the CLI's schema.]** → Both may change with a CLI version.
+  The parsers validate against the fixtures for the pinned versions, and an unreadable reading
+  counts as no reading rather than as zero use.
+- **[Limit hits were not provoked live.]** → No real limit was approached. The messages and typed
+  codes come from the pinned CLIs against a local 429 stub and from their code; the real servers'
+  headers and bodies are unverified.
 - **[Shim flags conflict with an engine's own flags.]** → The spike runs each engine's default once
   with the shims and checks the argv log.
 - **[The judge prefers its own model family.]** → The judge is blind to the engine, and a second

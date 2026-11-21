@@ -1,0 +1,43 @@
+{
+  "cli": "claude",
+  "version": "2.1.316",
+  "source": "code: strings of the installed @anthropic-ai/claude-code 2.1.316 binary (bin/claude.exe), read offline",
+  "detection": {
+    "stream_json_assistant": {"error": "rate_limit", "is_api_error_message": true, "api_error_status": 429, "api_error": "usage_limit_reached"},
+    "stream_json_result": {"is_error": true, "subtype": "success", "terminal_reason": "api_error", "api_error_status": 429, "api_error": "usage_limit_reached"},
+    "transcript_assistant": {"error": "rate_limit", "isApiErrorMessage": true, "apiErrorStatus": 429, "apiError": "usage_limit_reached"},
+    "server_rate_limit": "same fields with api_error null (stream-json) or apiError null (transcript): a 429 that is not a subscription limit",
+    "exit_status": 1
+  },
+  "usage_limit_prefixes": [
+    "You've hit your",
+    "You've reached your",
+    "You're out of usage credits",
+    "Your org is out of usage · add funds to continue",
+    "Your org is out of usage · contact your admin",
+    "Your seat type doesn't include usage credits",
+    "Your seat type doesn't include usage",
+    "Your usage allocation has been disabled by your admin",
+    "Your group's usage limit is set to $0",
+    "Fable 5 requires usage credits",
+    "You're out of extra usage",
+    "Your seat type doesn't include extra usage"
+  ],
+  "usage_limit_prefixes_note": "The CLI's own list: a 429 text starting with one of these gets api_error usage_limit_reached.",
+  "templates": {
+    "subscription_limit": "You've hit your {limit}{ · resets {reset}}{ · progress saved}",
+    "limit_names": {
+      "five_hour": "5-hour limit",
+      "seven_day": "weekly limit",
+      "seven_day_opus": "Opus limit",
+      "seven_day_sonnet": "Sonnet limit",
+      "seven_day_overage_included": "Fable limit",
+      "overage": "usage credit limit",
+      "other": ["usage limit", "limit", "org's monthly usage limit"]
+    },
+    "reset": "within 24 hours: {h}[:{mm}]{am|pm} ({IANA time zone}), minutes left out when 0; later: {Mon} {d}, {h}[:{mm}]{am|pm} ({IANA time zone}), with the year when it differs",
+    "server_rate_limit": "API Error: Server is temporarily limiting requests (not your usage limit) · {API error message}",
+    "out_of_credits": "You're out of usage credits{ · resets {reset}}{ · progress saved}",
+    "allocation_disabled": "Your usage allocation has been disabled by your admin{ · ask your admin for a higher limit}"
+  }
+}
