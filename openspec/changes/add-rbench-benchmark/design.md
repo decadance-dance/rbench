@@ -729,9 +729,10 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
   ran, and it reported one unverified finding. At `medium`, the lowest matrix effort, it dispatched
   all three, Codex included. The smoke stage checks the roster review-council reports on a core
   task.
-- **[The plugin review engine's lifecycle hooks do not run under `codex exec`.]** → Codex runs a
-  plugin's hooks only after the user trusts them in the TUI. In #25 the engine ran its skill
-  without them; the hooks ran on Claude Code. Whether the trial home pre-trusts the hooks is open
+- **[The plugin review engine's lifecycle hooks do not run under `codex exec`.]** → The plugin's
+  install notes have the user trust its hooks in the Codex TUI (`/hooks`). In #25 the session
+  transcript showed no hook output: the engine ran its skill without them. The hooks did run on
+  Claude Code. Whether the trial home pre-trusts the hooks is open
   for the engine's adapter.
 - **[The judge prefers its own model family.]** → The judge is blind to the engine, and a second
   judge from the other family labels a sample (O1).
