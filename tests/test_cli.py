@@ -25,7 +25,7 @@ def test_tasks_help_lists_import_fetch_and_release(capsys):
     assert all(f"\n    {name} " in out for name in ("import", "fetch", "release"))
 
 
-@pytest.mark.parametrize("argv", [[], ["tasks"], ["run", "--bogus"]])
+@pytest.mark.parametrize("argv", [[], ["tasks"], ["run", "--bogus"], ["resume"]])
 def test_bad_command_line_exits_2(argv):
     with pytest.raises(SystemExit) as exit_:
         main(argv)
@@ -33,7 +33,7 @@ def test_bad_command_line_exits_2(argv):
     assert exit_.value.code == ExitCode.USAGE == 2
 
 
-@pytest.mark.parametrize("argv", [["resume"], ["report"], ["publish"]])
+@pytest.mark.parametrize("argv", [["report"], ["publish"]])
 def test_stubs_fail_as_not_implemented(argv, capsys):
     assert main(argv) == ExitCode.ERROR
     assert "not implemented yet" in capsys.readouterr().err
