@@ -34,6 +34,11 @@ EMAIL = "author@example.com"
 DATE = "@946684800 +0000"  # 2000-01-01T00:00:00Z
 
 
+def archive_name(sha256: str) -> str:
+    """The name of the archive with this SHA-256, in an archive directory and as a release asset."""
+    return f"{sha256}.bundle"
+
+
 class ArchiveError(ValueError):
     """An import that cannot build its archive; the message names the repository."""
 

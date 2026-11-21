@@ -14,11 +14,14 @@ from pathlib import Path
 import pytest
 from conftest import FakeBin
 from test_archive import MIT, commit, git, license_reply
+from test_release import commit as commit_all
+from test_release import creates
 
 from rbench.cli import main
 from rbench.tasks import HIDDEN_ID_PREFIX, MANIFEST_FILE, TaskError, load_task_set, reviewbench
 from rbench.tasks.license import LicenseLookupError
 from rbench.tasks.manifest import check_version_history, load_manifest
+from rbench.tasks.release import publish_release
 from rbench.tasks.reviewbench import (
     SEVERITY_MAP,
     TEST_SUBSET,
@@ -302,7 +305,7 @@ def test_archive_license_on_original_repo_and_no_golden_stored(
     w.run()
 
     sha = meta(w, pr)["archive_sha256"]
-    bundle = w.archives / f"{pr.task_id}-{sha}.bundle"
+    bundle = w.archives / f"{sha}.bundle"
     assert sha == hashlib.sha256(bundle.read_bytes()).hexdigest()
     license_calls = [c["argv"] for c in fake_bin.calls() if "license" in " ".join(c["argv"])]
     assert license_calls == [["api", f"repos/acme/widget/license?ref={pr.head}"]]
@@ -311,6 +314,19 @@ def test_archive_license_on_original_repo_and_no_golden_stored(
     assert "a later title" not in stored and "a later body" not in stored
     assert meta(w, pr)["title"] == pr.title and meta(w, pr)["description"] == pr.body
     assert leftovers(w) == []
+
+
+def test_import_archive_dir_passes_the_release_preflight(tmp_path: Path, fake_bin: FakeBin) -> None:
+    pr = PR("acme/widget", 7)
+    w = world(tmp_path, fake_bin, pr)
+    w.run()
+    commit_all(w.set_dir.parent)
+    fake_bin.scenario("gh")  # no release, draft or tag of this version yet
+
+    publish_release(w.set_dir, "reviewbench", w.archives)
+
+    [create] = creates(fake_bin)
+    assert create["argv"][3] == f"{meta(w, pr)['archive_sha256']}.bundle"
 
 
 def test_same_commit_again_writes_nothing(tmp_path: Path, fake_bin: FakeBin) -> None:
@@ -384,7 +400,9 @@ def test_change_inside_the_window_skips_and_names_the_task(
     assert reason in result.skipped[bad.task_id]
     assert result.imported == (good.task_id,)
     assert not (w.set_dir / bad.task_id).exists()
-    assert not list(w.archives.glob(f"{bad.task_id}-*"))
+    assert [p.name for p in w.archives.glob("*.bundle")] == [
+        f"{meta(w, good)['archive_sha256']}.bundle"
+    ]
     entry = load_manifest(w.set_dir / MANIFEST_FILE, "reviewbench").changelog[-1]
     assert entry.changed[bad.task_id] is None
     assert f"{bad.task_id} ({reason}" in entry.note

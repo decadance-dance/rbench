@@ -290,6 +290,20 @@ def test_release_refuses_an_altered_archive_naming_the_task(
     assert gh_args(fake_bin) == []
 
 
+def test_release_names_the_hash_only_archive_an_older_import_lacks(
+    tmp_path: Path, fake_bin: FakeBin
+) -> None:
+    set_dir = committed_set(tmp_path)
+    archives = local_archives(tmp_path / "archives")
+    (archives / name("t-2")).rename(archives / f"t-2-{name('t-2')}")
+
+    with pytest.raises(ArchiveError) as err:
+        publish_release(set_dir, "ours", archives)
+    assert str(err.value).startswith(f"task t-2: {archives} has no {name('t-2')};")
+    assert "<task-id>-<sha256>.bundle" in str(err.value)
+    assert gh_args(fake_bin) == []
+
+
 def test_relative_xdg_cache_home_is_ignored(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
