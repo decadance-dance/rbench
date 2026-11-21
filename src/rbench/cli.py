@@ -11,7 +11,7 @@ from pathlib import Path
 
 from rbench.ledger import load_plan, start_run
 from rbench.plan import command as plan_command
-from rbench.tasks import release
+from rbench.tasks import release, reviewbench
 
 
 class ExitCode(IntEnum):
@@ -41,8 +41,12 @@ TASK_COMMANDS = [
     ("fetch", "download task source archives and check them against the manifest"),
     ("release", "publish a public set version's source archives as a GitHub release"),
 ]
-TASK_ARGUMENTS = {"fetch": release.add_fetch_arguments, "release": release.add_release_arguments}
-TASK_RUN = {"fetch": release.run_fetch, "release": release.run_release}
+TASK_ARGUMENTS = {
+    "import": reviewbench.add_arguments,
+    "fetch": release.add_fetch_arguments,
+    "release": release.add_release_arguments,
+}
+TASK_RUN = {"import": reviewbench.run, "fetch": release.run_fetch, "release": release.run_release}
 
 
 def build_parser() -> argparse.ArgumentParser:

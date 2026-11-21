@@ -13,6 +13,9 @@ Environment:
                                   stdout, as the real CLI prints it)
                           exit    exit code, default 0
                           crash   true: print what is given, then die by SIGKILL
+                          replies a list of scenarios, each with a `match` string; the first
+                                  whose `match` is a substring of the space-joined argv answers
+                                  instead of the keys above
 
 Stdin is read to the end unless it is a terminal: give the child input or DEVNULL.
 """
@@ -33,6 +36,8 @@ if log:
         f.write(json.dumps(call) + "\n")
 
 scenario = json.loads(os.environ.get("RBENCH_FAKE_SCENARIO") or "{}").get(tool, {})
+joined = " ".join(sys.argv[1:])
+scenario = next((r for r in scenario.get("replies", []) if r["match"] in joined), scenario)
 time.sleep(scenario.get("delay", 0))
 by_arg = scenario.get("stdout_for", {})
 sys.stdout.write(next((by_arg[a] for a in sys.argv[1:] if a in by_arg), scenario.get("stdout", "")))

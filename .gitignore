@@ -5,3 +5,5 @@ __pycache__/
 .ruff_cache/
 /dist/
 /runs/
+# Lock file of a running `rbench tasks import`; it stays between imports.
+/tasks/.*.lock
