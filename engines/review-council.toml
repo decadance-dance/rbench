@@ -3,7 +3,7 @@
 # https://github.com/deployhq/review-council at commit c9a73575503c12277cd46409c7cbdbe452e7c582
 # (`.claude-plugin/plugin.json` version 0.14.0, the commit spike #25 ran). Its adapter is
 # `rbench.engines.review_council`; review-council/config.local.yml is written into the reviewed
-# checkout of every trial.
+# checkout of every trial, with an empty config.yml and learnings.md over any committed ones.
 name = "review-council"
 pin = { kind = "version", ref = "0.14.0" }
 # A Markdown report, copied into findings by the pinned normalization step (design D9).

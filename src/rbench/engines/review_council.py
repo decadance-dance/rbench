@@ -14,26 +14,37 @@ with `gh pr view`, which the trial's gh stub answers, so the argv holds nothing 
   launches them as `codex exec --sandbox read-only --skip-git-repo-check -o <file>` with no model
   flag, so their model and effort come only from the trial's `config.toml` (`trial_homes`). The
   shim adds no model to Codex, and rewrites the read-only sandbox (design D5).
-- `.review-council/config.local.yml` in the checkout (`engines/review-council/config.local.yml`)
-  turns the Google and Perplexity seats off.
+- review-council runs as a fresh install: the adapter owns the `.review-council/` state the pinned
+  skill reads from the checkout. `config.local.yml` (`engines/review-council/config.local.yml`)
+  turns the Google and Perplexity seats off, `config.yml` sets nothing and `learnings.md` is
+  empty, so committed copies change neither the configuration nor the judge's suppressions. They
+  replace committed copies in the work tree only, and git does not show them (`prepare_checkout`
+  and the trial home's git ignore file).
 
-The report is the session's final message, Markdown, which the pinned normalization step copies
-into findings (design D9). A Codex session that did not run the Codex side's model (a fallback to
-Codex's default) makes the trial `misconfigured`: `check_launches` finds a Codex launch that
-overrides the config's model in the shim log, and `model_mismatches` compares the models each
-session applied (read from the transcripts, #46) with `requested`.
+The report is the session's last text that holds the pinned report heading, Markdown from that
+heading on, which the pinned normalization step copies into findings (design D9). A Codex
+session that did not run the Codex side's model (a fallback to Codex's default) makes the trial
+`misconfigured`: `check_launches` finds a Codex launch that overrides the config's model in the
+shim log, and `model_mismatches` compares the models each session applied (read from the
+transcripts, #46) with `requested`.
 """
 
+import functools
+import importlib.util
 import itertools
 import json
+import re
+import sys
 from collections.abc import Mapping
 from pathlib import Path
+from types import ModuleType
 
 from rbench.engines.declaration import DeclarationError, Engine, Setting
 from rbench.engines.plain import CLAUDE_SUBTYPES, Launch
+from rbench.ledger.trials import no_repeated_keys
 from rbench.trial.hermetic import codex_config, shim_settings
-from rbench.trial.images import PLUGINS_DIR
-from rbench.trial.repository import REPO_DIR
+from rbench.trial.images import IMAGES_DIR, PLUGINS_DIR
+from rbench.trial.repository import REPO_DIR, Runner
 
 NAME = "review-council"
 REPOSITORY = "https://github.com/deployhq/review-council"
@@ -48,7 +59,22 @@ COMMAND = "/review-council:run"
 # its scripts (the Codex reviewer among them) with Bash.
 CLAUDE_TOOLS = "Bash Read Grep Glob Agent Skill Write"
 CONFIG_FILE = "config.local.yml"
-CONFIG_PATH = f"{REPO_DIR}/.review-council/{CONFIG_FILE}"
+STATE_DIR = ".review-council"
+CONFIG_PATH = f"{REPO_DIR}/{STATE_DIR}/{CONFIG_FILE}"
+# What the pinned skill reads from the checkout besides config.local.yml: rc-config.sh merges
+# config.yml under it (list keys and custom seats included, which config.local.yml cannot undo),
+# and Step 0.5 recall reads learnings.md into the reviewers' context and the judge's suppressions.
+STATE = {
+    "config.yml": b"# Written by rbench: no committed configuration applies (design D13).\n{}\n",
+    "learnings.md": b"",
+}
+STATE_PATHS = tuple(f"{STATE_DIR}/{name}" for name in (CONFIG_FILE, *STATE))
+# Git's default core.excludesFile in the trial home: keeps the files out of `git status` while
+# the checkout does not track them. `prepare_checkout` hides the tracked ones.
+# limit: a committed .gitignore that negates these paths outranks this file.
+GIT_IGNORE = "/home/node/.config/git/ignore"
+REPORT_HEADING = re.compile(r"^## Review Council Report[ \t]*$", re.MULTILINE)
+_MALFORMED = "claude: stdout holds a malformed, truncated or ambiguous stream-json event"
 # Codex options that would set the model or effort over the trial's config.toml, or skip it.
 _CODEX_OWN = ("-m", "--model", "-p", "--profile", "--ignore-user-config")
 _CODEX_KEYS = ("model", "model_reasoning_effort", "model_provider", "profile")
@@ -125,25 +151,65 @@ def launch(engines_dir: Path, settings: Mapping) -> Launch:
         files = {CONFIG_PATH: config.read_bytes()}
     except OSError as e:
         raise ValueError(f"{NAME}: cannot read {config}: {e.strerror}") from None
+    files |= {f"{REPO_DIR}/{STATE_DIR}/{name}": data for name, data in STATE.items()}
+    files[GIT_IGNORE] = "".join(f"/{path}\n" for path in STATE_PATHS).encode()
     argv = ("claude", "-p", COMMAND, "--plugin-dir", PLUGIN_DIR, "--setting-sources", "user")
     argv += ("--allowedTools", CLAUDE_TOOLS, "--output-format", "stream-json", "--verbose")
     return Launch("claude", argv, "", files, None)
 
 
+def prepare_checkout(run: Runner, repo: str = REPO_DIR) -> None:
+    """The adapter's checkout hook: run in the agent after `launch().files` are written and
+    before the engine starts. Marks the `.review-council/` files the checkout tracks
+    skip-worktree, so `git status` and `git diff` do not show that the launch replaced them.
+    Idempotent, and touches only those paths."""
+    listed = run(["git", "-C", repo, "ls-files", "-z", "--", *STATE_PATHS])
+    if tracked := [path for path in listed.split("\0") if path]:
+        run(["git", "-C", repo, "update-index", "--skip-worktree", "--", *tracked])
+
+
+@functools.cache
+def _shim() -> ModuleType:
+    """The agent image's shim (`images/agent/lib/shim.py`), for its Codex option scan."""
+    spec = importlib.util.spec_from_file_location(
+        "rbench_agent_shim", IMAGES_DIR / "agent" / "lib" / "shim.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    dont_write, sys.dont_write_bytecode = sys.dont_write_bytecode, True  # keep the image context
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = dont_write
+    return module
+
+
 def _codex_override(argv: list) -> str | None:
-    """The option of a Codex argv that sets the model or effort over config.toml, or skips it."""
-    for i, a in enumerate(argv):
-        if not isinstance(a, str):
-            return "a non-string argument"
-        if a.split("=", 1)[0] in _CODEX_OWN:
-            return a.split("=", 1)[0]
-        value = None
-        if a in ("-c", "--config") and i + 1 < len(argv) and isinstance(argv[i + 1], str):
-            value = argv[i + 1]
-        elif a.startswith("--config="):
-            value = a.removeprefix("--config=")
-        if value is not None and value.split("=", 1)[0].strip() in _CODEX_KEYS:
-            return f"-c {value.split('=', 1)[0].strip()}"
+    """The option of a Codex argv that sets the model or effort over config.toml, or skips it.
+    Reads options as Codex and the shim do: up to `--` or the first positional argument, with
+    `--name=value` and attached short values (`-mgpt`, `-ckey=value`)."""
+    if not all(isinstance(a, str) for a in argv):
+        return "a non-string argument"
+    shim = _shim()
+    options = shim.codex_options(argv)
+    i = 0
+    while i < len(options):
+        a = options[i]
+        if a in shim.CODEX_VALUE_OPTIONS:
+            name, value = a, options[i + 1] if i + 1 < len(options) else ""
+            i += 2
+        else:
+            i += 1
+            if a.startswith("--"):
+                name, _, value = a.partition("=")
+            elif a.startswith("-"):
+                name, value = a[:2], a[2:]
+            else:
+                continue  # a command
+        if name in _CODEX_OWN:
+            return name
+        key = value.split("=", 1)[0].strip()
+        if name in ("-c", "--config") and key in _CODEX_KEYS:
+            return f"-c {key}"
     return None
 
 
@@ -212,24 +278,57 @@ def model_mismatches(settings: Mapping, applied: Mapping[str, tuple[str, str]]) 
     return problems
 
 
-def report(stdout: str) -> str:
-    """The council's Markdown report: the `result` of the session's final `result` event on its
-    `--output-format stream-json` stdout. It goes to `rbench.engines.normalization.normalize`.
-    Raises `ReviewCouncilOutputError` when the session gave none; errors never quote engine
-    output, which may quote a hidden task."""
-    results = []
-    for line in stdout.splitlines():
+def _events(stdout: str) -> list[dict]:
+    """The stream-json events of `stdout`, one JSON object per `\n`-ended line. Lines before the
+    first one that starts with `{` are a tolerated preamble; from there on every line must be a
+    whole event with no repeated key."""
+    lines = stdout.split("\n")  # not splitlines: U+2028 and the like may sit inside a string
+    if lines[-1] == "":
+        lines.pop()
+    start = next((i for i, line in enumerate(lines) if line.startswith("{")), len(lines))
+    events = []
+    for line in lines[start:]:
         try:
-            event = json.loads(line)
+            event = json.loads(line, object_pairs_hook=no_repeated_keys)
         except (ValueError, RecursionError):
-            continue  # not an event; stream-json writes one JSON object per line
-        if isinstance(event, dict) and event.get("type") == "result":
-            results.append(event)
+            raise ReviewCouncilOutputError(_MALFORMED) from None
+        if not (isinstance(event, dict) and isinstance(event.get("type"), str)):
+            raise ReviewCouncilOutputError(_MALFORMED)
+        events.append(event)
+    return events
+
+
+def _texts(event: dict) -> list[str]:
+    """The text blocks of a main-session `assistant` event; subagents' events have a parent."""
+    if event["type"] != "assistant" or event.get("parent_tool_use_id") is not None:
+        return []
+    message = event.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list) or not all(isinstance(b, dict) for b in content):
+        raise ReviewCouncilOutputError(_MALFORMED)
+    texts = [b.get("text") for b in content if b.get("type") == "text"]
+    if not all(isinstance(t, str) for t in texts):
+        raise ReviewCouncilOutputError(_MALFORMED)
+    return texts
+
+
+def report(stdout: str) -> str:
+    """The council's Markdown report from the session's `--output-format stream-json` stdout: the
+    last main-session text, the final `result` included, that holds the pinned report heading
+    (skills/run/SKILL.md, Step 6), from that heading on. The skill may go on after the report
+    (re-reading its config, a posting offer, the capture gate), so the final message alone is
+    not the report. It goes to `rbench.engines.normalization.normalize`. Raises
+    `ReviewCouncilOutputError` when the stream is malformed, the session did not succeed, or it
+    gave no report; errors never quote engine output, which may quote a hidden task."""
+    events = _events(stdout)
+    results = [e for e in events if e["type"] == "result"]
     if len(results) != 1:
         raise ReviewCouncilOutputError(
             f"claude: expected one result event on stdout, found {len(results)}"
         )
     (result,) = results
+    if events[-1] is not result:
+        raise ReviewCouncilOutputError("claude: the result event is not the last event on stdout")
     subtype = result.get("subtype")
     if result.get("is_error") is not False or subtype != "success":
         known = isinstance(subtype, str) and subtype in CLAUDE_SUBTYPES
@@ -237,7 +336,13 @@ def report(stdout: str) -> str:
         raise ReviewCouncilOutputError(
             f"claude: the session did not succeed; it ended with {ended}"
         )
-    text = result.get("result")
-    if not (isinstance(text, str) and text.strip()):
-        raise ReviewCouncilOutputError("claude: the result holds no report")
-    return text
+    final = result.get("result")
+    if not isinstance(final, str):
+        raise ReviewCouncilOutputError(_MALFORMED)
+    texts = [t for e in events for t in _texts(e)] + [final]
+    for text in reversed(texts):
+        if heading := REPORT_HEADING.search(text):
+            return text[heading.start() :]
+    raise ReviewCouncilOutputError(
+        "claude: the session gave no council report (no '## Review Council Report' heading)"
+    )

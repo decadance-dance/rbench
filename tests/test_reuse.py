@@ -212,6 +212,21 @@ def test_reuse_refuses_invalid_done_results_and_names_public_source_trial(
     assert list(runs.iterdir()) == [source]
 
 
+def test_reuse_refuses_usage_from_an_older_rbench(tmp_path: Path) -> None:
+    plan = freeze(tmp_path)
+    runs = tmp_path / "runs"
+    source = create_run(runs, "earlier", plan)
+    trial_dir = source / TRIALS_DIR / plan.trials[0].id
+    test_ledger.store_legacy(trial_dir)
+    before = (trial_dir / USAGE_FILE).read_bytes()
+
+    with pytest.raises(LedgerError, match="usage.json from an older rbench: no completeness"):
+        create_run(runs, "later", plan, reuse=source)
+
+    assert (trial_dir / USAGE_FILE).read_bytes() == before
+    assert list(runs.iterdir()) == [source]
+
+
 def test_reuse_is_refused_for_full_stage(full_inputs, monkeypatch, capsys) -> None:
     checkout, argv, task = full_inputs
     source = checkout / task.name
