@@ -11,14 +11,18 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from test_tasks import HID, HIDDEN, item, write_task
+from test_hidden import config as hidden_config_for
+from test_tasks import HID, HIDDEN, item, load_hidden, write_task
 
 from rbench.tasks import (
     CORE_LIST_FILE,
     GROUND_TRUTH_FILE,
+    HIDDEN_CONFIG_FILE,
+    HIDDEN_DIR_ENV,
     MANIFEST_FILE,
     TASK_FILE,
     ChangelogEntry,
+    HiddenConfig,
     Manifest,
     ManifestTask,
     TaskError,
@@ -26,6 +30,8 @@ from rbench.tasks import (
     check_version_history,
     load_committed_manifest,
     load_core_list,
+    load_hidden_task_set,
+    load_hidden_tasks,
     load_task_set,
     load_tasks,
     merge_base,
@@ -39,14 +45,25 @@ ROOT = Path(__file__).resolve().parent.parent
 REPO_TASKS = ROOT / "tasks"
 
 
-def hashes(set_dir: Path, hidden_canary_prefix: str | None = None) -> dict[str, str]:
-    tasks = load_tasks(set_dir, hidden_canary_prefix=hidden_canary_prefix)
+def hashes(set_dir: Path, hidden: bool = False) -> dict[str, str]:
+    tasks = load_hidden(set_dir) if hidden else load_tasks(set_dir)
     return {task.id: task_content_sha256(task) for task in tasks}
+
+
+def hidden_set(set_dir: Path) -> HiddenConfig:
+    """The configuration of a synthetic hidden set directory, as `hidden_config` issues it."""
+    (set_dir / HIDDEN_CONFIG_FILE).write_text(f'canary_prefix = "{HIDDEN}"\n')
+    return hidden_config_for(set_dir, set_dir.parent)
+
+
+def assert_private(err: pytest.ExceptionInfo, *secrets: str) -> None:
+    for exc in (err.value, err.value.__cause__, err.value.__context__):
+        assert not any(secret in str(exc) for secret in secrets), str(exc)
 
 
 def write_manifest(set_dir: Path, task_set: str = "ours", changelog=None, **overrides) -> Path:
     """A version 1 manifest of every task in `set_dir`, as an import would record it."""
-    current = hashes(set_dir, HIDDEN if task_set == "hidden" else None)
+    current = hashes(set_dir, hidden=task_set == "hidden")
     data = {
         "set": task_set,
         "version": 1,
@@ -189,14 +206,15 @@ def test_hidden_set_is_checked_against_its_manifest(tmp_path: Path) -> None:
     set_dir = tmp_path / "hidden"
     write_task(set_dir, HID, task_set="hidden")
     write_manifest(set_dir, task_set="hidden")
-    manifest, tasks = load_task_set(set_dir, "hidden", HIDDEN)
+    manifest, tasks = load_hidden_task_set(hidden_set(set_dir))
     assert manifest.set == "hidden" and [t.id for t in tasks] == [HID]
     edit(set_dir / HID / GROUND_TRUTH_FILE, lambda gt: gt["items"][0].update(message="Changed."))
     with pytest.raises(TaskError) as err:
-        load_task_set(set_dir, "hidden", HIDDEN)
+        load_hidden_task_set(hidden_set(set_dir))
     message = str(err.value)
     assert "task 1 of 1" in message and "content hash does not match" in message
-    assert HID not in message and HIDDEN not in message
+    assert f"manifest {HIDDEN_DIR_ENV}/{MANIFEST_FILE}" in message
+    assert_private(err, HID, HIDDEN, str(tmp_path))
 
 
 def test_hidden_manifest_errors_name_no_id_or_value(tmp_path: Path) -> None:
@@ -218,8 +236,8 @@ def test_hidden_manifest_errors_name_no_id_or_value(tmp_path: Path) -> None:
         path.write_text(good)
         edit(path, change)
         with pytest.raises(TaskError) as err:
-            load_task_set(set_dir, "hidden", HIDDEN)
-        assert HID not in str(err.value) and secret not in str(err.value), str(err.value)
+            load_hidden_task_set(hidden_set(set_dir))
+        assert_private(err, HID, secret, str(tmp_path))
 
 
 @pytest.mark.parametrize(
@@ -271,14 +289,15 @@ def test_hidden_set_redaction_comes_from_the_caller(tmp_path: Path) -> None:
     # The file claims a public set to get its keys quoted; the caller's set decides.
     edit(path, lambda m: m.update(set="ours", tasks={secret: {"sha256": "invalid"}}))
     with pytest.raises(TaskError, match=r"'set' must be 'hidden'") as err:
-        load_task_set(set_dir, "hidden", HIDDEN)
+        load_hidden_task_set(hidden_set(set_dir))
     assert secret not in str(err.value)
     path.write_text(original)
-    # The loader's own message would quote the value and name the task directory.
+    # The loader's hidden mode names the entry and the field, never the value or the directory.
     edit(gt, lambda d: d["items"][0].update(severity=secret))
-    with pytest.raises(TaskError, match=r"hidden task 1 of 1 in .* does not load") as err:
-        load_task_set(set_dir, "hidden", HIDDEN)
-    assert HID not in str(err.value) and secret not in str(err.value)
+    match = rf"{HIDDEN_DIR_ENV} entry 0: ground_truth.json: item 0: 'severity'"
+    with pytest.raises(TaskError, match=match) as err:
+        load_hidden_task_set(hidden_set(set_dir))
+    assert_private(err, HID, secret, str(tmp_path))
     assert err.value.__cause__ is None and err.value.__context__ is None
 
 
@@ -287,9 +306,62 @@ def test_hidden_set_with_shared_canaries_names_no_task(tmp_path: Path) -> None:
     first = write_task(set_dir, HID, task_set="hidden")
     second = write_task(set_dir, f"{HID}0", task_set="hidden")
     (second / GROUND_TRUTH_FILE).write_text((first / GROUND_TRUTH_FILE).read_text())
-    with pytest.raises(TaskError, match=r"two of its tasks share an id or a canary") as err:
-        load_task_set(set_dir, "hidden", HIDDEN)
-    assert HID not in str(err.value)
+    with pytest.raises(TaskError, match=rf"entry 1 has the same canary as {HIDDEN_DIR_ENV}") as err:
+        load_hidden_task_set(hidden_set(set_dir))
+    assert_private(err, HID, str(tmp_path))
+
+
+def test_hidden_set_loads_only_through_its_configuration(tmp_path: Path) -> None:
+    set_dir = tmp_path / "hidden"
+    write_task(set_dir, HID, task_set="hidden")
+    write_manifest(set_dir, task_set="hidden")
+    with pytest.raises(TaskError, match=r"only through load_hidden_task_set") as err:
+        load_task_set(set_dir, "hidden")
+    assert_private(err, str(tmp_path))
+    with pytest.raises(TaskError, match=r"load only through hidden_config"):
+        load_hidden_task_set(HiddenConfig(set_dir, HIDDEN))
+    manifest, _ = load_hidden_task_set(hidden_set(set_dir))
+    assert repr(manifest) == "Manifest(set='hidden', version=1)"
+
+
+@pytest.mark.parametrize(
+    "case", ["missing", "linked out", "malformed", "undecodable", "unreadable"]
+)
+def test_hidden_manifest_file_errors_name_no_path(tmp_path: Path, case: str) -> None:
+    set_dir = tmp_path / "hidden"
+    write_task(set_dir, HID, task_set="hidden")
+    path = write_manifest(set_dir, task_set="hidden")
+    config = hidden_set(set_dir)
+    if case == "missing":
+        path.unlink()
+    elif case == "linked out":
+        outside = tmp_path / "outside.json"
+        outside.write_text(path.read_text())
+        path.unlink()
+        path.symlink_to(outside)
+    elif case == "malformed":
+        path.write_text(path.read_text()[:-5])
+    elif case == "unreadable":
+        if os.geteuid() == 0:
+            pytest.skip("root reads any file")
+        path.chmod(0)
+    else:
+        path.write_bytes(path.read_bytes() + b"\xff")
+    with pytest.raises(TaskError) as err:
+        load_hidden_task_set(config)
+    assert_private(err, HID, str(tmp_path))
+    assert err.value.__context__ is None
+
+
+def test_hidden_committed_manifest_errors_name_no_path(tmp_path: Path) -> None:
+    repo = tmp_path / "private"
+    write_task(repo, HID, task_set="hidden")
+    path = write_manifest(repo, task_set="hidden")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    with pytest.raises(TaskError, match=r"git cannot read it at that revision") as err:
+        load_committed_manifest(repo, "HEAD", path, "hidden")
+    assert_private(err, HID, str(tmp_path))
+    assert err.value.__context__ is None
 
 
 def test_hidden_manifest_rejects_public_ids(tmp_path: Path) -> None:
@@ -298,7 +370,7 @@ def test_hidden_manifest_rejects_public_ids(tmp_path: Path) -> None:
     path = write_manifest(set_dir, task_set="hidden")
     edit(path, lambda m: m["changelog"][0]["changed"].update({"t-1": None}))
     with pytest.raises(TaskError, match=r"'changed' entry 1: the 'h-' id prefix is reserved"):
-        load_task_set(set_dir, "hidden", HIDDEN)
+        load_hidden_task_set(hidden_set(set_dir))
 
 
 def test_invalid_unicode_names_task_and_file(tmp_path: Path) -> None:
@@ -393,7 +465,7 @@ def test_core_names_no_hidden_id_loaded_twice(tmp_path: Path) -> None:
     path, tasks = core_setup(tmp_path, ["rb-1", "o-1"])
     for name in ("h1", "h2"):
         write_task(tmp_path / name, HID, task_set="hidden")
-        tasks += load_tasks(tmp_path / name, hidden_canary_prefix=HIDDEN)
+        tasks += load_hidden(tmp_path / name)
     with pytest.raises(TaskError, match=r"two loaded hidden tasks share an id") as err:
         select_core(load_core_list(path), tasks)
     assert HID not in str(err.value)
@@ -661,9 +733,13 @@ def test_import_records_the_license_id_in_the_manifest(tmp_path: Path, task_set:
 
 
 def test_hidden_manifest_entry_has_no_license(tmp_path: Path) -> None:
-    write_task(tmp_path / "hidden", HID, task_set="hidden")
-    (task,) = load_tasks(tmp_path / "hidden", hidden_canary_prefix=HIDDEN)
+    set_dir = tmp_path / "hidden"
+    write_task(set_dir, HID, task_set="hidden")
+    (task,) = load_hidden_tasks(hidden_set(set_dir))
     assert manifest_task(task, archive(license_id=None)).license is None
+    with pytest.raises(TaskError, match=r"^a task in set 'hidden': the archive's SHA-256") as err:
+        manifest_task(task, archive(sha256="d" * 64))
+    assert_private(err, HID, HIDDEN, str(tmp_path))
 
 
 @pytest.mark.parametrize(
