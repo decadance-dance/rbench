@@ -391,9 +391,9 @@ def codex_trial(launch: plain.Launch) -> dict:
     }
 
 
-def launched(status: int = 0, seconds: int = 1) -> str:
+def launched(status: int = 0, outcome: str = "exit") -> str:
     """The line the launch wrapper ends the engine's stderr with in the agent."""
-    return f"engine noise\n{trial_module.MARK} {status} {seconds}\n"
+    return f"engine noise\n{trial_module.MARK} {outcome} {status}\n"
 
 
 def docker_replies(trial: dict, *, engine: dict | None = None, extra: list | None = None) -> dict:
@@ -511,7 +511,7 @@ def test_only_a_codex_exec_json_launch_passes_its_stdout_to_usage(tmp_path):
 @pytest.mark.parametrize("status", [124, 137])  # `timeout`'s TERM, then KILL
 def test_a_timeout_fails_the_trial_and_resume_does_not_rerun_it(sandbox, status):
     def replies(launch):
-        engine = {"exit": status, "stderr": launched(status, 1)}
+        engine = {"exit": status, "stderr": launched(status, "timeout")}
         return docker_replies(claude_trial(launch), engine=engine)
 
     trial_dir, counts, plan = sandbox([OPUS], replies, timeout=1.0)
@@ -525,7 +525,7 @@ def test_a_timeout_fails_the_trial_and_resume_does_not_rerun_it(sandbox, status)
 def test_time_in_docker_outside_the_agent_is_not_a_timeout(sandbox):
     # 1.2 s on the host, but the wrapper saw the engine end well inside its 1 s limit.
     def replies(launch):
-        return docker_replies(claude_trial(launch), engine={"delay": 1.2, "stderr": launched(0, 0)})
+        return docker_replies(claude_trial(launch), engine={"delay": 1.2, "stderr": launched(0)})
 
     _, counts, _ = sandbox([OPUS], replies, timeout=1.0)
 
@@ -535,7 +535,7 @@ def test_time_in_docker_outside_the_agent_is_not_a_timeout(sandbox):
 @pytest.mark.real_executor
 def test_an_engine_exiting_124_on_its_own_is_an_engine_error(sandbox):
     def replies(launch):
-        engine = {"exit": 124, "stderr": launched(124, 0)}
+        engine = {"exit": 124, "stderr": launched(124)}
         return docker_replies(claude_trial(launch), engine=engine)
 
     trial_dir, counts, _ = sandbox([OPUS], replies, timeout=5.0)
@@ -857,3 +857,149 @@ def test_a_hidden_tasks_archive_is_found_in_the_hidden_directory(tmp_path):
     assert trial_module._archive(ctx, secret) == tmp_path / "hidden" / name
     with pytest.raises(ValueError, match="no hidden directory"):
         trial_module._archive(types.SimpleNamespace(archives=tmp_path, hidden=None), secret)
+
+
+@pytest.mark.real_executor
+def test_a_launch_that_cannot_start_is_retried_as_infrastructure(sandbox, fake_bin):
+    # `timeout` could not run the engine: the wrapper's line says so, the shim log is empty.
+    def replies(launch):
+        trial = claude_trial(launch)
+        trial["copy"]["agent:/var/log/rbench/shim.jsonl"] = ""
+        engine = {"exit": 127, "stderr": launched(127, "start")}
+        return docker_replies(trial, engine=engine)
+
+    with pytest.raises(executor.RunStopped, match=r"could not start in the agent \(exit 127\)"):
+        sandbox([OPUS], replies)
+
+    assert len(docker_calls(fake_bin, ENGINE)) == 4  # the first try and 3 retries
+
+
+STAND_IN_TIMEOUT = """#!/usr/bin/env python3
+# GNU timeout's behaviour the wrapper relies on: with -v it reports a signal it sends, and a
+# command it cannot run, on its own stderr; it keeps the descriptors it was given.
+import subprocess, sys
+args = sys.argv[1:]
+assert args[:2] == ["-v", "-k"]
+limit = float(args[3].rstrip("s"))
+try:
+    sys.exit(subprocess.run(args[4:], timeout=limit, close_fds=False).returncode)
+except subprocess.TimeoutExpired:
+    print(f"timeout: sending signal TERM to command {args[4]!r}", file=sys.stderr)
+    sys.exit(124)
+except OSError:
+    print(f"timeout: failed to run command {args[4]!r}", file=sys.stderr)
+    sys.exit(126)
+"""
+# A clock whose every read is a second later: a wrapper reading it would see each launch straddle
+# a second boundary.
+STAND_IN_DATE = """#!/bin/sh
+n=$(cat "$0.n" 2>/dev/null || echo 1000); echo $((n + 1)) > "$0.n"; echo "$n"
+"""
+
+
+@pytest.mark.parametrize(
+    ("command", "line"),
+    [
+        (["sh", "-c", "exit 124"], "exit 124"),  # the engine's own 124, even at a boundary
+        (["sh", "-c", "exit 137"], "exit 137"),
+        (["sh", "-c", "echo out; echo err >&2"], "exit 0"),
+        (["sh", "-c", "sleep 5"], "timeout 124"),  # the timer fired
+        (["no-such-engine"], "start 127"),
+        (["./not-executable"], "start 127"),
+    ],
+)
+def test_the_launch_wrapper_reports_what_ended_the_engine(tmp_path, command, line):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, text in (("timeout", STAND_IN_TIMEOUT), ("date", STAND_IN_DATE)):
+        (bin_dir / name).write_text(text)
+        (bin_dir / name).chmod(0o755)
+    (tmp_path / "not-executable").write_text("#!/bin/sh\n")
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    argv = ["sh", "-c", trial_module.RUN, "sh", str(tmp_path), "1s", "0.5s", *command]
+
+    done = subprocess.run(argv, check=False, capture_output=True, text=True, env=env, timeout=30)
+
+    last = done.stderr.rstrip("\n").rpartition("\n")[2]
+    assert last == f"{trial_module.MARK} {line}"
+    assert done.returncode == int(line.split()[1])
+    if line == "exit 0":
+        assert done.stdout == "out\n" and done.stderr.startswith("err\n")
+
+
+@pytest.mark.real_executor
+def test_a_codex_login_another_runs_agent_still_mounts_is_refused(sandbox, fake_bin):
+    # That run's runner died (its flock is gone) or could not remove its project.
+    other = "rbench-0123456789abcdef"
+
+    def replies(launch):
+        holder = {"match": f"label={trial_module.LOGIN_LABEL}=", "stdout": f"{other}\n"}
+        return docker_replies(codex_trial(launch), extra=[holder])
+
+    with pytest.raises(executor.RunStopped, match=f"mounted by the running agent of .*{other}"):
+        sandbox([CODEX], replies)
+
+    assert not docker_calls(fake_bin, "up --detach --wait")
+    assert not docker_calls(fake_bin, f"--project-name {other}")  # its run removes it
+
+
+@pytest.mark.real_executor
+def test_an_agent_on_a_codex_login_is_labelled_with_it(sandbox):
+    trial_dir, counts, _ = sandbox([CODEX], lambda launch: docker_replies(codex_trial(launch)))
+
+    assert counts == {"done": 1}
+    spec = json.loads((trial_dir / trial_module.PROJECT_DIR / "compose.json").read_text())
+    login = Path(os.environ[executor.CODEX_LOGIN_ENV]).resolve()
+    labels = spec["services"]["agent"]["labels"]
+    assert labels == {trial_module.LOGIN_LABEL: trial_module.login_key(login)}
+
+
+def test_a_malformed_thread_started_event_flags_usage_instead_of_raising(tmp_path):
+    adapter = ADAPTERS["codex-review"]
+    trial = engine_trial(test_codex_review.settings())
+    launch = adapter.launch(trial)
+    records = test_codex_review.records((test_codex_review.ROOT, test_codex_review.ROOT_META))
+    test_codex_review.rollout(tmp_path, test_codex_review.ROOT, test_codex_review.review())
+    events = [{"type": "thread.started", "thread_id": ["t1"]}, {"type": "turn.completed"}]
+    (tmp_path / trial_module.STDOUT_FILE).write_text("".join(json.dumps(e) + "\n" for e in events))
+    stdout = trial_module._codex_stdout(launch, records, tmp_path)
+    assert stdout  # the engine is that one `codex exec --json` launch
+
+    usage = trial_module.count_usage(records, tmp_path, stdout)
+
+    assert any("thread.started without a thread id" in i for i in usage.incomplete)
+
+
+@pytest.mark.real_executor
+def test_a_transcript_directory_that_cannot_be_made_is_not_named(sandbox, checkout):
+    # The second path makes the first, a file, a parent directory.
+    first = f"/home/node/.claude/projects/-rbench-repo/{MARKER}.jsonl"
+    second = f"{first}/subagents/a.jsonl"
+
+    def replies(launch):
+        trial = claude_trial(launch)
+        trial["diff"] += f"A {first}\nA {second}\n"
+        trial["copy"][f"agent:{first}"] = "{}\n"
+        return docker_replies(trial)
+
+    with pytest.raises(
+        executor.RunStopped, match=r"transcript 3 of 3 out of the agent failed"
+    ) as e:
+        sandbox([OPUS], replies)
+
+    status = (first_trial(checkout) / "status.json").read_text()
+    assert MARKER not in str(e.value) and MARKER not in status
+
+
+def test_a_stalled_compose_down_is_cut_off(fake_bin, tmp_path, monkeypatch):
+    from rbench.trial import compose
+
+    monkeypatch.setattr(compose, "DOWN_TIMEOUT", 0.3)
+    fake_bin.scenario("docker", replies=[{"match": " down ", "delay": 10}])
+    project = TrialProject.create(tmp_path, "rbench-t1", f"a@{PROXY_ID}", f"p@{PROXY_ID}")
+    started = time.monotonic()
+
+    with pytest.raises(TrialError, match=r"removing trial project rbench-t1: .* within 0\.3s"):
+        project.down()
+
+    assert time.monotonic() - started < 5

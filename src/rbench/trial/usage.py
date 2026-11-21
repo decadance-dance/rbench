@@ -416,6 +416,9 @@ def _read_stdout(file: Path) -> tuple[list[dict], str | None]:
             return events, f"line {n} is not a valid JSON record ({e})"
         if not isinstance(event, dict):
             return events, f"line {n} is not a JSON object"
+        # The thread id attributes the model: anything but a string makes the stdout untrusted.
+        if event.get("type") == "thread.started" and not _text(event.get("thread_id")):
+            return events, f"line {n} is a thread.started without a thread id"
         events.append(event)
     return events, None if events else "is empty"
 

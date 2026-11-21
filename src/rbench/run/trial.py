@@ -38,9 +38,9 @@ from rbench.tasks.archive import archive_name
 from rbench.tasks.hidden import HiddenConfig
 from rbench.tasks.loader import Task
 from rbench.trial.audit import audit_trial, record_audit
-from rbench.trial.compose import TrialProject
+from rbench.trial.compose import COMPOSE_LABEL, LOGIN_LABEL, TrialProject, login_key
 from rbench.trial.hermetic import LOG_FILE, TRANSCRIPTS_DIR, collect, prepare, shim_settings
-from rbench.trial.images import TrialError
+from rbench.trial.images import TrialError, docker
 from rbench.trial.repository import REPO_DIR, agent_runner, prepare_repository
 from rbench.trial.sessions import SessionError, read_shim_log
 from rbench.trial.usage import UsageError, count_usage, usage_record
@@ -61,18 +61,24 @@ PROXY_LOG_FILE = "proxy.log"
 # Writes stdin to "$1", creating its directory, as the agent's user.
 WRITE = 'mkdir -p "$(dirname "$1")" && cat > "$1"'
 REGULAR = '[ -f "$1" ] && [ ! -L "$1" ]'
-# Runs the engine in "$1" under `timeout -k "$2" "$3"` and ends stderr with its own line:
-# `rbench-launch <status> <seconds>`, the launch's exit status and its time inside the agent. Only
-# the last line counts, so an engine printing such a line earlier changes nothing; none means the
-# launch never completed in the agent, a Docker failure.
+# Runs the engine in "$1" under `timeout -v -k "$2" "$3"` and ends stderr with its own line,
+# `rbench-launch <outcome> <status>`. `timeout`'s own stderr goes to a file, the engine's to the
+# real stderr, so the outcome says what happened rather than guessing from the status:
+# - `timeout`: `timeout` reported sending a signal, so the timer fired;
+# - `start`: the command is not an executable on PATH, or `timeout` reported failing to run it;
+# - `exit`: the engine ran and exited with that status, 124 included.
+# Only the last line counts, so an engine printing such a line earlier changes nothing; none means
+# the launch never completed in the agent, a Docker failure.
 MARK = "rbench-launch"
 RUN = (
-    'cd "$1" || exit; k=$2 l=$3; shift 3; t0=$(date +%s); timeout -k "$k" "$l" "$@"; s=$?;'
-    f' printf "\\n{MARK} %s %s\\n" "$s" "$(($(date +%s) - t0))" >&2; exit "$s"'
+    'cd "$1" || exit; k=$2 l=$3; shift 3; m=' + MARK + ";"
+    ' p=$(command -v "$1") && [ -x "$p" ] || { printf "\\n%s start 127\\n" "$m" >&2; exit 127; };'
+    " f=$(mktemp) || exit;"
+    """ timeout -v -k "$k" "$l" sh -c 'exec 2>&3 3>&-; exec "$@"' sh "$@" 3>&2 2>"$f"; s=$?;"""
+    ' if [ ! -s "$f" ]; then o=exit; elif [ "$s" = 124 ] || [ "$s" = 137 ]; then o=timeout;'
+    ' else o=start; fi; rm -f "$f"; printf "\\n%s %s %s\\n" "$m" "$o" "$s" >&2; exit "$s"'
 )
-_LAUNCHED = re.compile(rf"{MARK} (\d+) (\d+)")
-# `timeout`'s status when the limit ended the engine: by TERM, or by KILL after KILL_AFTER.
-TIMED_OUT = (124, 128 + 9)
+_LAUNCHED = re.compile(rf"{MARK} (exit|timeout|start) (\d+)")
 
 
 def project_name(identity: str, trial_id: str) -> str:
@@ -126,7 +132,28 @@ def run_attempt(ctx: RunContext, trial: PlannedTrial) -> str:
     if ctx.codex_login is None:
         raise TrialError("the trial uses Codex, but the run has no Codex login")
     with login_lock(ctx.codex_login):
+        _check_login_free(ctx.codex_login, project_name(ctx.identity, trial.id))
         return _attempt(ctx, trial)
+
+
+def _check_login_free(login: Path, own: str) -> None:
+    """Refuse to start while another project's running agent mounts the Codex login: its runner
+    may have died and released the lock, or failed to remove it, but its session still holds the
+    login. That project is its run's to remove, so it is named, not touched."""
+    out = docker(
+        "ps",
+        "--filter",
+        f"label={LOGIN_LABEL}={login_key(login)}",
+        "--format",
+        f'{{{{.Label "{COMPOSE_LABEL}"}}}}',
+        what="listing agents on the Codex login",
+    )
+    if others := sorted(set(out.split()) - {own}):
+        raise ValueError(
+            f"Codex login home {login} is still mounted by the running agent of compose project"
+            f" {', '.join(others)}; remove that project (resume its run, or `docker compose"
+            " --project-name <name> down`) before starting another trial on the login"
+        )
 
 
 def _attempt(ctx: RunContext, trial: PlannedTrial) -> str:
@@ -253,9 +280,13 @@ def _run_engine(
             f"trial project {project.name}: the engine's launch did not complete in the agent"
             f" (docker exec exited {done.returncode})"
         )
-    status, seconds = int(launched[1]), int(launched[2])
-    # `date +%s` counts whole seconds, so a limit reached shows at least its whole part.
-    return status, status in TIMED_OUT and seconds >= int(ctx.timeout)
+    outcome, status = launched[1], int(launched[2])
+    if outcome == "start":
+        raise TrialError(
+            f"trial project {project.name}: the engine's launch could not start in the agent"
+            f" (exit {status})"
+        )
+    return status, outcome == "timeout"
 
 
 def _collect(project: TrialProject, image: Image, raw: Path) -> list[dict]:

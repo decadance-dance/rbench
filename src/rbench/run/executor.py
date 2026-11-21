@@ -39,7 +39,7 @@ from rbench.tasks.archive import ArchiveError
 from rbench.tasks.hidden import HiddenConfig, hidden_config
 from rbench.tasks.loader import Task
 from rbench.tasks.manifest import load_hidden_task_set, load_task_set
-from rbench.trial.compose import TrialProject
+from rbench.trial.compose import COMPOSE_LABEL, TrialProject
 from rbench.trial.credentials import check_login_home, claude_token
 from rbench.trial.images import TrialError, build_proxy_image, docker
 
@@ -47,7 +47,6 @@ CLAUDE_CONCURRENCY = 2
 RETRIES = 3
 INFRASTRUCTURE = (TrialError, ArchiveError)
 CODEX_LOGIN_ENV = "RBENCH_CODEX_LOGIN"
-COMPOSE_LABEL = "com.docker.compose.project"
 
 
 class RunStopped(Exception):

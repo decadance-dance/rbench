@@ -64,11 +64,13 @@ def docker(
     what: str,
     env: Mapping[str, str] | None = None,
     secrets: Iterable[str] = (),
+    timeout: float | None = None,
 ) -> str:
     """Run `docker <argv>` and return its stdout; raise `TrialError` naming `what` on failure.
 
     `env` is docker's whole environment, `host_env()` by default. `secrets` are redacted from the
-    diagnostics an error carries.
+    diagnostics an error carries. With `timeout`, a call still running after that many seconds is
+    killed and refused.
     """
     secrets = tuple(secrets)
     try:
@@ -80,7 +82,10 @@ def docker(
             errors="replace",
             stdin=subprocess.DEVNULL,
             env=dict(env) if env is not None else host_env(),
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired:
+        raise TrialError(f"{what}: docker {argv[0]} did not return within {timeout:g}s") from None
     except OSError as e:
         raise TrialError(redact(f"{what}: cannot run docker: {e}", secrets)) from None
     if result.returncode != 0:

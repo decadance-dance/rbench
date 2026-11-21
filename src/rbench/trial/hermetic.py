@@ -187,11 +187,13 @@ def collect(project: TrialProject, image: Image, dest: Path) -> list[str]:
 
     def take(source: str, target: Path, what: str) -> None:
         # The engine names its transcripts and may have planted links: neither the path nor
-        # docker's message about it is quoted.
+        # docker's or the file system's message about it is quoted.
         try:
+            target.parent.mkdir(parents=True, exist_ok=True)
             compose("cp", f"agent:{source}", str(target), what=what)
-        except TrialError:
-            raise TrialError(f"{where}: copying {what} out of the agent failed") from None
+        except (TrialError, OSError) as e:
+            why = type(e).__name__
+            raise TrialError(f"{where}: copying {what} out of the agent failed ({why})") from None
 
     take(SHIM_LOG, dest / LOG_FILE, "the shim log")
     container = compose("ps", "--quiet", "agent", what=f"{where}: agent id").strip()
@@ -206,7 +208,6 @@ def collect(project: TrialProject, image: Image, dest: Path) -> list[str]:
         raise TrialError(f"{where}: a transcript's path holds the Claude token; nothing copied")
     for n, path in enumerate(found, 1):
         target = dest / TRANSCRIPTS_DIR / path.lstrip("/")
-        target.parent.mkdir(parents=True, exist_ok=True)
         take(path, target, f"transcript {n} of {len(found)}")
     record = launch_record(image, read_shim_log(dest / LOG_FILE))
     atomic_write(dest / RECORD_FILE, json.dumps(record, indent=2, sort_keys=True) + "\n")
