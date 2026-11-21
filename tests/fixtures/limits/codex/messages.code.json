@@ -1,0 +1,32 @@
+{
+  "cli": "codex",
+  "version": "0.171.0",
+  "source": "code: openai/codex at tag rust-v0.171.0, codex-rs/protocol/src/error.rs (UsageLimitReachedError, RetryLimitReachedError, CodexErr) and codex-rs/codex-api/src/api_bridge.rs (429 handling)",
+  "detection": {
+    "exec_json": "an {\"type\":\"error\"} event, then {\"type\":\"turn.failed\",\"error\":{\"message\":...}}; text only, no typed code",
+    "rollout_task_complete": {"error": {"codex_error_info": "usage_limit_exceeded"}},
+    "rollout_retry_limit": {"error": {"codex_error_info": {"response_too_many_failed_attempts": {"http_status_code": 429}}}},
+    "http": "429 with body error.type usage_limit_reached; usage_not_included and insufficient_quota map to the same codex_error_info; any other 429 is retried and ends as the retry-limit error",
+    "exit_status": 1
+  },
+  "templates": {
+    "limit_named": "You’ve hit your usage limit for {limit_name}. Switch to another model now,{retry_after_or}",
+    "promo": "You’ve hit your usage limit. {promo_message},{retry_after_or}",
+    "plus": "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits{retry_after_or}",
+    "team_business_enterprise_cbp": "You’ve hit your usage limit. To get more access now, send a request to your admin{retry_after_or}",
+    "free_go": "You’ve hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus),{retry_after_or}",
+    "pro": "You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits{retry_after_or}",
+    "enterprise_edu_unknown_none": "You’ve hit your usage limit.{retry}",
+    "workspace_owner_credits_depleted": "Your workspace is out of credits. Add credits to continue.",
+    "workspace_member_credits_depleted": "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+    "workspace_owner_spend_cap": "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
+    "workspace_member_spend_cap": "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
+    "usage_not_included": "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
+    "quota_exceeded": "Quota exceeded. Check your plan and billing details.",
+    "retry_limit": "exceeded retry limit, last status: {status}{, request id: {id}}",
+    "stream_rate_limit": "rate limit exceeded: {detail}",
+    "retry": " Try again at {reset}. | Try again later.",
+    "retry_after_or": " or try again at {reset}. | or try again later.",
+    "reset": "same local day: {h}:{mm} {AM|PM}; otherwise: {Mon} {d}{st|nd|rd|th}, {yyyy} {h}:{mm} {AM|PM}; the process's local time zone, not named"
+  }
+}

@@ -275,17 +275,64 @@ stays covered by rreview's tests on the host.
 cannot run at all.
 
 ### D7. Token accounting from transcripts
-**Choice.** Usage is summed per session from the trial's transcripts:
-- Claude: per-message usage, deduplicated by `message.id`, because the transcript repeats one
-  message's usage on every streamed chunk;
-- Codex: `turn.completed.usage`. `cached_input_tokens` is probably a subset of `input_tokens`; the
-  spike checks it, and uncached input is `input_tokens - cached_input_tokens` if so.
+**Choice.** Usage is the CLI-reported usage, counted per session from the trial's on-disk
+transcripts, not from stdout (spike on Claude Code 2.1.316 and Codex CLI 0.171.0, issue #24). The
+transcript paths and record schemas below are those of the pinned versions; a CLI upgrade re-checks
+them in the smoke stage.
+
+Claude: the session file under `$CLAUDE_CONFIG_DIR/projects/`.
+- Each message's usage is counted once, deduplicated by `message.id`, because the transcript
+  repeats one message's usage on every content block, and split by `message.model`.
+- In the spike's main session (one model, no subagents), the sum matched the CLI-reported
+  `modelUsage` exactly on input, output, cache read and cache creation.
+- The stdout `stream-json` assistant events are not used: they under-report output tokens for
+  messages that end in a tool call.
+- Session persistence stays on (no `--no-session-persistence`), or there is no transcript.
+- Unverified, a smoke check: subagent transcripts and side calls on a different model (collection,
+  deduplication, and whether `modelUsage` covers them).
+
+Codex: the rollout file under `$CODEX_HOME/sessions/`.
+- `cached_input_tokens` is a subset of `input_tokens` (`total_tokens` = input + output), so
+  uncached input is `input_tokens - cached_input_tokens`.
+- Primary: the rollout's `token_usage_record` entries, one per model response, counted once by
+  `response_id` (with `thread_id` and `turn_id`) and summed per model. The model is the turn's
+  `turn_context.model` only when it agrees with the effective model the CLI observed for the
+  response; otherwise the trial's model attribution is flagged incomplete. The records come from
+  the pinned source; the spike read only `token_count`, so their on-disk layout is a smoke check.
+- Fallback when a rollout has no such records: its last `token_count` event's `total_token_usage`.
+  `token_count` is a cumulative snapshot without a response id, and a rate-limit update can repeat
+  it without a request, so it is used only when the thread starts from zero usage (not a fork), its
+  counters are valid, no context-window reset occurred, and every request used the same verified
+  model. A forked thread starts with its parent's usage: its total minus that baseline is its own.
+  After a context-window reset (a snapshot with zeroed counters), cumulative accounting stops; later
+  usage comes from unique response records or the trial's usage is flagged incomplete. How fork
+  lineage (`session_meta.forked_from_id`) gives the baseline is a smoke check.
+- Last fallback when the rollout is missing or unreadable: the last `turn.completed.usage` on
+  stdout (`codex exec --json`), a cumulative thread total without a model split. It counts as
+  complete only when it covers the thread's last launch in the shim log, its counters are valid,
+  its starting usage is known (zero or a recovered fork baseline) and the thread used one verified
+  model; otherwise the trial's usage is flagged incomplete.
+- When none of these recovers a thread's own usage, the trial's usage is flagged incomplete.
+- Provisional: `cache_write_input_tokens` is counted as cache creation. Whether it overlaps
+  `input_tokens` is unknown (the spike saw only zeros); a nonzero case is a smoke check before
+  ordinary input and cache creation are split.
+
+`modelUsage` and Codex's `turn.completed.usage` are cumulative over a resumed session, so neither is
+summed across the processes of one session.
 
 The quality-against-cost plot uses uncached input plus output, per provider, with cache tokens
 shown apart: cache reads are cheap and would otherwise dominate the axis.
 
-The shim log gives the expected set of sessions. A Claude result event's `modelUsage` is the check,
-for runs where it is visible.
+The shim log gives the expected set of sessions. A session with no usable source (no transcript and
+no covering result) flags the trial's usage as incomplete.
+
+The cross-check for a Claude session is its cumulative `modelUsage`: the transcript's last
+`cost-state` record (undocumented), or the result event of the session's last process where it is
+visible. A snapshot is used only when it covers the same work: it comes after the session's last
+assistant message and belongs to the session's latest launch in the shim log (a `cost-state`
+`startTime` or result event from that launch). On a mismatch with such a snapshot, its
+`modelUsage` is used and the trial is flagged. Without a covering snapshot, including when the
+latest launch wrote none, the cross-check is unavailable; it never replaces the message counts.
 
 **Alternative considered:** capture each process's final result event. Engines own stdout, so it is
 not always visible.
@@ -297,8 +344,49 @@ not always visible.
 - one directory per trial with `status.json`, `findings.json`, `usage.json` and `raw/`;
 - `judge/`.
 
-Writes are atomic (temporary file, then rename). Limit detection is per CLI, and the exact messages
-are captured as test fixtures.
+Writes are atomic (temporary file, then rename).
+
+Limit detection is per CLI. It reads the error record that ends a turn in the CLI's session file,
+not stdout (engines own stdout, D7):
+- **Usage limit.**
+  - Claude Code 2.1.316: the transcript's synthetic assistant message has `error: "rate_limit"`,
+    `apiErrorStatus: 429` and `apiError: "usage_limit_reached"`.
+  - Codex CLI 0.171.0: the rollout's `task_complete` has `error.codex_error_info:
+    "usage_limit_exceeded"`. Inferred from the pinned source, not observed in the spike: Codex
+    also maps `usage_not_included` and `insufficient_quota` to this code.
+- **Terminal rate limit.**
+  - Claude: `error: "rate_limit"` with `apiErrorStatus: 429` and no `apiError` ("not your usage
+    limit"). This holds even when the record says `apiErrorIsTransient: true`: the record ends the
+    turn, so the CLI has given up.
+  - Codex: `codex_error_info.response_too_many_failed_attempts.http_status_code: 429`, recorded
+    after retries run out. `codex_error_info: "rate_limit_exceeded"` (a rate limit inside the
+    response stream) is inferred from the pinned source's error enum, not observed in the spike.
+
+Both kinds are a limit under spec `run-ledger` (Limit detection and stop; Waiting for the limit to
+reset). The trial becomes `interrupted` and keeps its tokens as wasted. By default the runner drains
+and exits 75. With `--wait`, only the reporting provider pauses. A throttle that the CLI retries and
+recovers from is not a limit: the turn does not end on such a record.
+
+**Precedence.** The typed classification wins over the message text. Exit status 1 alone selects
+nothing, because both CLIs exit 1 on any failed turn. The text decides only when no typed record
+can be read: Claude's own usage-limit prefixes, and Codex's "You’ve hit your usage limit" and
+"exceeded retry limit, last status: 429" (`messages.code.json` in the fixtures).
+
+**Reset time for `--wait`.**
+- *Claude:* the structured epoch comes first: `quotaLimits.resetsAt`, or
+  `apiErrorParams.rate_limit_info.resetsAt`. It is used when it is an integer in the future and no
+  further away than the limit's window. The rendered text is not parsed.
+- *Codex:* it records only rendered text. "Try again at 3:32 AM." is a time on the CLI process's
+  local date in its time zone: the trial container's `TZ`, UTC unless the image sets one. That date
+  is taken at the record's `timestamp`. "Try again at Nov 22nd, 2026 3:32 AM." gives the full date
+  in the same time zone.
+- *No reset time:* when the time is absent ("try again later"), unparseable or invalid, or the
+  limit is a terminal rate limit without one, the spec's backoff applies: exponential, at most one
+  hour apart.
+
+Messages, typed fields and reset time formats are test fixtures in `tests/fixtures/limits/`. Each
+is marked as captured live, produced by the real CLI against a local 429 stub, or taken from the
+CLI's code.
 
 **Alternative considered:** SQLite. It is not needed at this size, and per-trial files make partial
 copies and inspection trivial.
@@ -395,9 +483,66 @@ does not fit any budget the maintainer is willing to spend.
 hits one. The matrix is split into rounds by importance, each with a token budget per provider. The
 runner starts a trial only if its estimate fits, and stops at a soft threshold of the subscription
 window where the CLI reports its used share. O6 sets the round order, the budget rule and the
-threshold value. Codex reports `rate_limits` in its events; whether
-Claude Code reports anything is a spike item. Checkpoint and resume stay as the safety net, and a
+threshold value. Checkpoint and resume stay as the safety net, and a
 limit stops the run by default; waiting for the reset is opt-in (`--wait`).
+
+Where each CLI reports its used share (spike #23, fixtures in `tests/fixtures/limits/`):
+- **Codex CLI 0.171.0: yes, in the session rollout only.** `codex exec --json` stdout has no
+  `rate_limits`. `event_msg` `token_count` events in `$CODEX_HOME/sessions/.../rollout-*.jsonl`
+  can carry a `rate_limits` snapshot:
+  - `limit_id`;
+  - optional windows `primary` (seen as 300 minutes) and `secondary` (10080 minutes), each with
+    `used_percent` (0 to 100, can exceed 100), `window_minutes` and an optional `resets_at` (epoch
+    seconds).
+
+  A snapshot can have both windows null: the stub runs show one.
+- **Claude Code 2.1.316: yes, on stdout of stream-json only.** `claude -p --output-format
+  stream-json --verbose` emits a `rate_limit_event` after the first API response:
+  `rate_limit_info.unifiedWindows.five_hour` and `seven_day`, each with `utilization` (0 to 1, can
+  exceed 1), `resetsAt` and `status`, plus a top-level `status`, `rateLimitType` and `utilization`
+  for the limiting window. It is not in the session transcript. `/usage` under `-p` reports only the
+  session's cost, and the statusline input (`rate_limits`) exists only in interactive sessions.
+
+**Choice for Codex: read the trial's rollouts.** After a Codex trial ends, and before its container
+is removed, the runner extracts the `rate_limits` observations from the trial's rollouts, with the
+transcripts it keeps for D7. D3 and D5 do not change. The reading:
+- *Per window:* the runner keeps one reading for each window of the `codex` limit: the newest
+  observation where that window is present and `resets_at` has not passed. A later snapshot with
+  the window null does not erase an earlier reading. Other `limit_id`s are recorded but not
+  checked.
+- *Expiry:* a reading expires at its `resets_at`. A window without `resets_at` expires N minutes
+  after it was observed (as for Claude below).
+- *Before the first Codex trial of a run:* there is no reading. The trial starts on the round
+  budget alone, and the run log says the Codex share is unknown.
+- *Expired reading or a window never reported:* the soft threshold is not checked for that window
+  until a new reading arrives, and the run log says so.
+
+**Choice for Claude: runner-owned readings with a throttled probe.** Engines own stdout (D7), so the
+runner reads Claude's share only from stream-json output of its own calls:
+- *Free readings:* first those from calls it makes anyway (the judge, any runner-owned
+  `claude -p`). The validity rule under *Outcomes* applies to them too.
+- *When it probes:* before a Claude trial starts and there is no reading yet, or the newest is
+  older than N minutes (default 10, configurable), the runner makes one minimal probe call
+  (`haiku`, "Reply OK"). Probes are throttled per login by the last attempt, successful or not: no
+  second probe on that login within N minutes.
+- *How the probe runs:* it is runner-owned and runs like a trial under D3 and D5: the managed
+  policy, the benchmark login, the proxy and an empty workspace with no task input. The runner owns
+  its stdout. Its tokens are run overhead, never attributed to a trial.
+- *Outcomes:* a `rate_limit_event` refreshes the reading only when it carries a valid window
+  utilization (a number in `unifiedWindows.five_hour` or `seven_day`). Any of these leaves the soft
+  threshold unenforced for Claude for that check, and the run log says so (the fallback in Risks):
+  - a failed probe;
+  - a probe with no event;
+  - an event without a valid utilization. A typed hard limit in the probe (D8: usage limit or terminal rate limit) goes to the limit
+  handler like a trial's.
+
+The probe was not run as a runner step in the spike; one equivalent manual call produced the event.
+
+**Alternatives considered:**
+- *The `claude` shim tees stdout and logs `rate_limit_event` lines.* It breaks D5's rule that the
+  shim execs the real binary, and it sees the event only for engines that use stream-json.
+- *Not enforcing the soft threshold for Claude.* The share is available at the cost of one small
+  call per check, so this stays only as the fallback.
 
 ## Risks / Trade-offs
 
@@ -430,8 +575,17 @@ limit stops the run by default; waiting for the reset is opt-in (`--wait`).
   and Codex refreshes it in place.
 - **[`codex-review` may not run non-interactively.]** → Codex's built-in review is a TUI command;
   the spike finds a non-interactive way to run it. Without one, `codex-review` leaves the matrix.
-- **[Claude Code may not report the used share of its subscription window.]** → The spike checks.
-  Without it, the soft threshold is not enforced for Claude, and the round budget is the only stop.
+- **[Claude Code reports its used share only on stream-json stdout (spike #23).]** → The runner
+  reads it from its own calls and a throttled probe (D14). When no reading is available, the soft
+  threshold is not enforced for Claude for that check, the run log says so, and the round budget is
+  the only stop.
+- **[Codex's `rate_limits` lives in an undocumented rollout format, and Claude's
+  `unifiedWindows` is marked internal in the CLI's schema.]** → Both may change with a CLI version.
+  The parsers validate against the fixtures for the pinned versions, and an unreadable reading
+  counts as no reading rather than as zero use.
+- **[Limit hits were not provoked live.]** → No real limit was approached. The messages and typed
+  codes come from the pinned CLIs against a local 429 stub and from their code; the real servers'
+  headers and bodies are unverified.
 - **[Shim flags conflict with an engine's own flags.]** → The spike runs each engine's default once
   with the shims and checks the argv log.
 - **[The judge prefers its own model family.]** → The judge is blind to the engine, and a second
@@ -453,8 +607,16 @@ limit stops the run by default; waiting for the reset is opt-in (`--wait`).
   with the real login and reads the tool list from the session transcript.
 - **[ReviewBench tasks are public and likely memorized.]** → The report shows task sets apart; `ours`
   and `hidden` carry the weight of the engine decision.
-- **[Transcript usage counts differ from billed usage.]** → The spike compares them with
-  `modelUsage`. If they differ, prefer `modelUsage` where it is visible.
+- **[Transcript usage counts differ from CLI-reported usage.]** → The spike (#24) found the on-disk
+  Claude transcript equal to `modelUsage` for a main session on one model. Subagents, side calls on
+  another model, a nonzero Codex `cache_write_input_tokens` and nonzero reasoning tokens were not
+  seen; the smoke stage checks them. A mismatch against a covering snapshot uses `modelUsage` and
+  flags the trial; without one the cross-check is unavailable (D7).
+- **[Transcript paths and schemas change between CLI versions.]** → D7's paths and records are those
+  of the pinned versions. A CLI upgrade reruns the smoke check; a session with no usable source flags
+  the trial's usage as incomplete.
+- **[Codex rollouts carry the ChatGPT account id (`session_meta`).]** → Transcripts stay in the run
+  directory and are never published; only aggregate scores leave it.
 
 ## Migration Plan
 

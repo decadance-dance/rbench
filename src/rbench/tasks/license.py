@@ -36,6 +36,13 @@ class LicenseError(ValueError):
     """A license that refuses the import or cannot be read; the message names the repository."""
 
 
+class LicenseLookupError(LicenseError):
+    """The license could not be read at all (gh missing or failing, a malformed reply).
+
+    Unlike a refusal, this says nothing about the license, so an import stops rather than skips.
+    """
+
+
 @dataclass(frozen=True)
 class SourceLicense:
     """The SPDX id of a repository's license and the path of its license file."""
@@ -51,7 +58,9 @@ def read_license(repo: str, head: str) -> SourceLicense:
     identifies one that is not on `ALLOWED_LICENSES`, or cannot be asked.
     """
     if not REPO.fullmatch(repo) or not COMMIT.fullmatch(head):
-        raise LicenseError(f"{repo}: not an owner/name repository and a full commit id: {head!r}")
+        raise LicenseLookupError(
+            f"{repo}: not an owner/name repository and a full commit id: {head!r}"
+        )
     try:
         result = subprocess.run(
             ["gh", "api", f"repos/{repo}/license?ref={head}"],
@@ -61,19 +70,19 @@ def read_license(repo: str, head: str) -> SourceLicense:
             check=False,
         )
     except OSError as err:
-        raise LicenseError(f"{repo}: cannot run gh to read the license: {err}") from err
+        raise LicenseLookupError(f"{repo}: cannot run gh to read the license: {err}") from err
     if result.returncode != 0:
         if "HTTP 404" in result.stderr:
             raise LicenseError(f"{repo}: no license file at {head}")
-        raise LicenseError(f"{repo}: reading the license failed: {result.stderr.strip()}")
+        raise LicenseLookupError(f"{repo}: reading the license failed: {result.stderr.strip()}")
     try:
         reply = json.loads(result.stdout, object_pairs_hook=_unique_keys)
         spdx_id = reply["license"]["spdx_id"]
         path = reply["path"]
     except (KeyError, TypeError, ValueError) as err:
-        raise LicenseError(f"{repo}: malformed license reply from GitHub: {err}") from None
+        raise LicenseLookupError(f"{repo}: malformed license reply from GitHub: {err}") from None
     if not isinstance(spdx_id, str) or not isinstance(path, str) or not _tree_path(path):
-        raise LicenseError(f"{repo}: malformed license reply from GitHub: spdx_id or path")
+        raise LicenseLookupError(f"{repo}: malformed license reply from GitHub: spdx_id or path")
     if spdx_id == "NOASSERTION":
         raise LicenseError(f"{repo}: license in {path} is not recognized")
     if spdx_id not in ALLOWED_LICENSES:

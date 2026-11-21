@@ -8,12 +8,25 @@ Every task set has `<set-dir>/manifest.json`:
                    {"version": 2, "note": "...", "changed": {"<task-id>": "<hash>" | null}}]}
 
 `license` is optional: the SPDX id of the source repository's license, recorded by the import
-(spec review-tasks, Source license). Changelog entries number the versions 1 to `version`; each
-names the tasks it changed with their new hash, or null for a task it removed. A task's hash in
-`tasks` must equal the one in the latest changelog entry naming it, so a new hash cannot be
-recorded without a changelog entry. Against the manifest committed at a base revision
-(`check_version_history`), a changed, added or removed task needs a higher version, and
-changelog entries are append-only.
+(spec review-tasks, Source license).
+
+The `reviewbench` set also records where it was imported from (spec review-tasks, Pinned
+ReviewBench source, Severity mapping from external sets; design D1): an optional top-level
+`source` and an optional per-task `golden`, the ReviewBench file the task's ground truth was
+mapped from, which is never stored itself:
+
+    "source": {"repo": "review-bench/ReviewBench", "commit": "<40 hex>",
+               "subset": "corpus/test/test.json",
+               "severity_map": {"high": "must", ...}, "producer_map": {"human_review": "human", ...}}
+    "tasks": {"<task-id>": {"sha256": ..., "license": ..., "golden": {"path": ..., "sha256": ...}}}
+
+A changed `source` needs a higher version, like a changed task.
+
+Changelog entries number the versions 1 to `version`; each names the tasks it changed with
+their new hash, or null for a task it removed or an import skipped. A task's hash in `tasks` must
+equal the one in the latest changelog entry naming it, so a new hash cannot be recorded without a
+changelog entry. Against the manifest committed at a base revision (`check_version_history`), a
+changed, added or removed task needs a higher version, and changelog entries are append-only.
 
 A task's content hash is the SHA-256 of the canonical JSON of its `task.json` (metadata, PR title
 and description, archive hash) and `ground_truth.json`: formatting and key order do not change it,
@@ -29,6 +42,7 @@ through `load_hidden_task_set`, from the configuration `hidden_config` issued.
 import hashlib
 import json
 import os
+import re
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -40,6 +54,8 @@ from rbench.tasks.loader import (
     GROUND_TRUTH_FILE,
     HIDDEN_DIR_ENV,
     HIDDEN_ID_PREFIX,
+    REPO,
+    SEVERITIES,
     SHA256,
     TASK_FILE,
     TASK_ID,
@@ -54,16 +70,42 @@ CORE_LIST_FILE = "core.json"
 CORE_SETS = ("reviewbench", "ours")
 
 MANIFEST_KEYS = {"set", "version", "tasks", "changelog"}
+MANIFEST_OPTIONAL_KEYS = {"source"}
 MANIFEST_TASK_KEYS = {"sha256"}
-MANIFEST_TASK_OPTIONAL_KEYS = {"license"}
+MANIFEST_TASK_OPTIONAL_KEYS = {"license", "golden"}
+SOURCE_KEYS = {"repo", "commit", "subset", "severity_map", "producer_map"}
+GOLDEN_KEYS = {"path", "sha256"}
+SHA1 = re.compile(r"[0-9a-f]{40}")
+# Only this set is imported from a pinned external source.
+SOURCED_SETS = ("reviewbench",)
 CHANGELOG_KEYS = {"version", "note", "changed"}
 CORE_LIST_KEYS = {"version", "tasks"}
+
+
+@dataclass(frozen=True)
+class GoldenFile:
+    """The external file a task's ground truth was mapped from, at the pinned commit."""
+
+    path: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class SourcePin:
+    """The external commit a set was imported from, and how its severities and producers map."""
+
+    repo: str
+    commit: str
+    subset: str
+    severity_map: dict[str, str]
+    producer_map: dict[str, str]
 
 
 @dataclass(frozen=True)
 class ManifestTask:
     sha256: str
     license: str | None
+    golden: GoldenFile | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +122,7 @@ class Manifest:
     tasks: dict[str, ManifestTask]
     changelog: tuple[ChangelogEntry, ...]
     path: Path
+    source: SourcePin | None = None
 
     def __repr__(self) -> str:
         # A hidden manifest's tasks and changelog are hidden ids, and its path is private.
@@ -342,9 +385,16 @@ def check_version_history(base: Manifest | None, manifest: Manifest) -> None:
             " changelog entries are append-only, so a changed task needs a new set version"
         )
 
-    def sha(entries: dict[str, ManifestTask], task_id: str) -> str | None:
-        return entries[task_id].sha256 if task_id in entries else None
+    def sha(entries: dict[str, ManifestTask], task_id: str) -> tuple | None:
+        # The golden file is provenance of the ground truth: changing it is a change too.
+        entry = entries.get(task_id)
+        return (entry.sha256, entry.golden) if entry else None
 
+    if manifest.source != base.source and manifest.version <= base.version:
+        raise TaskError(
+            f"{label}: 'source' changed since the committed version {base.version}, but"
+            " 'version' is not higher; importing from another source makes a new set version"
+        )
     ids = base.tasks.keys() | manifest.tasks.keys()
     changed = sorted(i for i in ids if sha(base.tasks, i) != sha(manifest.tasks, i))
     if changed and manifest.version <= base.version:
@@ -353,6 +403,14 @@ def check_version_history(base: Manifest | None, manifest: Manifest) -> None:
             f"{label}: tasks changed since the committed version {base.version} ({names}),"
             " but 'version' is not higher; a changed task needs a new set version whose"
             " changelog entry names it"
+        )
+    # Parsing ties a content hash to the changelog, not a golden file: check every change here.
+    appended = {t for entry in manifest.changelog[len(base.changelog) :] for t in entry.changed}
+    if unnamed := [task_id for task_id in changed if task_id not in appended]:
+        names = f"{len(unnamed)} tasks" if hidden else ", ".join(unnamed)
+        raise TaskError(
+            f"{label}: tasks changed since the committed version {base.version} ({names}),"
+            " but no changelog entry after it names them"
         )
 
 
@@ -400,7 +458,7 @@ def _parse_manifest(data: dict, label: str, path: Path, task_set: str) -> Manife
     """Validate a manifest of `task_set`, which the caller trusts; the file's own 'set' is not."""
     if task_set not in TASK_SETS:
         raise TaskError(f"unknown task set {task_set!r}")
-    _check_keys(data, MANIFEST_KEYS, set(), label)
+    _check_keys(data, MANIFEST_KEYS, MANIFEST_OPTIONAL_KEYS, label)
     if data["set"] != task_set:
         raise TaskError(f"{label}: 'set' must be {task_set!r}, the set it is loaded as")
     hidden = task_set == "hidden"
@@ -421,10 +479,15 @@ def _parse_manifest(data: dict, label: str, path: Path, task_set: str) -> Manife
         if not isinstance(entry, dict):
             raise TaskError(f"{where} must be an object")
         _check_keys(entry, MANIFEST_TASK_KEYS, MANIFEST_TASK_OPTIONAL_KEYS, where)
+        if "golden" in entry and task_set not in SOURCED_SETS:
+            raise TaskError(f"{where}: only the {', '.join(SOURCED_SETS)} set records 'golden'")
         license_id = entry.get("license")
         if license_id is not None and not (isinstance(license_id, str) and license_id.strip()):
             raise TaskError(f"{where}: 'license' must be a non-empty string")
-        tasks[task_id] = ManifestTask(_sha256(entry["sha256"], f"{where}: 'sha256'"), license_id)
+        golden = _golden(entry["golden"], f"{where}: 'golden'") if "golden" in entry else None
+        tasks[task_id] = ManifestTask(
+            _sha256(entry["sha256"], f"{where}: 'sha256'"), license_id, golden
+        )
         positions[task_id] = position
 
     raw_log = data["changelog"]
@@ -459,7 +522,69 @@ def _parse_manifest(data: dict, label: str, path: Path, task_set: str) -> Manife
             f"{label}: {who(task_id, positions[task_id])}: {problem}; a changed task needs a new"
             " set version whose changelog entry names it with its new hash"
         )
-    return Manifest(task_set, version, tasks, changelog, path)
+    source = None
+    if "source" in data:
+        if task_set not in SOURCED_SETS:
+            raise TaskError(f"{label}: only the {', '.join(SOURCED_SETS)} set records 'source'")
+        source = _source(data["source"], f"{label}: 'source'")
+    # A pinned source and per-task golden files only make sense together.
+    for task_id, entry in tasks.items():
+        if (entry.golden is None) != (source is None):
+            need = (
+                "'golden', since the manifest has a 'source'"
+                if source
+                else "a top-level 'source' for its 'golden'"
+            )
+            raise TaskError(f"{label}: {who(task_id, positions[task_id])} needs {need}")
+    return Manifest(task_set, version, tasks, changelog, path, source)
+
+
+def _source(raw: object, where: str) -> SourcePin:
+    if not isinstance(raw, dict):
+        raise TaskError(f"{where} must be an object")
+    _check_keys(raw, SOURCE_KEYS, set(), where)
+    repo = raw["repo"]
+    if not (isinstance(repo, str) and REPO.fullmatch(repo)):
+        raise TaskError(f"{where}: 'repo' must be an owner/name repository")
+    commit = raw["commit"]
+    if not (isinstance(commit, str) and SHA1.fullmatch(commit)):
+        raise TaskError(f"{where}: 'commit' must be 40 lowercase hex digits")
+    severities = _string_map(raw["severity_map"], f"{where}: 'severity_map'")
+    if any(value not in SEVERITIES for value in severities.values()):
+        raise TaskError(f"{where}: 'severity_map' values must be one of {', '.join(SEVERITIES)}")
+    return SourcePin(
+        repo=repo,
+        commit=commit,
+        subset=_tree_path(raw["subset"], f"{where}: 'subset'"),
+        severity_map=severities,
+        producer_map=_string_map(raw["producer_map"], f"{where}: 'producer_map'"),
+    )
+
+
+def _golden(raw: object, where: str) -> GoldenFile:
+    if not isinstance(raw, dict):
+        raise TaskError(f"{where} must be an object")
+    _check_keys(raw, GOLDEN_KEYS, set(), where)
+    return GoldenFile(
+        _tree_path(raw["path"], f"{where}: 'path'"), _sha256(raw["sha256"], f"{where}: 'sha256'")
+    )
+
+
+def _string_map(raw: object, where: str) -> dict[str, str]:
+    if not isinstance(raw, dict) or not raw:
+        raise TaskError(f"{where} must be a non-empty object")
+    for key, value in raw.items():
+        if not (isinstance(value, str) and key.strip() and value.strip()):
+            raise TaskError(f"{where}: keys and values must be non-empty strings")
+    return dict(raw)
+
+
+def _tree_path(value: object, where: str) -> str:
+    """A relative path inside a repository tree, with no empty, `.` or `..` parts."""
+    parts = value.split("/") if isinstance(value, str) else [""]
+    if any(part in ("", ".", "..") for part in parts) or any(ord(c) < 32 for c in value):
+        raise TaskError(f"{where} must be a relative path inside the repository")
+    return value
 
 
 def _changelog_entry(raw: object, index: int, label: str, task_set: str) -> ChangelogEntry:
