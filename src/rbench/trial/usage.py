@@ -25,18 +25,23 @@ collection; `usage_record` puts both into the trial's `usage.json`, apart.
 """
 
 import json
+import re
+import tomllib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
 
 from rbench.ledger.trials import USAGE_KINDS, no_repeated_keys
+from rbench.trial.images import agent_shim
 from rbench.trial.sessions import CLAUDE_ROOT, CLAUDE_SUBAGENT, CODEX_ROLLOUT, _children
 
 Counts = dict[str, int]
 # Counts and totals stay exact in any JSON reader (an IEEE double's integer range).
 LIMIT = 2**53
 REROUTE = "model rerouted: "  # Codex 0.171.0 `exec --json`: an error item with this message
+# Its whole message: "model rerouted: <from> -> <to> (<reason>)".
+_REROUTED = re.compile(re.escape(REROUTE) + r"(\S+) -> (\S+)(?: \(.*\))?", re.DOTALL)
 
 
 class UsageError(ValueError):
@@ -131,12 +136,10 @@ def count_usage(
                 incomplete.append(f"{where}: no usage of its own for its session {session}")
         if launch.get("cli") == "codex" and n in stdout:
             events, problem = stdout[n]
+            # The message is the CLI's stdout: only that there was a reroute is recorded.
             reroutes = [
-                f"{where}: {e['item']['message']}"
-                for e in events
-                if e.get("type") == "item.completed"
-                and isinstance(e.get("item"), dict)
-                and str(e["item"].get("message", "")).startswith(REROUTE)
+                f"{where}: its stdout shows a model reroute, so its usage ran on another model"
+                for _ in reroutes_of(events)
             ]
             if problem:
                 incomplete.append(
@@ -400,6 +403,20 @@ def _from_stdout(
     return None
 
 
+def reroutes_of(events: Iterable[dict]) -> list[tuple[str, str] | None]:
+    """The model reroutes a `codex exec --json` stdout shows: an `error` item whose message is a
+    reroute's, as (from, to), or None when the message does not have a reroute's shape."""
+    found = []
+    for e in events:
+        item = e.get("item") if e.get("type") == "item.completed" else None
+        message = item.get("message") if isinstance(item, dict) else None
+        error = isinstance(item, dict) and item.get("type") == "error"
+        if error and isinstance(message, str) and message.startswith(REROUTE):
+            m = _REROUTED.fullmatch(message)
+            found.append((m[1], m[2]) if m else None)
+    return found
+
+
 def _read_stdout(file: Path) -> tuple[list[dict], str | None]:
     """A `codex exec --json` stdout's events, and why it cannot be trusted whole, or None."""
     try:
@@ -424,22 +441,64 @@ def _read_stdout(file: Path) -> tuple[list[dict], str | None]:
 
 
 def _argv_model(argv: Iterable[str]) -> str | None:
-    """The one model a Codex argv sets (`-m`, `--model`, `-c model=...`) before `--`, or None."""
-    argv = list(argv)
-    found = set()
-    for i, a in enumerate(argv):
-        if a == "--":
-            break
-        value = argv[i + 1] if i + 1 < len(argv) else ""
-        if a in ("-m", "--model"):
-            found.add(value)
-        elif a.startswith("--model="):
-            found.add(a.split("=", 1)[1])
-        elif a in ("-c", "--config") and value.split("=", 1)[0].strip() == "model":
-            setting = value.split("=", 1)[1].strip()
-            # limit: a TOML basic or literal string, or a bare word, as Codex's own `-c` takes it
-            try:
-                found.add(json.loads(setting) if setting.startswith('"') else setting.strip("'"))
-            except ValueError:
-                found.add(setting)
+    """The one model a Codex argv sets (`-m`, `--model`, `-c model=...`), or None."""
+    try:
+        found = set(option_values("codex", list(argv), ("-m", "--model"), "model"))
+    except OverrideError:
+        return None
     return found.pop() if len(found) == 1 and _text(next(iter(found))) else None
+
+
+class OverrideError(ValueError):
+    """A `-c` override of the setting read that Codex would refuse or not take as a name."""
+
+
+def option_values(cli: str, argv: list, flags: tuple[str, ...], key: str | None) -> list[str]:
+    """Every value the options of a CLI argv give one of `flags`, or, for Codex, `-c <key>=`.
+    The options are read as the shim reads them (Claude up to `--`, Codex up to `--` or its first
+    positional argument), in the forms the CLIs take: `--flag value`, `--flag=value`, and for
+    Codex an attached short value (`-mgpt`, `-ckey=value`)."""
+    if not all(isinstance(a, str) for a in argv):
+        raise OverrideError("a non-string argument")
+    shim = agent_shim()
+    if cli == "claude":
+        options, takes_value = shim.claude_options(argv), frozenset(flags)
+    else:
+        options, takes_value = shim.codex_options(argv), shim.CODEX_VALUE_OPTIONS
+    values = []
+    i = 0
+    while i < len(options):
+        a = options[i]
+        if a in takes_value:
+            name, value = a, options[i + 1] if i + 1 < len(options) else None
+            i += 2
+        else:
+            i += 1
+            if a.startswith("--"):
+                name, _, value = a.partition("=")
+            elif cli == "codex" and a.startswith("-") and len(a) > 2:
+                name, value = a[:2], a[2:]
+            else:
+                continue
+        if name in flags:
+            if value is None:
+                raise OverrideError(f"{name} without a value")
+            values.append(value)
+        elif key and cli == "codex" and name in ("-c", "--config") and value is not None:
+            setting, eq, raw = value.partition("=")
+            if setting.strip() == key:
+                values.append(_override(raw, bool(eq), key))
+    return values
+
+
+def _override(raw: str, eq: bool, key: str) -> str:
+    """A `-c key=value` value as Codex takes it: TOML, else the raw text."""
+    if not eq:
+        raise OverrideError(f"-c {key} without a value")
+    try:
+        value = tomllib.loads(f"v = {raw.strip()}")["v"]
+    except tomllib.TOMLDecodeError:
+        value = raw.strip()
+    if not (isinstance(value, str) and value):
+        raise OverrideError(f"-c {key} with a value that is not a name")
+    return value

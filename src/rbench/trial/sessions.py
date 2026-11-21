@@ -5,7 +5,12 @@ The collector's log holds, in `seq` order:
   and rewritten), `child` (the CLI's pid and start time, from the shim's own fork) and `exit`;
 - `binding`: a Codex rollout the CLI of a launch held open for appending, with its session_meta;
 - `hook`: a Claude session start, with the pid and start time of the `claude` process it ran under;
+- `effort`: the effort that applied to a Claude turn (`Stop`) or subagent (`SubagentStop`), as the
+  CLI reports it to the hook (#46);
 - `rejected`: a record the collector refused.
+
+Every record carries the collector's wall-clock `time` (#46): with a launch's and its exit's, it
+tells which launch of a resumed session wrote a transcript line.
 
 Binding (spec trial-isolation, Policy enforced below the shims): every root session in the
 transcripts must have exactly one origin launch, the shim launch that started it, and may have any
@@ -21,6 +26,7 @@ contamination audit (#41).
 """
 
 import json
+import math
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -47,10 +53,21 @@ RECORD_FIELDS: dict[str, dict[str, tuple[type, ...]]] = {
         "claude_pid": (int, type(None)),
         "claude_start": (int, type(None)),
     },
+    "effort": {
+        "event": (str,),
+        "session_id": (str,),
+        "agent_id": (str,),
+        "effort": (str,),
+        "claude_pid": (int, type(None)),
+        "claude_start": (int, type(None)),
+    },
     "watch": {},
     "rejected": {},
 }
-OPTIONAL_FIELDS = {"start", "meta", "claude_pid", "claude_start"}
+OPTIONAL_FIELDS = {"start", "meta", "claude_pid", "claude_start", "agent_id", "effort"}
+STOPS = ("Stop", "SubagentStop")
+# Claude Code 2.1.316's effort levels, as the image's hook and collector accept them.
+CLAUDE_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
 def _typed(value: object, types: tuple[type, ...]) -> bool:
@@ -82,6 +99,16 @@ def read_shim_log(path: Path) -> list[dict]:
                 raise SessionError(f"{path}:{n}: {record['kind']} record: invalid {key}")
         if record["kind"] == "launch" and not all(isinstance(a, str) for a in record["argv"]):
             raise SessionError(f"{path}:{n}: launch record: invalid argv")
+        if "time" in record and not (
+            _typed(record["time"], (int, float)) and math.isfinite(record["time"])
+        ):
+            raise SessionError(f"{path}:{n}: {record['kind']} record: invalid time")
+        if record["kind"] == "effort" and not (
+            record["event"] in STOPS
+            and ("agent_id" in record) == (record["event"] == "SubagentStop")
+            and record.get("effort", CLAUDE_LEVELS[0]) in CLAUDE_LEVELS
+        ):
+            raise SessionError(f"{path}:{n}: effort record: not a Stop or SubagentStop level")
         records.append(record)
     launches = {r["launch"] for r in records if r["kind"] == "launch"}
     for r in records:

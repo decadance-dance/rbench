@@ -44,6 +44,7 @@ from rbench.ledger import (
     store_results,
 )
 from rbench.ledger.resume import recover_trials, run_lock
+from rbench.ledger.trials import SESSIONS_FILE, read_sessions, store_sessions
 from rbench.tasks import GROUND_TRUTH_FILE, HIDDEN_DIR_ENV, MANIFEST_FILE
 
 checkout = test_ledger.checkout
@@ -210,6 +211,63 @@ def test_reuse_refuses_invalid_done_results_and_names_public_source_trial(
         create_run(runs, "later", plan, reuse=source)
 
     assert str(second / name) in str(error.value)
+    assert list(runs.iterdir()) == [source]
+
+
+SESSIONS = {
+    "sessions": [
+        {
+            "cli": "claude",
+            "session": "s1",
+            "launch": 1,
+            "launches": [
+                {
+                    "launch": 1,
+                    "requested": {"model": "claude-opus-5-5", "effort": "high"},
+                    "applied": {"models": ["claude-opus-5-5"], "efforts": ["medium"]},
+                }
+            ],
+        }
+    ],
+    "misconfigured": [],
+    "flagged": ["claude session 0 of sessions.json, launch 1, ran effort medium"],
+}
+
+
+def test_reuse_carries_the_applied_models_and_effort_flags(tmp_path: Path) -> None:
+    plan = freeze(tmp_path)
+    runs = tmp_path / "runs"
+    source = create_run(runs, "earlier", plan)
+    first, second = (source / TRIALS_DIR / trial.id for trial in plan.trials[:2])
+    for done in (first, second):
+        store_results(done, [FINDING], USAGE)
+    store_sessions(first, SESSIONS)  # the second was stored before #46: it has none
+
+    target = create_run(runs, "later", plan, reuse=source)
+
+    assert read_sessions(target / TRIALS_DIR / first.name) == SESSIONS
+    assert read_sessions(target / TRIALS_DIR / second.name) is None
+
+
+@pytest.mark.parametrize(
+    "sessions",
+    [
+        {**SESSIONS, "flagged": [3]},
+        {**SESSIONS, "misconfigured": ["launch 1 ran another model"]},  # never done
+        {**SESSIONS, "sessions": [{**SESSIONS["sessions"][0], "launches": [{"launch": 1}]}]},
+    ],
+)
+def test_reuse_refuses_invalid_session_records(tmp_path: Path, sessions: dict) -> None:
+    plan = freeze(tmp_path)
+    runs = tmp_path / "runs"
+    source = create_run(runs, "earlier", plan)
+    done = source / TRIALS_DIR / plan.trials[0].id
+    store_results(done, [FINDING], USAGE)
+    (done / SESSIONS_FILE).write_text(json.dumps(sessions))
+
+    with pytest.raises(LedgerError, match=r"sessions\.json"):
+        create_run(runs, "later", plan, reuse=source)
+
     assert list(runs.iterdir()) == [source]
 
 

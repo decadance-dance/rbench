@@ -22,6 +22,13 @@ A trial directory holds:
                    "count"}], "refused_omitted"},
                    the refused connection attempts listed in run health; final once the
                    trial is contaminated
+    sessions.json  the model and effort each CLI session requested and the ones that applied,
+                   per launch (`rbench.trial.applied`): {"sessions": [{"cli", "session",
+                   "launch", "launches": [{"launch", "requested": {"model", "effort"},
+                   "applied": {"models", "efforts"}}]}], "misconfigured": [<reason>],
+                   "flagged": [<reason>]}, `efforts` null when none was reported; written
+                   after the audit of each attempt and carried, validated, by --reuse. A trial
+                   stored before #46 has none: its applied values are not recorded.
 
 Every file goes through `atomic_write`. `done` is written last and records the SHA-256 of
 `findings.json` and `usage.json`: a runner killed while storing results leaves the trial in its
@@ -48,6 +55,7 @@ FINDINGS_FILE = "findings.json"
 USAGE_FILE = "usage.json"
 WASTED_FILE = "wasted.json"
 AUDIT_FILE = "audit.json"
+SESSIONS_FILE = "sessions.json"
 RAW_DIR = "raw"
 RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 FINDING_KEYS = {"file", "start_line", "end_line", "message"}
@@ -133,6 +141,63 @@ def _check_usage(usage: object, where: str) -> None:
         reasons = incomplete[kind]
         if not (isinstance(reasons, list) and all(_text(r) for r in reasons)):
             raise LedgerError(f"{where}: usage.incomplete.{kind} must be a list of reasons")
+
+
+def _check_sessions(data: object, where: str) -> None:
+    """The shape `sessions.json` has (see the module docstring); anything else is refused whole."""
+
+    def exact(value: object, keys: set[str]) -> bool:
+        return isinstance(value, dict) and value.keys() == keys
+
+    def names(value: object) -> bool:
+        return isinstance(value, list) and all(_text(v) for v in value)
+
+    def optional(value: object) -> bool:
+        return value is None or _text(value)
+
+    def launch(n: object) -> bool:
+        return n is None or (type(n) is int and n > 0)
+
+    ok = exact(data, {"sessions", "misconfigured", "flagged"}) and isinstance(
+        data["sessions"], list
+    )
+    ok = ok and names(data["misconfigured"]) and names(data["flagged"])
+    for s in data["sessions"] if ok else []:
+        ok = ok and exact(s, {"cli", "session", "launch", "launches"})
+        ok = ok and s["cli"] in ("claude", "codex") and _text(s["session"]) and launch(s["launch"])
+        ok = ok and isinstance(s["launches"], list)
+        for e in s["launches"] if ok else []:
+            ok = ok and exact(e, {"launch", "requested", "applied"}) and launch(e["launch"])
+            ok = ok and exact(e["requested"], {"model", "effort"})
+            ok = ok and all(optional(v) for v in e["requested"].values())
+            ok = ok and exact(e["applied"], {"models", "efforts"}) and names(e["applied"]["models"])
+            efforts = e["applied"]["efforts"] if ok else None
+            ok = ok and (efforts is None or (names(efforts) and bool(efforts)))
+    if not ok:
+        raise LedgerError(f"{where}: not a valid {SESSIONS_FILE}")
+
+
+def store_sessions(trial_dir: Path, data: dict) -> None:
+    """Write the trial's `sessions.json`, validated."""
+    _check_sessions(data, str(trial_dir))
+    atomic_write(Path(trial_dir) / SESSIONS_FILE, dump_json(data))
+
+
+def read_sessions(trial_dir: Path) -> dict | None:
+    """The trial's validated `sessions.json`, or None when it has none (stored before #46)."""
+    path = Path(trial_dir) / SESSIONS_FILE
+    try:
+        payload = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise LedgerError(f"{path}: unreadable: {e}") from e
+    try:
+        data = json.loads(payload, object_pairs_hook=no_repeated_keys)
+    except (ValueError, RecursionError) as e:
+        raise LedgerError(f"{path}: not valid JSON: {e}") from e
+    _check_sessions(data, str(path))
+    return data
 
 
 def _check_counts(model: object, counts: object, at: str) -> None:

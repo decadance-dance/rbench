@@ -6,11 +6,15 @@ the digest is the image ID, the content digest of the image's configuration, whi
 layers. Trials run an image by that ID, never by a tag.
 """
 
+import functools
+import importlib.util
 import os
 import re
 import subprocess
+import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
+from types import ModuleType
 
 from rbench.engines.declaration import CLIS
 from rbench.engines.pins import check_ref
@@ -42,6 +46,21 @@ REDACTED = "<redacted>"
 
 class TrialError(RuntimeError):
     """Docker could not build, start, inspect or stop a trial's images or project."""
+
+
+@functools.cache
+def agent_shim() -> ModuleType:
+    """The agent image's shim (`images/agent/lib/shim.py`), for reading argvs as it does."""
+    spec = importlib.util.spec_from_file_location(
+        "rbench_trial_agent_shim", IMAGES_DIR / "agent" / "lib" / "shim.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    dont_write, sys.dont_write_bytecode = sys.dont_write_bytecode, True  # keep the image context
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = dont_write
+    return module
 
 
 def host_env(claude_token: str | None = None) -> dict[str, str]:

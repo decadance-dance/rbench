@@ -12,7 +12,9 @@ The final state:
 - `interrupted` when a CLI reported a rate or usage limit (`rbench.trial.limits`), with that
   attempt's usage added to the trial's wasted tokens, whatever the engine did next;
 - `failed` with reason `timeout` when the engine ran past its limit;
-- `misconfigured` when the shim log shows the launch did not run as built;
+- `misconfigured` when the shim log shows the launch did not run as built, or a session ran
+  another model than it requested (`rbench.trial.applied`, recorded in `sessions.json` with the
+  effort drifts the report flags);
 - `failed` with the adapter's reason for an engine error, invalid output or a PR not eligible;
 - `done` with the findings and the usage otherwise.
 
@@ -35,11 +37,12 @@ from pathlib import Path
 
 from rbench.engines.plain import Launch
 from rbench.ledger.plan import TRIALS_DIR, Image, Plan, PlannedConfiguration, PlannedTrial
-from rbench.ledger.trials import RAW_DIR, add_wasted, set_state, store_results
+from rbench.ledger.trials import RAW_DIR, SESSIONS_FILE, add_wasted, set_state, store_results
 from rbench.run.adapters import Adapter, EngineFailure, EngineTrial, Output
 from rbench.tasks.archive import archive_name
 from rbench.tasks.hidden import HiddenConfig
 from rbench.tasks.loader import Task
+from rbench.trial.applied import applied_sessions, record_applied
 from rbench.trial.audit import audit_trial, record_audit
 from rbench.trial.compose import COMPOSE_LABEL, LOGIN_LABEL, TrialProject, login_key
 from rbench.trial.hermetic import LOG_FILE, TRANSCRIPTS_DIR, collect, prepare, shim_settings
@@ -192,7 +195,7 @@ def _attempt(ctx: RunContext, trial: PlannedTrial) -> str:
     # An attempt starts from nothing: an earlier attempt's output must not reach this one's audit.
     shutil.rmtree(raw, ignore_errors=True)
     raw.mkdir(mode=0o700)
-    for stale in ("audit.json", "repository.json"):
+    for stale in ("audit.json", "repository.json", SESSIONS_FILE):
         (trial_dir / stale).unlink(missing_ok=True)
 
     clis = set(configuration.providers)
@@ -225,9 +228,11 @@ def _attempt(ctx: RunContext, trial: PlannedTrial) -> str:
             run=agent_runner(project, "the trial's agent"),
         )
         record_audit(trial_dir, audit)
+        codex_stdout = _codex_stdout(launch, records, raw)
+        applied = applied_sessions(records, raw / TRANSCRIPTS_DIR, homes.codex_config, codex_stdout)
+        record_applied(trial_dir, applied)
         if audit.contaminated:
             return "contaminated"
-        codex_stdout = _codex_stdout(launch, records, raw)
         if limits := detect_limits(records, raw / TRANSCRIPTS_DIR, codex_stdout.values()):
             ctx.limit.set()
             # Wasted first: a runner killed in between leaves the trial running, which resume
@@ -238,7 +243,7 @@ def _attempt(ctx: RunContext, trial: PlannedTrial) -> str:
         if timed_out:
             set_state(trial_dir, "failed", "timeout")
             return "failed"
-        if problems := adapter.check(engine_trial, launch, records):
+        if problems := adapter.check(engine_trial, launch, records) + applied.mismatched:
             set_state(trial_dir, "misconfigured", "; ".join(problems))
             return "misconfigured"
         output = Output(status, _read(raw / STDOUT_FILE), answer, records, raw / TRANSCRIPTS_DIR)

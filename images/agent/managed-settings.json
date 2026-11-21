@@ -19,6 +19,26 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/rbench/lib/session_hook.py"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/rbench/lib/session_hook.py"
+          }
+        ]
+      }
     ]
   },
   "permissions": {
