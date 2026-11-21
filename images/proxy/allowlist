@@ -1,0 +1,17 @@
+# Hosts a trial may reach through the squid proxy (design.md D3, spec trial-isolation).
+# Squid `dstdomain` list: one exact host per line, no subdomains; everything else is refused.
+# Load it with `acl allowed dstdomain -n "/etc/squid/allowlist"`: without -n, squid matches a
+# numeric destination by reverse DNS, so CONNECT to an IP whose PTR names a listed host would pass.
+# The #21 spike's enforcing config lacked -n; #37 adds it and checks a numeric CONNECT is refused.
+# Fixed by the logged smoke run in issue #21 (Claude Code 2.1.316, Codex CLI 0.171.0).
+# Only provider API and auth hosts belong here; telemetry and update hosts are refused on purpose.
+
+# Claude Code: the Messages API; a CLAUDE_CODE_OAUTH_TOKEN authenticates here, with no refresh call.
+api.anthropic.com
+
+# Codex under a ChatGPT login: the Responses API, model list and account calls (chatgpt.com/backend-api).
+chatgpt.com
+
+# Codex under a ChatGPT login: access-token refresh (auth.openai.com/oauth/token), not seen in the
+# smoke run because the token was fresh; the refresh in issue #20 needs it.
+auth.openai.com
