@@ -71,6 +71,8 @@ SETTINGS = {
     "prompt_version": PROMPT_VERSION,
     "prompt_sha256": hashlib.sha256(f"{PROMPT}\0{_SCHEMA_TEXT}".encode()).hexdigest(),
 }
+# The ledger's bound on a token count (`rbench.ledger.trials`): exact in any JSON reader.
+COUNT_LIMIT = 2**53
 # Claude Code 2.1.316's `modelUsage` fields -> the ledger's usage keys.
 _USAGE = {
     "inputTokens": "input",
@@ -171,7 +173,7 @@ def _usage(model_usage: object, where: str) -> dict[str, dict[str, int]]:
         if not (isinstance(counts, dict) and _USAGE.keys() <= counts.keys()):
             raise NormalizationError(f"{where}: modelUsage entry {i}: missing token counts")
         for key in _USAGE:
-            if type(counts[key]) is not int or counts[key] < 0:
+            if type(counts[key]) is not int or not 0 <= counts[key] < COUNT_LIMIT:
                 raise NormalizationError(f"{where}: modelUsage entry {i}: bad {key}")
         usage[model] = {ours: counts[theirs] for theirs, ours in _USAGE.items()}
     return usage
@@ -236,9 +238,12 @@ def argv() -> list[str]:
     ]
 
 
-def normalize(project: "TrialProject", report: str, trial: str) -> Normalization:
+def normalize(
+    project: "TrialProject", report: str, trial: str, timeout: float | None = None
+) -> Normalization:
     """Copy the findings of `report`, the Markdown output of trial `trial`, in `project`: a fresh
     compose project of the agent image that the caller has started (see the module docstring).
+    With `timeout`, a model call still running after that many seconds is cut off (`TrialError`).
 
     A blank report has no findings and runs no model. Errors name the trial.
     """
@@ -248,7 +253,7 @@ def normalize(project: "TrialProject", report: str, trial: str) -> Normalization
     if not report.strip():
         return Normalization([], [], {})
     prepare(project, shim_settings({}))
-    done = project.exec_agent(argv(), stdin=prompt(report))
+    done = project.exec_agent(argv(), stdin=prompt(report), timeout=timeout)
     if done.returncode != 0:
         # Not its stderr: it may quote the report. The caller keeps the shim log and transcripts.
         raise NormalizationError(f"{where}: claude exited {done.returncode}")

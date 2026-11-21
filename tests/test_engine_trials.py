@@ -183,7 +183,7 @@ def replies(
 
 
 def engine_trial(settings: dict, ctx, engine: str) -> EngineTrial:
-    return EngineTrial(settings, ctx.plan.engines[engine], ctx.engines_dir, 7)
+    return EngineTrial(settings, ctx.plan.engines[engine], ctx.engines_dir, 7, "trial t-1")
 
 
 def code_review_case(settings, ctx):
@@ -284,7 +284,8 @@ def test_a_trial_of_each_registered_engine_ends_done_with_its_findings(
         assert usage["normalization"] == NORMALIZER_COUNTS
         assert usage["incomplete"]["normalization"] == []
         assert json.loads(record.read_text())["normalizer"] == normalization.SETTINGS
-        assert (trial_dir / "raw" / "normalizer" / "shim.jsonl").is_file()
+        for evidence in ("shim.jsonl", "proxy.log", "findings.json"):
+            assert (trial_dir / "raw" / "normalizer" / evidence).is_file()
     else:
         assert ups == [project_name(identity, trial.id)]
         assert usage["normalization"] == {} and not record.exists()
@@ -431,6 +432,102 @@ def test_a_markdown_adapters_failures_name_no_engine_output(run, engine, model):
 
     with pytest.raises(EngineFailure, match=rf"^engine error: {launch.cli} exited 2$"):
         adapter.report(trial, launch, Output(2, REPORT, REPORT, [], Path("none")))
-    with pytest.raises(EngineFailure, match=r"^invalid output: ") as e:
+    # Named by the executor's label for the trial, never by its payload.
+    with pytest.raises(EngineFailure, match=rf"^invalid output: trial t-1: {engine}: ") as e:
         adapter.report(trial, launch, Output(0, f"not json {REPORT}", None, [], Path("none")))
     assert "Off by one" not in e.value.reason
+
+
+def with_normalizer(answers: list[dict], **reply) -> list[dict]:
+    """`answers` with the normalizer's reply changed."""
+    return [a | reply if a["match"] == NORMALIZER else a for a in answers]
+
+
+@pytest.mark.real_executor
+def test_a_canary_the_normalizer_copies_into_a_finding_contaminates_the_trial(run, fake_bin):
+    run_dir, plan, ctx = run
+    trial, settings = first_trial(plan, "code-review")
+    answers, _ = code_review_case(settings, ctx)
+    canary = ctx.tasks[trial.task].canary
+    first = ANSWER["findings"][0] | {"message": f"Off by one, see {canary}"}
+    leaked = ANSWER | {"findings": [first, *ANSWER["findings"][1:]]}
+    stdout = json.dumps(normalizer_result(leaked))
+    fake_bin.scenario("docker", replies=with_normalizer(answers, stdout=stdout))
+
+    assert executor.run_trials(ctx, [trial], log=lambda _: None) == {"contaminated": 1}
+
+    trial_dir = run_dir / TRIALS_DIR / trial.id
+    assert "canary" in read_status(trial_dir).reason
+    assert json.loads((trial_dir / "audit.json").read_text())["contaminated"]
+    assert not (trial_dir / "findings.json").exists()  # excluded from scores
+
+
+@pytest.mark.real_executor
+def test_a_normalizer_past_its_limit_fails_the_trial_without_rerunning_the_engine(
+    run, fake_bin, monkeypatch
+):
+    run_dir, plan, ctx = run
+    trial, settings = first_trial(plan, "code-review")
+    answers, _ = code_review_case(settings, ctx)
+    monkeypatch.setattr(trial_module, "NORMALIZE_TIMEOUT", 0.5)
+    fake_bin.scenario("docker", replies=with_normalizer(answers, delay=10))
+
+    assert executor.run_trials(ctx, [trial], log=lambda _: None) == {"failed": 1}
+
+    trial_dir = run_dir / TRIALS_DIR / trial.id
+    reason = read_status(trial_dir).reason
+    assert reason.startswith("normalization failed: ") and "did not return within 0.5s" in reason
+    assert len(docker_calls(fake_bin, ENGINE)) == 1
+    assert not (trial_dir / "findings.json").exists()
+
+
+@pytest.mark.real_executor
+def test_a_failed_normalizer_stays_failed_when_its_evidence_and_teardown_fail(
+    run, fake_bin, monkeypatch
+):
+    run_dir, plan, ctx = run
+    trial, settings = first_trial(plan, "code-review")
+    answers, _ = code_review_case(settings, ctx)
+    monkeypatch.setattr(trial_module, "NORMALIZE_TIMEOUT", 0.5)
+    step = f"/{trial_module.NORMALIZER_DIR}/compose.json"
+    broken = [{"match": f"{step} {verb}", "exit": 1} for verb in ("cp", "down")]
+    fake_bin.scenario("docker", replies=[*broken, *with_normalizer(answers, delay=10)])
+
+    with pytest.raises(executor.RunStopped, match="failed, then"):
+        executor.run_trials(ctx, [trial], log=lambda _: None)
+
+    status = read_status(run_dir / TRIALS_DIR / trial.id)
+    assert status.state == "failed" and status.reason.startswith("normalization failed: ")
+    assert len(docker_calls(fake_bin, ENGINE)) == 1
+
+
+@pytest.mark.real_executor
+def test_a_report_that_is_not_utf8_fails_only_its_trial(run, fake_bin):
+    run_dir, plan, ctx = run
+    trial, settings = first_trial(plan, "ponytail-review", SONNET)
+    answers, _ = plugin_claude_case(settings, ctx)
+    stdout = test_ponytail_review.claude_result(result="Broken \ud800 here")
+    answers = [a | {"stdout": stdout} if a["match"] == ENGINE else a for a in answers]
+    fake_bin.scenario("docker", replies=answers)
+
+    assert executor.run_trials(ctx, [trial], log=lambda _: None) == {"failed": 1}
+
+    reason = read_status(run_dir / TRIALS_DIR / trial.id).reason
+    assert reason == "invalid output: the report is not valid UTF-8"
+    assert not docker_calls(fake_bin, NORMALIZER)
+
+
+@pytest.mark.real_executor
+def test_a_normalizer_count_past_the_ledgers_bound_fails_without_quoting_its_model(run, fake_bin):
+    run_dir, plan, ctx = run
+    trial, settings = first_trial(plan, "code-review")
+    answers, _ = code_review_case(settings, ctx)
+    key = "zz-side-model-" + "x" * 300
+    huge = dict.fromkeys(next(iter(NORMALIZER_USAGE.values())), 2**53)
+    stdout = json.dumps(normalizer_result(modelUsage=NORMALIZER_USAGE | {key: huge}))
+    fake_bin.scenario("docker", replies=with_normalizer(answers, stdout=stdout))
+
+    assert executor.run_trials(ctx, [trial], log=lambda _: None) == {"failed": 1}
+
+    reason = read_status(run_dir / TRIALS_DIR / trial.id).reason
+    assert "modelUsage entry 1: bad " in reason and "side-model" not in reason

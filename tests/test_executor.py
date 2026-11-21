@@ -663,7 +663,7 @@ def test_an_engine_without_an_adapter_is_refused_before_any_trial(checkout):
 
 
 def engine_trial(settings: dict) -> EngineTrial:
-    return EngineTrial(settings, None, Path("engines"), 7)  # type: ignore[arg-type]
+    return EngineTrial(settings, None, Path("engines"), 7, "trial t-1")  # type: ignore[arg-type]
 
 
 def output(status: int = 0, stdout: str = "", records=(), transcripts=Path("none")) -> Output:
@@ -769,7 +769,7 @@ def test_the_result_is_checked_against_the_schema_the_trial_launched_with(checko
     run_dir = make_run(checkout, [model])
     plan = load_plan(run_dir)
     settings = plan.configurations[0].settings
-    trial = EngineTrial(settings, plan.engines["plain"], checkout / "engines", 7)
+    trial = EngineTrial(settings, plan.engines["plain"], checkout / "engines", 7, "trial t-1")
     launch = ADAPTERS["plain"].launch(trial)
     # The schema file gains a severity after the launch was built from it.
     schema = checkout / "engines" / "plain" / plain.SCHEMA_FILE

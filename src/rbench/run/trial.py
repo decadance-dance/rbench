@@ -8,11 +8,13 @@ the adapter's setup commands and then the engine's launch under a time limit, co
 log, the transcripts and the proxy log, audits the trial while the agent still runs, records its
 final state and removes the project.
 
-A Markdown engine's report then goes through the pinned normalization step (design D9) in a
-second, fresh compose project (`normalizer_name`) of the engine's image, with no repository. Its
-shim log and transcripts land in `raw/normalizer/`, its record in `raw/normalization.json`, and
-its tokens, from the step's `modelUsage`, in `usage.json` under `normalization`. The audit has
-already run: the step sees only the engine's report, through a model with no tools.
+A Markdown engine's report, once it is valid UTF-8, then goes through the pinned normalization
+step (design D9) in a second, fresh compose project (`normalizer_name`) of the engine's image,
+with no repository, under its own time limit. Its shim log, transcripts, proxy log and findings
+land in `raw/normalizer/`, its record in `raw/normalization.json`, and its tokens, from the step's
+`modelUsage`, in `usage.json` under `normalization`. The trial is then audited again, with the
+step's proxy log and sessions, while the engine's agent still runs: the canary scan covers the
+whole trial directory, the step's findings included.
 
 The final state:
 - `misconfigured` when a checkout hook gives a reason, before the engine starts;
@@ -20,7 +22,9 @@ The final state:
 - `failed` with reason `timeout` when the engine ran past its limit;
 - `misconfigured` when the shim log shows the launch did not run as built;
 - `failed` with the adapter's reason for an engine error, invalid output or a PR not eligible,
-  or because the normalization step failed (not retried: that would rerun the engine);
+  or because the normalization step failed or ran past its limit (recorded before its evidence
+  is copied and its project removed, and never retried: that would rerun the engine);
+- `contaminated` when the audit after the normalization step says so;
 - `done` with the findings and the usage otherwise.
 
 An infrastructure error (`TrialError`, an archive that fails its check, a launch that did not
@@ -39,6 +43,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rbench.atomic import atomic_write
 from rbench.engines.normalization import Normalization, NormalizationError, normalize
 from rbench.engines.plain import Launch
 from rbench.ledger.plan import (
@@ -49,22 +54,30 @@ from rbench.ledger.plan import (
     PlannedEngine,
     PlannedTrial,
 )
-from rbench.ledger.trials import RAW_DIR, set_state, store_results
+from rbench.ledger.trials import RAW_DIR, dump_json, set_state, store_results
 from rbench.run.adapters import Adapter, EngineFailure, EngineTrial, Output
 from rbench.tasks.archive import archive_name
 from rbench.tasks.hidden import HiddenConfig
 from rbench.tasks.loader import Task
-from rbench.trial.audit import audit_trial, record_audit
+from rbench.trial.audit import Audit, audit_trial, record_audit
 from rbench.trial.compose import COMPOSE_LABEL, LOGIN_LABEL, TrialProject, login_key
 from rbench.trial.hermetic import LOG_FILE, TRANSCRIPTS_DIR, collect, prepare, shim_settings
 from rbench.trial.images import TrialError, docker
-from rbench.trial.repository import REPO_DIR, agent_runner, prepare_repository
+from rbench.trial.repository import (
+    REPO_DIR,
+    RepositoryState,
+    Runner,
+    agent_runner,
+    prepare_repository,
+)
 from rbench.trial.sessions import SessionError, read_shim_log
 from rbench.trial.usage import Usage, UsageError, count_usage, usage_record
 
 # limit: the spec sets no number; one hour per trial. Make it a matrix setting when an engine
 # needs more.
 TIMEOUT = 3600.0
+# limit: the spec sets no number; the normalizer only copies one report, with no tools.
+NORMALIZE_TIMEOUT = 900.0
 # After the limit, `timeout` sends TERM to the engine's process group, then KILL this much later.
 KILL_AFTER = 30
 # How long past the limit and KILL_AFTER the host waits for `docker compose exec` to return.
@@ -75,6 +88,7 @@ NORMALIZER_DIR = "normalizer"  # the normalization step's compose file, and its 
 STDOUT_FILE = "stdout"
 STDERR_FILE = "stderr"
 ANSWER_FILE = "answer"
+FINDINGS_FILE = "findings.json"  # the normalizer's findings, in raw/normalizer/ for the audit
 PROXY_LOG_FILE = "proxy.log"
 # Writes stdin to "$1", creating its directory, as the agent's user.
 WRITE = 'mkdir -p "$(dirname "$1")" && cat > "$1"'
@@ -214,7 +228,9 @@ def _attempt(ctx: RunContext, trial: PlannedTrial) -> str:
     try:
         project.up()
         repository = prepare_repository(project, task, _archive(ctx, task), trial_dir)
-        engine_trial = EngineTrial(configuration.settings, engine, ctx.engines_dir, task.pr)
+        engine_trial = EngineTrial(
+            configuration.settings, engine, ctx.engines_dir, task.pr, label(ctx.plan, trial)
+        )
         homes = adapter.homes(engine_trial)
         prepare(project, shim_settings(homes.by_flag), homes.codex_config, homes.claude_settings)
         launch = adapter.launch(engine_trial)
@@ -249,15 +265,20 @@ def _attempt(ctx: RunContext, trial: PlannedTrial) -> str:
             normalized = Usage({}, [])
             if engine.output == "markdown":
                 report = adapter.report(engine_trial, launch, output)
-                normalization = _normalize(ctx, trial, engine, report, raw)
+                try:
+                    report.encode("utf-8")
+                except UnicodeEncodeError:  # a lone surrogate a JSON escape gave
+                    raise EngineFailure("invalid output: the report is not valid UTF-8") from None
+                step = _Step(ctx, trial, engine, trial_dir, audit, repository)
+                normalization = step.run(report, agent_runner(project, "the trial's agent"))
+                if isinstance(normalization, str):
+                    return normalization  # its final state is recorded
                 findings, normalized = normalization.findings, Usage(normalization.usage, [])
             else:
                 findings = adapter.result(engine_trial, launch, output)
             usage = count_usage(records, raw / TRANSCRIPTS_DIR, _codex_stdout(launch, records, raw))
             record = usage_record(usage, normalized)
             _check_unicode(findings, record)
-            if engine.output == "markdown":
-                normalization.write_record(raw)
         except EngineFailure as e:
             set_state(trial_dir, "failed", e.reason)
             return "failed"
@@ -298,32 +319,74 @@ def _setup(project: TrialProject, commands: tuple[tuple[str, ...], ...]) -> None
             )
 
 
-def _normalize(
-    ctx: RunContext, trial: PlannedTrial, engine: PlannedEngine, report: str, raw: Path
-) -> Normalization:
-    """Copy the findings of the engine's Markdown `report` in a fresh normalizer project, which
-    is removed after; its shim log and transcripts are kept in `raw/normalizer/`. A normalization
-    error fails the trial."""
-    who = label(ctx.plan, trial).removeprefix("trial ")
-    if not report.strip():
-        return Normalization([], [], {})  # no model runs (design D9)
-    project = TrialProject.create(
-        ctx.run_dir / TRIALS_DIR / trial.id / NORMALIZER_DIR,
-        normalizer_name(ctx.identity, trial.id),
-        engine.image,
-        ctx.proxy_image,
-        claude_token=ctx.claude_token(),
-    )
-    try:
-        project.up()
+@dataclass
+class _Step:
+    """The normalization step of one trial (design D9), after the engine's audit."""
+
+    ctx: RunContext
+    trial: PlannedTrial
+    engine: PlannedEngine
+    trial_dir: Path
+    engine_audit: Audit
+    repository: RepositoryState
+
+    def run(self, report: str, run: Runner) -> Normalization | str:
+        """Copy the findings of the engine's Markdown `report` in a fresh normalizer project,
+        then audit the trial again with the step's evidence (`run`: the engine's agent, for the
+        repository's object count). Returns the normalization, or the final state it recorded:
+        `failed` when the step failed or ran past its limit, `contaminated` by the audit."""
+        if not report.strip():
+            return Normalization([], [], {})  # no model runs (design D9)
+        ctx, trial, engine = self.ctx, self.trial, self.engine
+        out = self.trial_dir / RAW_DIR / NORMALIZER_DIR
+        project = TrialProject.create(
+            self.trial_dir / NORMALIZER_DIR,
+            normalizer_name(ctx.identity, trial.id),
+            engine.image,
+            ctx.proxy_image,
+            claude_token=ctx.claude_token(),
+        )
         try:
-            return normalize(project, report, who)
-        except NormalizationError as e:
-            raise EngineFailure(f"normalization failed: {e}") from None
+            try:
+                project.up()
+                who = label(ctx.plan, trial).removeprefix("trial ")
+                normalization = normalize(project, report, who, timeout=NORMALIZE_TIMEOUT)
+            except (NormalizationError, TrialError) as e:
+                # Final before anything else can fail: a retry would rerun the engine.
+                set_state(self.trial_dir, "failed", f"normalization failed: {e}")
+                try:
+                    self._evidence(project, out)
+                except TrialError:
+                    pass  # the step failed; its evidence is kept as far as it was copied
+                return "failed"
+            self._evidence(project, out)
+            normalization.write_record(self.trial_dir / RAW_DIR)
+            atomic_write(out / FINDINGS_FILE, dump_json(normalization.findings))
+            audit = audit_trial(
+                self.trial_dir,
+                ctx.all_tasks,
+                proxy_log=out / PROXY_LOG_FILE,
+                shim_log=out / LOG_FILE,
+                transcripts=out / TRANSCRIPTS_DIR,
+                repository=self.repository,
+                run=run,
+            )
+            first = self.engine_audit
+            record_audit(
+                self.trial_dir,
+                Audit(
+                    first.reasons + audit.reasons,
+                    first.refused + audit.refused,
+                    first.refused_omitted + audit.refused_omitted,
+                ),
+            )
+            return "contaminated" if audit.contaminated else normalization
         finally:
-            _collect(project, Image(engine.image, engine.clis), raw / NORMALIZER_DIR)
-    finally:
-        _down(project)
+            _down(project)
+
+    def _evidence(self, project: TrialProject, out: Path) -> None:
+        _collect(project, Image(self.engine.image, self.engine.clis), out)
+        project.copy_proxy_log(out / PROXY_LOG_FILE)
 
 
 def _archive(ctx: RunContext, task: Task) -> Path:

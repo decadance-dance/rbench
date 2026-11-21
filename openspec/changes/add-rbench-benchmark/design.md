@@ -792,13 +792,19 @@ not judge them. It runs hermetic, like the judge: the same container setup and s
   `inputTokens`, `outputTokens`, `cacheReadInputTokens` and `cacheCreationInputTokens`) are those
   of Claude Code 2.1.316. The smoke stage checks them against a live call.
 - As implemented in the executor (#127, `rbench.run.trial`): the step runs once the engine's
-  trial is audited and its launch checked, with the report the adapter's `report` gives. Its
-  project is named from the run identity and the trial like the trial's own, so startup removes it
-  as a leftover too. Its shim log and transcripts land in `raw/normalizer/`, outside the audit,
-  which has already run: the step sees only the engine's report, with no tools and no repository.
-  The record goes to `raw/normalization.json`. A normalization error makes the trial `failed`
-  with reason `normalization failed: ...`, naming no report text; it is not retried, since a
-  retry would rerun the engine.
+  trial is audited and its launch checked. Its input is the report the adapter's `report` gives,
+  which must be valid UTF-8 (no lone surrogate from a JSON escape), or the trial is `failed` with
+  invalid output. Its project is named from the run identity and the trial like the trial's own,
+  so startup removes it as a leftover too. The model call has its own time limit. Its shim log,
+  transcripts and proxy log, and the findings it gave, land in `raw/normalizer/`, and the record in
+  `raw/normalization.json`. The trial is then audited again, before it can be `done`: the step's
+  proxy log against the allowlist, its sessions against its shim log, and the canary scan over the
+  whole trial directory, the step's findings included. A contaminated result is excluded from
+  scores like any other. A normalization error, a step past its limit or a Docker failure in the
+  step makes the trial `failed` with reason `normalization failed: ...`, naming no report text.
+  That state is recorded before the step's evidence is copied and its project removed, so a later
+  failure there keeps it, and it is never retried: a retry would rerun the engine. A token count of
+  the step at or above 2**53 is a normalization error, naming the `modelUsage` entry by position.
 
 **Alternative considered:** ask each engine for JSON. That changes the engines being measured.
 

@@ -60,12 +60,14 @@ class NotEligible(EngineFailure):
 
 @dataclass(frozen=True)
 class EngineTrial:
-    """One trial as an adapter sees it: the frozen configuration, its engine, and the PR."""
+    """One trial as an adapter sees it: the frozen configuration, its engine, the PR, and how
+    errors name the trial (`rbench.run.trial.label`: its position in a run with hidden tasks)."""
 
     settings: Mapping
     engine: PlannedEngine
     engines_dir: Path
     pr: int
+    label: str
 
 
 @dataclass(frozen=True)
@@ -202,7 +204,7 @@ class CodeReview(Adapter):
     def report(self, trial: EngineTrial, launch: Launch, output: Output) -> str:
         _exited(launch, output)
         try:
-            return code_review.report(output.stdout, code_review.NAME)
+            return code_review.report(output.stdout, f"{trial.label}: {code_review.NAME}")
         except code_review.CodeReviewOutputError as e:
             raise EngineFailure(f"invalid output: {e}") from None
 
@@ -233,7 +235,9 @@ class ReviewCouncil(Adapter):
         try:
             return review_council.report(output.stdout)
         except review_council.ReviewCouncilOutputError as e:
-            raise EngineFailure(f"invalid output: {e}") from None
+            raise EngineFailure(
+                f"invalid output: {trial.label}: {review_council.NAME}: {e}"
+            ) from None
 
 
 class PluginReview(Adapter):
@@ -254,7 +258,11 @@ class PluginReview(Adapter):
         _exited(launch, output)
         try:
             return ponytail_review.report(
-                launch, output.status, output.stdout, output.answer, ponytail_review.NAME
+                launch,
+                output.status,
+                output.stdout,
+                output.answer,
+                f"{trial.label}: {ponytail_review.NAME}",
             )
         except ponytail_review.PluginReviewOutputError as e:
             raise EngineFailure(f"invalid output: {e}") from None
