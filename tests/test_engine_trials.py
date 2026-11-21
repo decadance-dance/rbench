@@ -192,13 +192,13 @@ def code_review_case(settings, ctx):
     return replies(claude_session(list(launch.argv[1:])), stdout), NORMALIZED
 
 
-def ponytail_claude_case(settings, ctx):
+def plugin_claude_case(settings, ctx):
     launch = ADAPTERS["ponytail-review"].launch(engine_trial(settings, ctx, "ponytail-review"))
     stdout = test_ponytail_review.claude_result(result=REPORT)
     return replies(claude_session(list(launch.argv[1:])), stdout), NORMALIZED
 
 
-def ponytail_codex_case(settings, ctx):
+def plugin_codex_case(settings, ctx):
     launch = ADAPTERS["ponytail-review"].launch(engine_trial(settings, ctx, "ponytail-review"))
     stdout = test_ponytail_review.codex_stdout(
         *test_ponytail_review.STARTED,
@@ -248,8 +248,8 @@ def codex_review_case(settings, ctx):
 
 CASES = {
     ("code-review", None): code_review_case,
-    ("ponytail-review", SONNET): ponytail_claude_case,
-    ("ponytail-review", "gpt-6.2-sol"): ponytail_codex_case,
+    ("ponytail-review", SONNET): plugin_claude_case,
+    ("ponytail-review", "gpt-6.2-sol"): plugin_codex_case,
     ("review-council", None): review_council_case,
     ("rreview", None): rreview_case,
     ("codex-review", None): codex_review_case,
@@ -293,10 +293,10 @@ def test_a_trial_of_each_registered_engine_ends_done_with_its_findings(
 
 
 @pytest.mark.real_executor
-def test_ponytail_review_on_codex_installs_its_plugin_before_the_launch(run, fake_bin):
+def test_the_plugin_review_on_codex_installs_its_plugin_before_the_launch(run, fake_bin):
     _, plan, ctx = run
     trial, settings = first_trial(plan, "ponytail-review", "gpt-6.2-sol")
-    answers, _ = ponytail_codex_case(settings, ctx)
+    answers, _ = plugin_codex_case(settings, ctx)
     fake_bin.scenario("docker", replies=answers)
 
     executor.run_trials(ctx, [trial], log=lambda _: None)
@@ -311,7 +311,7 @@ def test_ponytail_review_on_codex_installs_its_plugin_before_the_launch(run, fak
 def test_a_failing_setup_command_is_an_infrastructure_error(run, fake_bin):
     _, plan, ctx = run
     trial, settings = first_trial(plan, "ponytail-review", "gpt-6.2-sol")
-    answers, _ = ponytail_codex_case(settings, ctx)
+    answers, _ = plugin_codex_case(settings, ctx)
     failing = {"match": "codex plugin add", "exit": 1, "stderr": "engine text\n"}
     fake_bin.scenario("docker", replies=[failing, *answers])
 

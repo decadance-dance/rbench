@@ -236,7 +236,7 @@ class ReviewCouncil(Adapter):
             raise EngineFailure(f"invalid output: {e}") from None
 
 
-class PonytailReview(Adapter):
+class PluginReview(Adapter):
     """`ponytail-review` (design D13): the plugin's review on the CLI of the reviewer's model,
     model and effort by flag; on Codex the plugin is installed into the trial's home first."""
 
@@ -266,5 +266,5 @@ ADAPTERS: dict[str, Adapter] = {
     codex_review.NAME: CodexReview(),
     code_review.NAME: CodeReview(),
     review_council.NAME: ReviewCouncil(),
-    ponytail_review.NAME: PonytailReview(),
+    ponytail_review.NAME: PluginReview(),
 }
