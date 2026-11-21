@@ -15,6 +15,9 @@ Environment:
                           stderr  text to print to stderr (a rate-limit message goes here or in
                                   stdout, as the real CLI prints it)
                           exit    exit code, default 0
+                          write_after  object mapping an option to text the call writes to the
+                                  file named by the argument after that option, when it has it
+                                  (Codex's --output-last-message)
                           crash   true: print what is given, then die by SIGKILL
                           binary  true: write stdout and stderr as bytes, each character
                                   one byte (Latin-1), so "\u00ff" gives the byte 0xff
@@ -49,6 +52,10 @@ time.sleep(scenario.get("delay", 0))
 by_arg = scenario.get("stdout_for", {})
 out = next((by_arg[a] for a in sys.argv[1:] if a in by_arg), scenario.get("stdout", ""))
 err = scenario.get("stderr", "")
+for option, text in scenario.get("write_after", {}).items():
+    if option in sys.argv[1:-1]:
+        with open(sys.argv[sys.argv.index(option) + 1], "w", encoding="utf-8") as f:
+            f.write(text)
 if scenario.get("binary"):
     sys.stdout.buffer.write(out.encode("latin-1"))
     sys.stderr.buffer.write(err.encode("latin-1"))

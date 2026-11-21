@@ -14,11 +14,11 @@ The shims (design D5) add the model, the effort and the policy flags. The review
 the pinned normalization step (design D9) copies its findings.
 
 On Codex the plugin's lifecycle hooks are skipped as untrusted, as in #25: the trial home does not
-pre-trust them, so that variant runs the review skill without them (design Risks).
+pre-trust them, so that variant runs the review skill without them (design Risks; #125).
 """
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING
 
 from rbench.engines.declaration import DeclarationError, Engine, Setting
@@ -59,6 +59,12 @@ CODEX_SETUP = (
     ("codex", "plugin", "marketplace", "add", MARKETPLACE_ROOT),
     ("codex", "plugin", "add", f"{PLUGIN}@{MARKETPLACE}"),
 )
+
+
+# The token counts that show a session's model calls: Claude Code 2.1.316's `modelUsage` entry, and
+# the `usage` that Codex 0.171.0 requires in `turn.completed`.
+CLAUDE_TOKENS = ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens")
+CODEX_TOKENS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")
 
 
 class PluginReviewOutputError(ValueError):
@@ -144,47 +150,86 @@ def _claude_report(stdout: str, where: str) -> str:
             f"{where}: the session did not succeed; it ended with {ended}"
         )
     # An API error that ends the session still reports `success`, with no model usage (#48).
-    if not (isinstance(result.get("modelUsage"), dict) and result["modelUsage"]):
+    usage = result.get("modelUsage")
+    if not (isinstance(usage, dict) and usage):
         raise PluginReviewOutputError(f"{where}: the session made no model call")
+    for model, counts in usage.items():
+        if not (isinstance(counts, dict) and _counts(counts, CLAUDE_TOKENS)):
+            raise PluginReviewOutputError(f"{where}: modelUsage of {model!r} has no token counts")
     text = result.get("result")
     if not isinstance(text, str):
         raise PluginReviewOutputError(f"{where}: the result has no text")
     return text
 
 
+def _counts(counts: dict, keys: Iterable[str]) -> bool:
+    return all(type(counts.get(k)) is int and counts[k] >= 0 for k in keys)
+
+
 def _codex_report(stdout: str, answer: str | None, where: str) -> str:
     """The `--output-last-message` file, once `--json`'s events on stdout show a completed turn
-    and no failed one."""
-    events = []
-    for i, line in enumerate(stdout.splitlines()):
-        if line.strip():
-            event = _json(line, where, f"stdout line {i + 1}")
-            if not isinstance(event, dict):
-                raise PluginReviewOutputError(f"{where}: stdout line {i + 1} is not an event")
-            events.append(event.get("type"))
-    if failed := [e for e in events if e in ("turn.failed", "error")]:
-        raise PluginReviewOutputError(f"{where}: the session reported {failed[0]}")
-    if "turn.completed" not in events:
+    with its usage and no failed one, and the file holds the session's last message. A top-level
+    `error` event alone fails nothing: Codex also emits it for an error it retries, and only its
+    exit status tells the two apart (`report`)."""
+    completed = message = False
+    # JSONL records end at LF only: a JSON string may hold U+2028, which splitlines() splits on.
+    for i, line in enumerate(stdout.split("\n")):
+        if not line.strip():
+            continue
+        event = _json(line, where, f"stdout line {i + 1}")
+        if not isinstance(event, dict):
+            raise PluginReviewOutputError(f"{where}: stdout line {i + 1} is not an event")
+        kind, item = event.get("type"), event.get("item")
+        if kind == "turn.failed":
+            raise PluginReviewOutputError(f"{where}: the session reported turn.failed")
+        if kind == "turn.completed":
+            usage = event.get("usage")
+            if not (isinstance(usage, dict) and _counts(usage, CODEX_TOKENS)):
+                raise PluginReviewOutputError(
+                    f"{where}: stdout line {i + 1}: turn.completed has no token usage"
+                )
+            completed = True
+        if (
+            kind == "item.completed"
+            and isinstance(item, dict)
+            and item.get("type") == "agent_message"
+        ):
+            if not isinstance(item.get("text"), str):
+                raise PluginReviewOutputError(f"{where}: stdout line {i + 1}: message has no text")
+            message = True
+    if not completed:
         raise PluginReviewOutputError(f"{where}: the session completed no turn")
     if answer is None:
         raise PluginReviewOutputError(f"{where}: the session wrote no {OUTPUT_PATH}")
+    # With no last message the CLI writes an empty file: that is no review, not a blank one (D9).
+    if not (answer.strip() or message):
+        raise PluginReviewOutputError(f"{where}: the session gave no final message")
     return answer
 
 
-def report(launch: Launch, stdout: str, answer: str | None, where: str) -> str:
-    """The Markdown review of a session of `launch`: Claude's `--output-format json` result on
-    stdout, or the file Codex wrote with `--output-last-message` (`answer`, None when missing).
-    Errors name `where` (the trial) and never quote the output: it is engine output, and may quote
-    a hidden task."""
+def report(launch: Launch, returncode: int, stdout: str, answer: str | None, where: str) -> str:
+    """The Markdown review of a session of `launch` that exited with `returncode`: Claude's
+    `--output-format json` result on stdout, or the file Codex wrote with `--output-last-message`
+    (`answer`, None when missing). Errors name `where` (the trial) and never quote the output: it
+    is engine output, and may quote a hidden task."""
+    if returncode != 0:
+        raise PluginReviewOutputError(f"{where}: the session exited with status {returncode}")
     if launch.cli == "claude":
         return _claude_report(stdout, where)
     return _codex_report(stdout, answer, where)
 
 
 def findings(
-    normalizer: "TrialProject", launch: Launch, stdout: str, answer: str | None, trial: str
+    normalizer: "TrialProject",
+    launch: Launch,
+    returncode: int,
+    stdout: str,
+    answer: str | None,
+    trial: str,
 ) -> Normalization:
-    """The findings of trial `trial` from its session's output (see `report`), copied by the
-    normalization step in `normalizer`, a fresh project the caller has started
+    """The findings of trial `trial` from its session's exit status and output (see `report`),
+    copied by the normalization step in `normalizer`, a fresh project the caller has started
     (`rbench.engines.normalization`)."""
-    return normalize(normalizer, report(launch, stdout, answer, f"trial {trial}: {NAME}"), trial)
+    return normalize(
+        normalizer, report(launch, returncode, stdout, answer, f"trial {trial}: {NAME}"), trial
+    )

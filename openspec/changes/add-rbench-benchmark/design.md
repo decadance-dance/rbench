@@ -918,8 +918,14 @@ measure a different task from the engines, which all read the repository.
     ponytail@rbench`, which install the plugin from the image's local marketplace into the trial's
     `CODEX_HOME` with no network (D5, Plugins at the pin), then `codex exec --sandbox
     danger-full-access --json --output-last-message <file> -` with `$ponytail:ponytail-review PR
-    #<n>`. The review is that file, once the `--json` events show a completed turn and no failed
-    one.
+    #<n>`. The review is that file, once the CLI exits with status 0 and its `--json` events show a
+    completed turn with its token usage and no failed one. A top-level `error` event alone fails
+    nothing: Codex 0.171.0 emits it also for an error it retries, and only the exit status tells the
+    two apart. The events are split on LF only, since a JSON string may hold U+2028. An empty file
+    with no completed agent message is the CLI's placeholder for no last message, and fails the
+    trial; a blank last message is a blank review.
+  - On Claude Code the session also exits with status 0, and each `modelUsage` entry of the
+    `success` result has its token counts.
   - Both reviews are Markdown and go through D9's normalizer. The trial home does not pre-trust
     the plugin's Codex lifecycle hooks, so Codex skips them as untrusted and its variant runs the
     review skill without them, while Claude Code runs them (see Risks).
@@ -1238,8 +1244,8 @@ when no task changed.
   run on Claude Code. Headless `exec` has hook-trust handling of its own, so this run leaves open
   what happens once the pinned plugin's hooks are trusted. The adapter (#77) does not pre-trust
   them: `ponytail-review` on Codex runs its review skill without the hooks that run on Claude Code,
-  a known difference between its two variants. Deciding and verifying hook trust is left to the
-  smoke stage (#60).
+  a known difference between its two variants. Deciding and implementing hook trust is #125;
+  verifying it in the smoke stage is #60.
 - **[The judge prefers its own model family.]** → The judge is blind to the engine, and a second
   judge from the other family labels a sample (O1).
 - **[Ground truth for our PRs is incomplete or produced by an engine under test.]** → Augmented

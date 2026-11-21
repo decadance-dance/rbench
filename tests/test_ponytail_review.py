@@ -5,6 +5,7 @@ fake docker for the normalization step."""
 import json
 import subprocess
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,12 +17,12 @@ from rbench.engines.declaration import DeclarationError, Setting, load_engine, p
 from rbench.engines.pins import FloatingRefError
 from rbench.engines.ponytail_review import (
     CLAUDE_ARGV,
+    CLAUDE_TOKENS,
     CODEX_ARGV,
     CODEX_SETUP,
     OUTPUT_PATH,
     PLUGIN_DIR,
     RELEASES,
-    SOURCE,
     PluginReviewOutputError,
     bind,
     findings,
@@ -63,12 +64,29 @@ def claude_result(**fields: object) -> str:
     return json.dumps(base | fields)
 
 
-def codex_events(*types: str) -> str:
-    """The `codex exec --json` events of a session, one per line."""
-    return "".join(json.dumps({"type": t}) + "\n" for t in types)
+def codex_stdout(*events: dict | str) -> str:
+    """The `codex exec --json` events of a session, one per line as Codex writes them (UTF-8, not
+    ASCII-escaped); a bare string is an event of that type with no fields."""
+    return "".join(
+        json.dumps({"type": e} if isinstance(e, str) else e, ensure_ascii=False) + "\n"
+        for e in events
+    )
 
 
-CODEX_OK = codex_events("thread.started", "turn.started", "item.completed", "turn.completed")
+def message(text: str) -> dict:
+    """The completed agent message that Codex writes to --output-last-message."""
+    return {
+        "type": "item.completed",
+        "item": {"id": "item_1", "type": "agent_message", "text": text},
+    }
+
+
+USAGE = {"input_tokens": 9000, "cached_input_tokens": 4000, "output_tokens": 1500,
+         "reasoning_output_tokens": 700}  # fmt: skip
+COMPLETED = {"type": "turn.completed", "usage": USAGE}
+STARTED = ({"type": "thread.started", "thread_id": "00000000-0000-4000-8000-000000000003"},
+           {"type": "turn.started"})  # fmt: skip
+CODEX_OK = codex_stdout(*STARTED, message(REPORT), COMPLETED)
 
 
 def settings_of(model: str, effort: str = "high") -> dict:
@@ -92,9 +110,9 @@ def test_declaration_pins_a_known_release_with_its_source_and_commit():
     assert (engine.pin_kind, engine.version, engine.output) == ("version", "5.3.3", "markdown")
     assert engine.clis == {"claude": "2.1.316", "codex": "0.171.0"}
     assert engine.default_configuration() == {"reviewer": Setting("claude-sonnet-5-5", "high")}
-    tag, commit = RELEASES["5.3.3"]
-    assert (tag, len(commit)) == ("refs/tags/v5.3.3", 40)
-    assert plugin(engine) == (SOURCE, commit, "5.3.3")
+    commit = "7801d061243d7b753bad0e0b3c057cd250b11755"
+    assert RELEASES == {"5.3.3": ("refs/tags/v5.3.3", commit)}
+    assert plugin(engine) == ("https://github.com/DietrichGebert/ponytail", commit, "5.3.3")
     # The plugin's release and the normalizer's pin are in the settings, so either gives new ids.
     settings = settings_of("claude-opus-5-5")
     assert settings["version"] == "5.3.3" and "normalization" in settings
@@ -123,6 +141,13 @@ def test_declaration_shape_is_checked(edit, message):
     data = edit(tomllib.loads(DECLARATION.read_text()))
     with pytest.raises(DeclarationError, match=message):
         bind(parse_engine(data, "ponytail-review.toml"), "ponytail-review.toml")
+
+
+def test_loading_a_declaration_of_an_unknown_release_is_refused(tmp_path: Path):
+    path = tmp_path / "ponytail-review.toml"
+    path.write_text(DECLARATION.read_text().replace('ref = "5.3.3"', 'ref = "5.3.4"'))
+    with pytest.raises(DeclarationError, match=f"{path}: .*a release the adapter knows: 5.3.3"):
+        load_engine(path)
 
 
 def test_the_d13_matrix_runs_claude_models_on_claude_code_and_gpt_models_on_codex():
@@ -226,7 +251,7 @@ def test_claude_default_runs_with_the_fake_claude_and_gives_normalized_findings(
     settings = load_engine(DECLARATION).default_configuration()["reviewer"]
     launch_ = launch(settings_of(settings.model, settings.effort), 7)
 
-    got = findings(project(tmp_path), launch_, run(launch_, tmp_path), None, "t-1")
+    got = findings(project(tmp_path), launch_, 0, run(launch_, tmp_path), None, "t-1")
 
     session, *steps = fake_bin.calls()
     assert session["tool"] == "claude" and session["argv"] == list(CLAUDE_ARGV[1:])
@@ -240,33 +265,62 @@ def test_claude_default_runs_with_the_fake_claude_and_gives_normalized_findings(
 def test_codex_variant_runs_with_the_fake_codex_and_gives_normalized_findings(
     fake_bin, tmp_path: Path
 ):
-    fake_bin.scenario("codex", stdout=CODEX_OK)
+    written = "## Review by the fake codex\n\n" + REPORT  # only in the file, not on stdout
+    stdout = codex_stdout(*STARTED, message(written), COMPLETED)
+    fake_bin.scenario("codex", stdout=stdout, write_after={"--output-last-message": written})
     claude_answers(fake_bin, json.dumps(result()))
     settings = settings_of("gpt-6.2-astra")
     launch_ = launch(settings, 7)
+    # The container path, moved into tmp_path: the fake writes there what Codex writes there.
+    output = tmp_path / "review.md"
+    local = replace(
+        launch_, argv=tuple(str(output) if a == OUTPUT_PATH else a for a in launch_.argv)
+    )
 
     for argv in setup(settings):
         subprocess.run(argv, check=True, cwd=tmp_path, stdin=subprocess.DEVNULL)
-    stdout = run(launch_, tmp_path)
-    got = findings(project(tmp_path), launch_, stdout, REPORT, "t-1")
+    stdout = run(local, tmp_path)
+    got = findings(project(tmp_path), launch_, 0, stdout, output.read_text(), "t-1")
 
     install, add, session, *steps = fake_bin.calls()
     assert [install["argv"], add["argv"]] == [list(a[1:]) for a in CODEX_SETUP]
-    assert session["tool"] == "codex" and session["argv"] == list(CODEX_ARGV[1:])
+    assert session["tool"] == "codex" and session["argv"] == list(local.argv[1:])
     assert session["stdin"] == "$ponytail:ponytail-review PR #7\n"
     (normalizer,) = [c for c in steps if " claude -p " in " ".join(c["argv"])]
-    assert REPORT in normalizer["stdin"]
+    assert written in normalizer["stdin"]
     assert got.findings == EXPECTED
 
 
 def test_a_blank_review_has_no_findings_and_runs_no_normalizer(fake_bin, tmp_path: Path):
     claude = launch(settings_of("claude-opus-5-5"), 7)
     codex = launch(settings_of("gpt-6.2-sol"), 7)
+    blank = codex_stdout(*STARTED, message(""), COMPLETED)  # the agent's last message is blank
     for got in (
-        findings(project(tmp_path), claude, claude_result(result="\n"), None, "t-1"),
-        findings(project(tmp_path / "2"), codex, CODEX_OK, "", "t-1"),
+        findings(project(tmp_path), claude, 0, claude_result(result="\n"), None, "t-1"),
+        findings(project(tmp_path / "2"), codex, 0, blank, "", "t-1"),
     ):
         assert (got.findings, got.unlocated) == ([], [])
+    assert fake_bin.calls() == []
+
+
+@pytest.mark.parametrize(
+    ("cli_model", "stdout", "answer", "message"),
+    [
+        # A success envelope whose usage entry is not counts, with an empty result.
+        ("claude-sonnet-5-5", claude_result(modelUsage={"claude-sonnet-5-5": None}, result=""),
+         None, "modelUsage of 'claude-sonnet-5-5' has no token counts"),
+        # A completion without its required usage, and the empty file.
+        ("gpt-6.2-sol", codex_stdout("turn.completed"), "", "turn.completed has no token usage"),
+        # A valid completion with no agent message: the CLI's empty placeholder file.
+        ("gpt-6.2-sol", codex_stdout(*STARTED, COMPLETED), "", "gave no final message"),
+    ],
+)  # fmt: skip
+def test_a_session_without_evidence_of_a_review_is_not_scored_as_zero_findings(
+    fake_bin, tmp_path: Path, cli_model, stdout, answer, message
+):
+    launch_ = launch(settings_of(cli_model), 7)
+    with pytest.raises(PluginReviewOutputError, match=message):
+        findings(project(tmp_path), launch_, 0, stdout, answer, "t-1")
     assert fake_bin.calls() == []
 
 
@@ -279,13 +333,15 @@ def test_a_blank_review_has_no_findings_and_runs_no_normalizer(fake_bin, tmp_pat
         (claude_result(is_error=True, subtype="error_during_execution"), "error_during_execution"),
         (claude_result(subtype=SECRET), "an unknown subtype"),
         (claude_result(modelUsage={}), "made no model call"),
+        (claude_result(modelUsage={"claude-opus-5-5": {"inputTokens": 1}}), "no token counts"),
+        (claude_result(modelUsage={"x": dict.fromkeys(CLAUDE_TOKENS, -1)}), "no token counts"),
         (claude_result(result=None), "has no text"),
     ],
 )
 def test_claude_output_without_a_review_fails_the_trial_without_quoting_it(stdout, message):
     claude = launch(settings_of("claude-opus-5-5"), 7)
     with pytest.raises(PluginReviewOutputError, match=message) as e:
-        report(claude, stdout, None, WHERE)
+        report(claude, 0, stdout, None, WHERE)
     assert str(e.value).startswith(WHERE) and SECRET not in str(e.value)
 
 
@@ -294,22 +350,51 @@ def test_claude_output_without_a_review_fails_the_trial_without_quoting_it(stdou
     [
         (SECRET + "\n", REPORT, "stdout line 1 is not JSON"),
         (CODEX_OK + "[1]\n", REPORT, "stdout line 5 is not an event"),
-        (codex_events("turn.started", "turn.failed"), REPORT, "reported turn.failed"),
-        (CODEX_OK + codex_events("error"), REPORT, "reported error"),
-        (codex_events("thread.started", "turn.started"), REPORT, "completed no turn"),
+        (codex_stdout("turn.started", "turn.failed"), REPORT, "reported turn.failed"),
+        (codex_stdout(*STARTED, message(REPORT), "turn.failed", COMPLETED), REPORT, "turn.failed"),
+        (codex_stdout(*STARTED, message(REPORT)), REPORT, "completed no turn"),
         ("", REPORT, "completed no turn"),
         (CODEX_OK, None, f"wrote no {OUTPUT_PATH}"),
+        (codex_stdout(*STARTED, COMPLETED | {"usage": USAGE | {"output_tokens": "1"}}), REPORT,
+         "line 3: turn.completed has no token usage"),
+        (codex_stdout({"type": "item.completed", "item": {"type": "agent_message"}}, COMPLETED),
+         REPORT, "line 1: message has no text"),
     ],
-)
+)  # fmt: skip
 def test_codex_output_without_a_review_fails_the_trial_without_quoting_it(stdout, answer, message):
     codex = launch(settings_of("gpt-6.2-astra"), 7)
     with pytest.raises(PluginReviewOutputError, match=message) as e:
-        report(codex, stdout, answer, WHERE)
+        report(codex, 0, stdout, answer, WHERE)
     assert str(e.value).startswith(WHERE) and SECRET not in str(e.value)
 
 
 def test_the_review_is_each_clis_markdown():
     claude = launch(settings_of("claude-opus-5-5"), 7)
     codex = launch(settings_of("gpt-6.2-astra"), 7)
-    assert report(claude, claude_result(), None, WHERE) == REPORT
-    assert report(codex, CODEX_OK, REPORT, WHERE) == REPORT
+    assert report(claude, 0, claude_result(), None, WHERE) == REPORT
+    assert report(codex, 0, CODEX_OK, REPORT, WHERE) == REPORT
+
+
+# Codex emits the same top-level `error` for an error it retries and for one that ends the turn;
+# only its exit status tells them apart.
+RECOVERED = codex_stdout(*STARTED, {"type": "error", "message": "retrying"}, message(REPORT),
+                         COMPLETED)  # fmt: skip
+
+
+def test_a_codex_session_that_recovered_from_an_error_gives_its_review():
+    codex = launch(settings_of("gpt-6.2-astra"), 7)
+    assert report(codex, 0, RECOVERED, REPORT, WHERE) == REPORT
+
+
+@pytest.mark.parametrize(("model", "stdout"), [("gpt-6.2-astra", RECOVERED),
+                                               ("claude-opus-5-5", claude_result())])  # fmt: skip
+def test_a_session_that_exited_with_a_failure_status_fails_the_trial(model, stdout):
+    with pytest.raises(PluginReviewOutputError, match=f"^{WHERE}: .*exited with status 1$"):
+        report(launch(settings_of(model), 7), 1, stdout, REPORT, WHERE)
+
+
+def test_codex_events_split_on_lf_only_so_a_line_separator_in_a_string_is_kept():
+    text = "first\u2028second"
+    stdout = codex_stdout(*STARTED, message(text), COMPLETED)
+    assert "\u2028" in stdout  # literal, as Codex writes it
+    assert report(launch(settings_of("gpt-6.2-astra"), 7), 0, stdout, text, WHERE) == text
