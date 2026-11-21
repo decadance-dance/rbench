@@ -1,22 +1,29 @@
 """Import the `reviewbench` task set from a pinned ReviewBench commit (spec review-tasks; design D1).
 
-The importer reads three kinds of file from a local clone of ReviewBench, always as blobs of the
-pinned commit (`git cat-file`), so the clone's working tree cannot change what is imported:
+The importer reads two kinds of file from a local clone of ReviewBench, always as blobs of the
+pinned commit (`git cat-file`, replacements and configuration off), so neither the clone's working
+tree nor its settings can change what is imported:
 
     <subset>               a JSON list of PR objects (default `corpus/test/test.json`)
     golden/<pr_key>.json   {"pr_key", "pr": {...}, "findings": [...]}, one per PR
 
 `pr_key` is the PR's `nwo` with `/` replaced by `_`, then `_<pr_number>-<first 8 hex of head>`.
-For every PR it then:
+Every golden file is validated whole first, `fp` findings included. Then, for every PR, it:
 
 - rebuilds the title and description in force while the pinned head was the PR's head, from the
   original repository's timeline `renamed` events and body edit history; with a change inside the
-  window, or no readable history, the task is skipped and the changelog names it;
+  window, a description edited after it, or no readable history, the task is skipped and the
+  changelog names it;
 - builds the source archive with `build_archive`: the license is read on the original repository
   (`nwo`) at the head, the commits are fetched from ReviewBench's mirror of it; a refused license
-  also skips the task;
+  also skips the task, while a failed lookup stops the import;
 - maps the golden file's `tp` findings to ground truth (ids `<pr_key>#<n>`, `n` the index among
   all findings) with the severity and producer maps below, and drops every other field.
+
+The new version is built and checked whole in a staging directory next to the set, then swapped
+in: a failure leaves the installed version as it was, and a rerun after a crash first restores a
+consistent set. Archives are named by task id and SHA-256, so a new version never overwrites one
+the installed version uses.
 
 The golden file is never stored: the manifest records its path and SHA-256. Every PR is untrusted
 data and is validated whole; an error names the PR key and the finding's index.
@@ -33,11 +40,11 @@ import sys
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from rbench.atomic import atomic_write
 from rbench.tasks.archive import ArchiveError, build_archive
-from rbench.tasks.license import LicenseError
+from rbench.tasks.license import LicenseError, LicenseLookupError
 from rbench.tasks.loader import (
     GROUND_TRUTH_FILE,
     HIDDEN_ID_PREFIX,
@@ -53,6 +60,7 @@ from rbench.tasks.manifest import (
     GoldenFile,
     Manifest,
     SourcePin,
+    check_version_history,
     load_task_set,
     manifest_task,
 )
@@ -113,7 +121,7 @@ query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       body
-      userContentEdits(first: 100) { totalCount nodes { editedAt deletedAt diff } }
+      userContentEdits(first: 100) { totalCount nodes { editedAt } }
     }
   }
 }
@@ -152,70 +160,92 @@ def import_reviewbench(
 ) -> ImportResult:
     """Import the PRs of `subset` at `commit` of the ReviewBench clone `checkout` into `set_dir`.
 
-    Archives go to `archive_dir/<task-id>.bundle`. Against an existing set in `set_dir`, a run that
-    changes nothing writes nothing; any change, and any other commit or subset, makes a new
-    version whose changelog entry names every imported task with its hash and every removed or
-    skipped task with null.
+    Archives go to `archive_dir/<task-id>-<sha256>.bundle`. Against an existing set in `set_dir`,
+    a run that changes nothing writes no set file; any change, and any other commit or subset,
+    makes a new version whose changelog entry names every imported task with its hash and every
+    removed or skipped task with null.
     """
-    if not SHA1.fullmatch(commit):
-        raise ReviewBenchError(f"ReviewBench commit {commit!r} is not a full commit id")
     set_dir, archive_dir = Path(set_dir), Path(archive_dir)
+    _recover(set_dir)
+    for stale in archive_dir.glob(".import-*"):
+        shutil.rmtree(stale)  # archives a killed import staged; none is in use
+    _require_commit(checkout, commit)
     source = SourcePin(REVIEWBENCH_REPO, commit, subset, SEVERITY_MAP, PRODUCER_MAP)
     old = load_task_set(set_dir, SET)[0] if (set_dir / MANIFEST_FILE).exists() else None
     prs = _read_subset(checkout, commit, subset)
+    goldens = {pr.key: _blob(checkout, commit, f"golden/{pr.key}.json") for pr in prs}
+    items = {pr.key: _ground_truth(pr, goldens[pr.key]) for pr in prs}
 
-    staging = set_dir / f".import-{uuid.uuid4().hex}"
-    staging.mkdir(parents=True)
+    token = uuid.uuid4().hex
+    stage = set_dir.parent / f".{set_dir.name}.import-{token}"
+    archive_stage = archive_dir / f".import-{token}"
+    stage.mkdir(parents=True)
+    archive_stage.mkdir(parents=True)
     try:
-        entries, skipped = {}, {}
+        entries, skipped, bundles = {}, {}, {}
         for pr in prs:
             task_id = pr.key.lower()
-            golden_path = f"golden/{pr.key}.json"
-            blob = _blob(checkout, commit, golden_path)
-            items = _ground_truth(pr, blob)
             texts = _title_and_body(pr)
             if isinstance(texts, str):
                 skipped[task_id] = texts
                 continue
-            out = archive_dir / f"{task_id}.bundle"
             mirror = f"{mirror_base}{pr.nwo.replace('/', '_')}"
+            out = archive_stage / f"{task_id}.bundle"
             try:
                 archive = build_archive(pr.nwo, mirror, pr.base, pr.head, out, SET)
+            except LicenseLookupError:
+                raise
             except LicenseError as err:
                 skipped[task_id] = f"license refused: {err}"
                 continue
-            task = _write_task(staging, task_id, pr, texts, archive.sha256, items, set_dir)
-            golden = GoldenFile(golden_path, hashlib.sha256(blob).hexdigest())
+            task = _write_task(stage, task_id, pr, texts, archive.sha256, items[pr.key], set_dir)
+            golden = GoldenFile(
+                f"golden/{pr.key}.json", hashlib.sha256(goldens[pr.key]).hexdigest()
+            )
             entries[task_id] = replace(manifest_task(task, archive), golden=golden)
+            bundles[task_id] = archive
         changelog, version = _changelog(old, source, entries, skipped)
-        if changelog is None:
-            return ImportResult(version, False, tuple(sorted(entries)), skipped)
-        _install(set_dir, staging, entries, old)
-        manifest = {
-            "set": SET,
-            "version": version,
-            "source": {
-                "repo": source.repo,
-                "commit": source.commit,
-                "subset": source.subset,
-                "severity_map": source.severity_map,
-                "producer_map": source.producer_map,
-            },
-            "tasks": {
-                task_id: {
-                    "sha256": entry.sha256,
-                    "license": entry.license,
-                    "golden": {"path": entry.golden.path, "sha256": entry.golden.sha256},
-                }
-                for task_id, entry in entries.items()
-            },
-            "changelog": changelog,
-        }
-        atomic_write(set_dir / MANIFEST_FILE, _dumps(manifest))
+        if changelog is not None:
+            atomic_write(
+                stage / MANIFEST_FILE, _dumps(_manifest(source, version, entries, changelog))
+            )
+            try:
+                new = load_task_set(stage, SET)[0]
+                check_version_history(old, new)
+            except TaskError as err:
+                raise ReviewBenchError(f"the new version does not validate: {err}") from None
+        # A new name per archive content, so this never touches a file the installed set uses.
+        for task_id, archive in bundles.items():
+            os.replace(archive.path, archive_dir / f"{task_id}-{archive.sha256}.bundle")
+        if changelog is not None:
+            _swap(set_dir, stage)
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
-    load_task_set(set_dir, SET)
-    return ImportResult(version, True, tuple(sorted(entries)), skipped)
+        shutil.rmtree(stage, ignore_errors=True)
+        shutil.rmtree(archive_stage, ignore_errors=True)
+    return ImportResult(version, changelog is not None, tuple(sorted(entries)), skipped)
+
+
+def _manifest(source: SourcePin, version: int, entries: dict, changelog: list) -> dict:
+    return {
+        "set": SET,
+        "version": version,
+        "source": {
+            "repo": source.repo,
+            "commit": source.commit,
+            "subset": source.subset,
+            "severity_map": source.severity_map,
+            "producer_map": source.producer_map,
+        },
+        "tasks": {
+            task_id: {
+                "sha256": entry.sha256,
+                "license": entry.license,
+                "golden": {"path": entry.golden.path, "sha256": entry.golden.sha256},
+            }
+            for task_id, entry in entries.items()
+        },
+        "changelog": changelog,
+    }
 
 
 def _changelog(
@@ -226,10 +256,8 @@ def _changelog(
 ) -> tuple[list | None, int]:
     """The new changelog and version, or (None, old version) when nothing changed."""
     current = {task_id: entry.sha256 for task_id, entry in entries.items()}
-    if old is not None:
-        before = {task_id: entry.sha256 for task_id, entry in old.tasks.items()}
-        if old.source == source and before == current:
-            return None, old.version
+    if old is not None and old.source == source and old.tasks == entries:
+        return None, old.version
     if not current and not skipped:
         raise ReviewBenchError(f"the subset {source.subset} at {source.commit} lists no PRs")
     removed = sorted(old.tasks.keys() - current.keys() - skipped.keys()) if old else []
@@ -247,14 +275,37 @@ def _changelog(
     return [*history, {"version": version, "note": note, "changed": changed}], version
 
 
-def _install(set_dir: Path, staging: Path, entries: dict, old: Manifest | None) -> None:
-    """Move the staged task directories into `set_dir` and drop the tasks no longer in it."""
-    for task_id in sorted({*entries, *(old.tasks if old else ())}):
-        target = set_dir / task_id
-        if target.exists():
-            shutil.rmtree(target)
-        if task_id in entries:
-            os.replace(staging / task_id, target)
+def _swap(set_dir: Path, stage: Path) -> None:
+    """Replace `set_dir` with the validated `stage`; `_recover` finishes an interrupted swap."""
+    previous = set_dir.parent / f".{set_dir.name}.previous-{uuid.uuid4().hex}"
+    if set_dir.exists():
+        os.rename(set_dir, previous)
+    os.rename(stage, set_dir)
+    shutil.rmtree(previous, ignore_errors=True)
+
+
+def _recover(set_dir: Path) -> None:
+    """Undo what a killed import left next to `set_dir`, ending with a consistent set.
+
+    A staged version was never installed, so it goes. A previous version whose swap did not finish
+    is restored when `set_dir` is missing, and removed when the swap completed.
+    """
+    parent = set_dir.parent
+    if not parent.is_dir():
+        return
+    for stale in parent.glob(f".{set_dir.name}.import-*"):
+        shutil.rmtree(stale)
+    previous = sorted(parent.glob(f".{set_dir.name}.previous-*"))
+    if previous and not set_dir.exists():
+        if len(previous) > 1:
+            names = ", ".join(p.name for p in previous)
+            raise ReviewBenchError(
+                f"{set_dir} is missing and several earlier versions are next to it ({names});"
+                " move the right one back by hand"
+            )
+        os.rename(previous.pop(), set_dir)
+    for stale in previous:
+        shutil.rmtree(stale)
 
 
 def _write_task(
@@ -360,21 +411,33 @@ def _ground_truth(pr: PullRequest, blob: bytes) -> list[dict]:
         if severity is None:
             raise ReviewBenchError(f"{where}: unknown severity {raw['severity']!r}")
         producer = _producer(raw["producer"], where)
-        if raw["tp_fp"] == "fp":
-            continue
-        items.append(
-            {
-                "id": f"{pr.key}#{index}",
-                "file": raw["file"],
-                "start_line": raw["start_line"],
-                "end_line": raw["end_line"],
-                "message": raw["message"],
-                "category": raw["category"],
-                "severity": severity,
-                "producer": producer,
-            }
-        )
+        file, start, end = raw["file"], raw["start_line"], raw["end_line"]
+        if not (isinstance(file, str) and _inside_repo(file)):
+            raise ReviewBenchError(f"{where}: 'file' must be a path inside the repository")
+        if not (type(start) is int and type(end) is int and 1 <= start <= end):
+            raise ReviewBenchError(f"{where}: line range must be 1 <= start_line <= end_line")
+        for key in ("message", "category"):
+            if not (isinstance(raw[key], str) and raw[key].strip()):
+                raise ReviewBenchError(f"{where}: {key!r} must be a non-empty string")
+        mapped = {
+            "id": f"{pr.key}#{index}",
+            "file": file,
+            "start_line": start,
+            "end_line": end,
+            "message": raw["message"],
+            "category": raw["category"],
+            "severity": severity,
+            "producer": producer,
+        }
+        # Only `tp` items become ground truth (design D1); `fp` ones were validated all the same.
+        if raw["tp_fp"] == "tp":
+            items.append(mapped)
     return items
+
+
+def _inside_repo(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    return bool(path.strip()) and not path.startswith("/") and ".." not in parts
 
 
 def _producer(value: object, where: str) -> str:
@@ -420,20 +483,16 @@ def _title_and_body(pr: PullRequest) -> tuple[str, str] | str:
         end_text = pull["merged_at"] or pull["closed_at"]
         end = _time(end_text) if end_text is not None else None
         title = pull["title"]
-        events = [event for page in pages for event in page]  # type: ignore[union-attr]
-        renames = [
-            (_time(e["created_at"]), e["rename"]["from"], e["rename"]["to"])
-            for e in events
-            if e["event"] == "renamed"
-        ]
-        node = edits["data"]["repository"]["pullRequest"]
-        body, history = node["body"], node["userContentEdits"]
-        total, nodes = history["totalCount"], history["nodes"]
-        revisions = [(_time(n["editedAt"]), n["deletedAt"], n["diff"]) for n in nodes]
-    except (KeyError, TypeError, ValueError, AttributeError) as err:
+        if not isinstance(title, str):
+            raise TypeError("'title' is not a string")
+    except (KeyError, TypeError, ValueError) as err:
         raise ReviewBenchError(f"{pr.key}: malformed reply from GitHub: {err!r}") from None
-    if not all(isinstance(s, str) for s in (title, body)):
-        raise ReviewBenchError(f"{pr.key}: malformed reply from GitHub: title or body")
+    renames = _renames(pages)
+    if renames is None:
+        return "title history is not readable"
+    edited = _edit_times(edits)
+    if edited is None:
+        return "description edit history is not readable"
 
     def inside(when: datetime) -> bool:
         return start <= when and (end is None or when <= end)
@@ -441,34 +500,67 @@ def _title_and_body(pr: PullRequest) -> tuple[str, str] | str:
     def after(when: datetime) -> bool:
         return end is not None and when > end
 
-    renames.sort(key=lambda rename: rename[0])
     if any(inside(when) for when, _, _ in renames):
         return "title changed inside the review window"
     for when, old, new in reversed(renames):
         if not after(when):
             break
-        if new != title or not isinstance(old, str):
+        if new != title:
             return "title history does not lead to the current title"
         title = old
-
-    if total != len(revisions) or total > EDITS_PAGE:
-        return "description edit history is not fully readable"
-    revisions.sort(key=lambda revision: revision[0])
     # GitHub keeps the text the PR was opened with as its oldest revision; that is no change.
-    if any(inside(when) for when, _, _ in revisions if when > created):
+    changes = [when for when in edited if when > created]
+    if any(inside(when) for when in changes):
         return "description changed inside the review window"
-    if revisions and after(revisions[-1][0]):
-        # Edited after the window: the value in force is the last revision before it. The newest
-        # revision must equal the current body, which shows that a revision holds the whole text.
-        before = [revision for revision in revisions if not after(revision[0])]
-        if revisions[-1][2] != body or not before or before[-1][1] is not None:
-            return "description before a later edit cannot be read"
-        body = before[-1][2]
-        if not isinstance(body, str):
-            return "description before a later edit cannot be read"
+    if any(after(when) for when in changes):
+        # Edit history does not give the earlier text reliably, so it is not rebuilt.
+        return "description edited after the review window"
     if not title.strip():
         return "title is empty"
-    return title, body
+    return title, edits["data"]["repository"]["pullRequest"]["body"]
+
+
+def _renames(pages: object) -> list[tuple[datetime, str, str]] | None:
+    """The `renamed` events of a `gh api --paginate --slurp` timeline, oldest first.
+
+    None when the reply is not a list of pages of event objects, or a rename is malformed.
+    """
+    if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
+        return None
+    renames = []
+    for event in (event for page in pages for event in page):
+        if not (isinstance(event, dict) and isinstance(event.get("event"), str)):
+            return None
+        if event["event"] != "renamed":
+            continue
+        rename = event.get("rename")
+        try:
+            when = _time(event.get("created_at"))
+        except (TypeError, ValueError):
+            return None
+        if not (
+            isinstance(rename, dict)
+            and isinstance(rename.get("from"), str)
+            and isinstance(rename.get("to"), str)
+        ):
+            return None
+        renames.append((when, rename["from"], rename["to"]))
+    return sorted(renames, key=lambda rename: rename[0])
+
+
+def _edit_times(reply: dict) -> list[datetime] | None:
+    """When the PR body was edited, from the GraphQL reply; None when that is not fully readable."""
+    try:
+        node = reply["data"]["repository"]["pullRequest"]
+        history = node["userContentEdits"]
+        total, nodes = history["totalCount"], history["nodes"]
+        if not isinstance(node["body"], str) or type(total) is not int or total > EDITS_PAGE:
+            return None
+        if not isinstance(nodes, list) or len(nodes) != total:
+            return None
+        return [_time(n["editedAt"]) for n in nodes]
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _time(value: object) -> datetime:
@@ -500,13 +592,33 @@ def _gh_object(args: list[str], pr: PullRequest) -> dict:
     return reply
 
 
-def _blob(checkout: Path, commit: str, path: str) -> bytes:
-    result = subprocess.run(
-        ["git", "-C", str(checkout), "cat-file", "blob", f"{commit}:{path}"],
+def _git(checkout: Path, *args: str) -> subprocess.CompletedProcess:
+    """Git in the clone with no configuration, inherited `GIT_*` variables or replace refs."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env |= {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    }
+    return subprocess.run(
+        ["git", "--no-replace-objects", "-C", str(checkout), *args],
+        env=env,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         check=False,
     )
+
+
+def _require_commit(checkout: Path, commit: str) -> None:
+    if not SHA1.fullmatch(commit):
+        raise ReviewBenchError(f"ReviewBench commit {commit!r} is not a full commit id")
+    found = _git(checkout, "cat-file", "-t", commit)
+    if found.returncode != 0 or found.stdout.strip() != b"commit":
+        raise ReviewBenchError(f"{commit} is not a commit in {checkout}")
+
+
+def _blob(checkout: Path, commit: str, path: str) -> bytes:
+    result = _git(checkout, "cat-file", "blob", f"{commit}:{path}")
     if result.returncode != 0:
         stderr = result.stderr.decode(errors="replace").strip()
         raise ReviewBenchError(f"cannot read {path} at {commit} in {checkout}: {stderr}")

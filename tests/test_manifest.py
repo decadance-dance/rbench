@@ -876,3 +876,26 @@ def test_reimport_entry_naming_unchanged_and_skipped_tasks_loads(tmp_path: Path)
     edit(set_dir / MANIFEST_FILE, lambda m: m["changelog"][-1]["changed"].update({"rb-1": None}))
     with pytest.raises(TaskError, match=r"task 'rb-1': its hash differs from changelog version 2"):
         load_task_set(set_dir, "reviewbench")
+
+
+def test_source_and_golden_require_each_other(tmp_path: Path) -> None:
+    set_dir = sourced_set(tmp_path)
+    edit(set_dir / MANIFEST_FILE, lambda m: m["tasks"]["rb-2"].pop("golden"))
+    with pytest.raises(TaskError, match=r"task 'rb-2' needs 'golden', since the manifest has"):
+        load_task_set(set_dir, "reviewbench")
+    edit(set_dir / MANIFEST_FILE, lambda m: m.pop("source"))
+    with pytest.raises(TaskError, match=r"task 'rb-1' needs a top-level 'source' for its 'golden'"):
+        load_task_set(set_dir, "reviewbench")
+
+
+def test_changed_golden_needs_a_higher_version(tmp_path: Path) -> None:
+    base, _ = load_task_set(sourced_set(tmp_path), "reviewbench")
+    entry = base.tasks["rb-1"]
+    assert entry.golden is not None
+    for golden in (replace(entry.golden, sha256="e" * 64), replace(entry.golden, path="g/x.json")):
+        moved = replace(base, tasks={**base.tasks, "rb-1": replace(entry, golden=golden)})
+        with pytest.raises(
+            TaskError, match=r"tasks changed since the committed version 1 \(rb-1\)"
+        ):
+            check_version_history(base, moved)
+        check_version_history(base, replace(moved, version=2))

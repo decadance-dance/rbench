@@ -385,8 +385,10 @@ def check_version_history(base: Manifest | None, manifest: Manifest) -> None:
             " changelog entries are append-only, so a changed task needs a new set version"
         )
 
-    def sha(entries: dict[str, ManifestTask], task_id: str) -> str | None:
-        return entries[task_id].sha256 if task_id in entries else None
+    def sha(entries: dict[str, ManifestTask], task_id: str) -> tuple | None:
+        # The golden file is provenance of the ground truth: changing it is a change too.
+        entry = entries.get(task_id)
+        return (entry.sha256, entry.golden) if entry else None
 
     if manifest.source != base.source and manifest.version <= base.version:
         raise TaskError(
@@ -517,6 +519,15 @@ def _parse_manifest(data: dict, label: str, path: Path, task_set: str) -> Manife
         if task_set not in SOURCED_SETS:
             raise TaskError(f"{label}: only the {', '.join(SOURCED_SETS)} set records 'source'")
         source = _source(data["source"], f"{label}: 'source'")
+    # A pinned source and per-task golden files only make sense together.
+    for task_id, entry in tasks.items():
+        if (entry.golden is None) != (source is None):
+            need = (
+                "'golden', since the manifest has a 'source'"
+                if source
+                else "a top-level 'source' for its 'golden'"
+            )
+            raise TaskError(f"{label}: {who(task_id, positions[task_id])} needs {need}")
     return Manifest(task_set, version, tasks, changelog, path, source)
 
 

@@ -7,6 +7,7 @@ tmp_path and the fake `gh`, which answers each API path from its `replies`.
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,7 +16,8 @@ from conftest import FakeBin
 from test_archive import MIT, commit, git, license_reply
 
 from rbench.cli import main
-from rbench.tasks import HIDDEN_ID_PREFIX, MANIFEST_FILE, TaskError, load_task_set
+from rbench.tasks import HIDDEN_ID_PREFIX, MANIFEST_FILE, TaskError, load_task_set, reviewbench
+from rbench.tasks.license import LicenseLookupError
 from rbench.tasks.manifest import check_version_history, load_manifest
 from rbench.tasks.reviewbench import (
     SEVERITY_MAP,
@@ -68,6 +70,7 @@ class PR:
     edits: list = field(default_factory=list)  # (time, text)
     edits_total: int | None = None
     license: str = "MIT"
+    timeline: object = None  # the raw timeline reply, instead of one built from `renames`
 
     @property
     def key(self) -> str:
@@ -125,7 +128,10 @@ class PR:
             {"match": f"{api}/license?ref={self.head}", "stdout": license_reply(self.license)},
             {"match": f"{api}/pulls/{self.number}", "stdout": json.dumps(pull)},
             {"match": f"{api}/commits/{self.head}", "stdout": commit_reply()},
-            {"match": f"{api}/issues/{self.number}/timeline", "stdout": json.dumps([events])},
+            {
+                "match": f"{api}/issues/{self.number}/timeline",
+                "stdout": json.dumps([events] if self.timeline is None else self.timeline),
+            },
             {"match": f"name={self.nwo.split('/')[1]}", "stdout": json.dumps(edits)},
         ]
 
@@ -196,6 +202,16 @@ def world(tmp_path: Path, fake_bin: FakeBin, *prs: PR) -> World:
     w = World(tmp_path, fake_bin, list(prs), checkout)
     w.publish()
     return w
+
+
+def leftovers(w: World) -> list[str]:
+    """Staging and previous-version directories an import left behind."""
+    dirs = [*w.set_dir.parent.iterdir(), *w.archives.iterdir()]
+    return sorted(p.name for p in dirs if p.name.startswith("."))
+
+
+def snapshot(*dirs: Path) -> dict[Path, bytes]:
+    return {p: p.read_bytes() for d in dirs for p in d.rglob("*") if p.is_file()}
 
 
 def gt(w: World, pr: PR) -> dict:
@@ -284,15 +300,16 @@ def test_archive_license_on_original_repo_and_no_golden_stored(
     w = world(tmp_path, fake_bin, pr)
     w.run()
 
-    bundle = w.archives / f"{pr.task_id}.bundle"
-    assert meta(w, pr)["archive_sha256"] == hashlib.sha256(bundle.read_bytes()).hexdigest()
+    sha = meta(w, pr)["archive_sha256"]
+    bundle = w.archives / f"{pr.task_id}-{sha}.bundle"
+    assert sha == hashlib.sha256(bundle.read_bytes()).hexdigest()
     license_calls = [c["argv"] for c in fake_bin.calls() if "license" in " ".join(c["argv"])]
     assert license_calls == [["api", f"repos/acme/widget/license?ref={pr.head}"]]
     stored = "".join(p.read_text() for p in w.set_dir.rglob("*") if p.is_file())
     assert "golden-only" not in stored and '"tp_fp"' not in stored
     assert "a later title" not in stored and "a later body" not in stored
     assert meta(w, pr)["title"] == pr.title and meta(w, pr)["description"] == pr.body
-    assert not any(p.name.startswith(".") for p in w.set_dir.iterdir())
+    assert leftovers(w) == []
 
 
 def test_same_commit_again_writes_nothing(tmp_path: Path, fake_bin: FakeBin) -> None:
@@ -336,11 +353,22 @@ def test_another_commit_makes_a_new_version(tmp_path: Path, fake_bin: FakeBin) -
         ({"edits": [(OPENED, "Draft."), (MERGED, "Fixes the loop.")]}, "description changed"),
         (
             {"edits": [(OPENED, "Fixes the loop.")], "edits_total": 2},
-            "description edit history is not fully readable",
+            "description edit history is not readable",
         ),
         (
-            {"edits": [(OPENED, "Draft."), (LATER, "Something else.")]},
-            "description before a later edit cannot be read",
+            {"edits": [(OPENED, "Draft."), (LATER, "Fixes the loop.")]},
+            "description edited after the review window",
+        ),
+        ({"timeline": {}}, "title history is not readable"),
+        ({"timeline": [{}]}, "title history is not readable"),
+        ({"timeline": [[{"created_at": INSIDE}]]}, "title history is not readable"),
+        (
+            {"timeline": [[{"event": "renamed", "created_at": LATER, "rename": {"from": 1}}]]},
+            "title history is not readable",
+        ),
+        (
+            {"timeline": [[{"event": "renamed", "created_at": "soon", "rename": {}}]]},
+            "title history is not readable",
         ),
     ],
 )
@@ -355,21 +383,22 @@ def test_change_inside_the_window_skips_and_names_the_task(
     assert reason in result.skipped[bad.task_id]
     assert result.imported == (good.task_id,)
     assert not (w.set_dir / bad.task_id).exists()
-    assert not (w.archives / f"{bad.task_id}.bundle").exists()
+    assert not list(w.archives.glob(f"{bad.task_id}-*"))
     entry = load_manifest(w.set_dir / MANIFEST_FILE, "reviewbench").changelog[-1]
     assert entry.changed[bad.task_id] is None
     assert f"{bad.task_id} ({reason}" in entry.note
     assert bad.task_id not in manifest(w)["tasks"]
 
 
-def test_values_changed_after_the_merge_are_rewound(tmp_path: Path, fake_bin: FakeBin) -> None:
+def test_title_renamed_after_the_merge_is_rewound(tmp_path: Path, fake_bin: FakeBin) -> None:
     pr = PR(
         "acme/widget",
         7,
         title="implement data storages",
-        body="Rewritten after the merge.",
+        body="Opened with this text.",
         renames=[(BEFORE, "First title", "Add dependencies"), (LATER, "Add dependencies", "x")],
-        edits=[(OPENED, "Opened with this text."), (LATER, "Rewritten after the merge.")],
+        # The text the PR was opened with, inside the window, is GitHub's oldest revision.
+        edits=[(OPENED, "Opened with this text.")],
     )
     # The later rename's `to` is the current title, as GitHub records it.
     pr.renames[1] = (LATER, "Add dependencies", pr.title)
@@ -402,7 +431,12 @@ def test_refused_license_skips_the_task(tmp_path: Path, fake_bin: FakeBin) -> No
         (finding(producer="human"), r"finding 1: unknown producer form 'human'"),
         (finding(tp_fp="maybe"), r"finding 1: 'tp_fp' must be 'tp' or 'fp'"),
         ({**finding(), "extra": 1}, r"finding 1 must be an object with exactly"),
-        (finding(start_line=0), r"does not load: .*line range"),
+        (finding(start_line=0), r"finding 1: line range"),
+        (finding(file="../etc/passwd"), r"finding 1: 'file' must be a path inside"),
+        (finding(message=""), r"finding 1: 'message' must be a non-empty string"),
+        (finding("fp") | {"start_line": 0, "message": []}, r"finding 1: line range"),
+        (finding("fp", category=None), r"finding 1: 'category' must be a non-empty string"),
+        (finding("fp", severity="critical"), r"finding 1: unknown severity 'critical'"),
     ],
 )
 def test_malformed_golden_refuses_the_import(
@@ -415,8 +449,9 @@ def test_malformed_golden_refuses_the_import(
         w.run()
 
     assert pr.key in str(err.value)
-    assert not (w.set_dir / MANIFEST_FILE).exists()
-    assert not any(w.set_dir.iterdir())
+    assert not w.set_dir.exists()
+    # Refused before any history or license lookup.
+    assert fake_bin.calls() == []
 
 
 def test_malformed_subset_entry_is_refused(tmp_path: Path, fake_bin: FakeBin) -> None:
@@ -494,3 +529,114 @@ def test_cli_imports_the_set(tmp_path: Path, fake_bin: FakeBin, capsys) -> None:
     (w.set_dir / MANIFEST_FILE).unlink()
     assert main(argv) == 1
     assert "gh api repos/acme/widget/pulls/7 failed" in capsys.readouterr().err
+
+
+def changed_golden(w: World, pr: PR) -> None:
+    """Publish a new ReviewBench commit in which the PR's ground truth differs."""
+    pr.findings = [finding(message="A different finding.")]
+    w.publish(note="changed finding")
+
+
+def test_invalid_new_version_leaves_the_installed_one(tmp_path: Path, fake_bin: FakeBin) -> None:
+    pr = PR("acme/widget", 7)
+    w = world(tmp_path, fake_bin, pr)
+    w.run()
+    before = snapshot(w.set_dir, w.archives)
+
+    with pytest.raises(ReviewBenchError, match=r"'subset' must be a relative path"):
+        w.run(subset="./" + TEST_SUBSET)
+
+    assert snapshot(w.set_dir, w.archives) == before
+    assert leftovers(w) == []
+    load_task_set(w.set_dir, "reviewbench")
+
+
+def test_failed_manifest_write_leaves_the_installed_one(
+    tmp_path: Path, fake_bin: FakeBin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pr = PR("acme/widget", 7)
+    w = world(tmp_path, fake_bin, pr)
+    w.run()
+    before = snapshot(w.set_dir, w.archives)
+    changed_golden(w, pr)
+    real = reviewbench.atomic_write
+
+    def failing(path: Path, data) -> None:
+        if Path(path).name == MANIFEST_FILE:
+            raise OSError("disk full")
+        real(path, data)
+
+    monkeypatch.setattr(reviewbench, "atomic_write", failing)
+    with pytest.raises(OSError, match="disk full"):
+        w.run()
+
+    assert snapshot(w.set_dir, w.archives) == before
+    load_task_set(w.set_dir, "reviewbench")
+    monkeypatch.setattr(reviewbench, "atomic_write", real)
+    assert w.run().version == 2
+    assert gt(w, pr)["items"][0]["message"] == "A different finding."
+
+
+def test_rerun_after_a_crash_mid_swap_ends_consistent(
+    tmp_path: Path, fake_bin: FakeBin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pr = PR("acme/widget", 7)
+    w = world(tmp_path, fake_bin, pr)
+    w.run()
+    before = snapshot(w.set_dir)
+    changed_golden(w, pr)
+    real = os.rename
+
+    def killed(src, dst) -> None:
+        if ".import-" in str(src):
+            raise KeyboardInterrupt  # the process dies between the two renames
+        real(src, dst)
+
+    monkeypatch.setattr(os, "rename", killed)
+    with pytest.raises(KeyboardInterrupt):
+        w.run()
+    monkeypatch.setattr(os, "rename", real)
+    assert not w.set_dir.exists()
+
+    reviewbench._recover(w.set_dir)  # what the next run does first
+    assert snapshot(w.set_dir) == before
+    assert w.run().version == 2
+    assert leftovers(w) == []
+    load_task_set(w.set_dir, "reviewbench")
+
+
+def test_failed_license_lookup_stops_and_keeps_the_set(tmp_path: Path, fake_bin: FakeBin) -> None:
+    pr = PR("acme/widget", 7)
+    w = world(tmp_path, fake_bin, pr)
+    w.run()
+    before = snapshot(w.set_dir, w.archives)
+
+    for failure in ({"stderr": "HTTP 500: server error", "exit": 1}, {"stdout": "{}"}):
+        fake_bin.scenario("gh", replies=[{"match": "/license", **failure}, *pr.replies()])
+        with pytest.raises(LicenseLookupError, match="acme/widget"):
+            w.run()
+        assert snapshot(w.set_dir, w.archives) == before
+
+
+def test_replace_refs_do_not_change_the_pinned_commit(tmp_path: Path, fake_bin: FakeBin) -> None:
+    pr = PR("acme/widget", 7)
+    w = world(tmp_path, fake_bin, pr)
+    pinned = w.commit
+    pr.findings = [finding(message="From a different commit")]
+    other = w.publish(note="other")
+    git(w.checkout, "replace", pinned, other)
+
+    w.run(commit=pinned)
+
+    assert gt(w, pr)["items"][0]["message"] == "The loop bound is off by one."
+    assert manifest(w)["source"]["commit"] == pinned
+
+
+def test_pin_must_be_a_commit(tmp_path: Path, fake_bin: FakeBin) -> None:
+    w = world(tmp_path, fake_bin, PR("acme/widget", 7))
+    tree = git(w.checkout, "rev-parse", f"{w.commit}^{{tree}}")
+
+    with pytest.raises(ReviewBenchError, match=rf"{tree} is not a commit"):
+        w.run(commit=tree)
+    with pytest.raises(ReviewBenchError, match=r"is not a full commit id"):
+        w.run(commit="main")
