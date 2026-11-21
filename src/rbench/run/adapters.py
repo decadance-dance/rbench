@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from rbench.engines import plain, rreview
+from rbench.engines import codex_review, plain, rreview
 from rbench.engines.declaration import Setting
 from rbench.engines.pins import MODELS
 from rbench.engines.plain import Launch
@@ -59,12 +59,14 @@ class Homes:
 @dataclass(frozen=True)
 class Output:
     """What the engine left: its exit status, its stdout, the answer file the launch names (None
-    when it names none or the engine wrote none), and the shim log's records."""
+    when it names none or the engine wrote none), the shim log's records, and the directory of
+    the collected transcripts (at their container paths)."""
 
     status: int
     stdout: str
     answer: str | None
     records: list[dict]
+    transcripts: Path
 
 
 class Adapter:
@@ -132,4 +134,29 @@ class Rreview(Adapter):
             raise EngineFailure(f"invalid output: {e}") from None
 
 
-ADAPTERS: dict[str, Adapter] = {plain.NAME: Plain(), rreview.NAME: Rreview()}
+class CodexReview(Adapter):
+    """`codex-review` (design D13): `codex exec review`, model and effort on its own argv; the
+    findings are the `review_output` in the root thread's rollout."""
+
+    def launch(self, trial: EngineTrial) -> Launch:
+        return codex_review.launch(trial.settings)
+
+    def check(self, trial: EngineTrial, launch: Launch, records: list[dict]) -> list[str]:
+        return codex_review.check_launches(records, launch)
+
+    def result(self, trial: EngineTrial, launch: Launch, output: Output) -> list[dict]:
+        if output.status != 0:
+            raise EngineFailure(f"engine error: {launch.cli} exited {output.status}")
+        where = codex_review.NAME
+        try:
+            review = codex_review.review_output(output.records, output.transcripts, where)
+            return codex_review.findings(review, where)
+        except codex_review.ReviewOutputError as e:
+            raise EngineFailure(f"invalid output: {e}") from None
+
+
+ADAPTERS: dict[str, Adapter] = {
+    plain.NAME: Plain(),
+    rreview.NAME: Rreview(),
+    codex_review.NAME: CodexReview(),
+}

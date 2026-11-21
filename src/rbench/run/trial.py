@@ -138,7 +138,7 @@ def run_attempt(ctx: RunContext, trial: PlannedTrial) -> str:
         if problems := adapter.check(engine_trial, launch, records):
             set_state(trial_dir, "misconfigured", "; ".join(problems))
             return "misconfigured"
-        output = Output(status, _read(raw / STDOUT_FILE), answer, records)
+        output = Output(status, _read(raw / STDOUT_FILE), answer, records, raw / TRANSCRIPTS_DIR)
         try:
             findings = adapter.result(engine_trial, launch, output)
             usage = count_usage(records, raw / TRANSCRIPTS_DIR, _codex_stdout(launch, records, raw))

@@ -15,13 +15,15 @@ import time
 from pathlib import Path
 
 import pytest
+import test_codex_review
+import test_rreview
 from test_ledger import FINDING, cli_inputs
 from test_usage import GPT, codex_usage, message, meta, record, turn
 
 import rbench.ledger.plan as plan_module
 import rbench.run.trial as trial_module
 from rbench.cli import ExitCode, main
-from rbench.engines import plain
+from rbench.engines import codex_review, plain, rreview
 from rbench.ledger import (
     TRIALS_DIR,
     Plan,
@@ -34,7 +36,7 @@ from rbench.ledger import (
 from rbench.ledger.plan import PlannedTrial
 from rbench.ledger.resume import recover_trials
 from rbench.run import executor
-from rbench.run.adapters import ADAPTERS, NotEligible, Plain
+from rbench.run.adapters import ADAPTERS, EngineFailure, EngineTrial, NotEligible, Output, Plain
 from rbench.run.trial import project_name
 from rbench.trial.hermetic import POLICY
 from rbench.trial.images import TrialError
@@ -399,10 +401,8 @@ def test_a_plain_codex_trial_stores_usage_with_its_model_unverified(sandbox):
     assert findings == [FINDING | {"severity": "nit"}]
     assert usage["engine"] == {GPT: {"input": 6, "output": 3, "cache_read": 4, "cache_creation": 0}}
     # plain's launch has no `--json`: no stdout events can verify the model (D7).
-    assert usage["incomplete"]["engine"] == [
-        "Codex thread t1: no clean stdout of a launch shows it, so the model its usage ran on"
-        " is unverified"
-    ]
+    unverified = "Codex thread t1: no clean stdout of a launch shows it, so the model its usage"
+    assert usage["incomplete"]["engine"] == [f"{unverified} ran on is unverified"]
 
 
 def test_only_a_codex_exec_json_launch_passes_its_stdout_to_usage(tmp_path):
@@ -515,3 +515,50 @@ def test_an_engine_without_an_adapter_is_refused_before_any_trial(checkout):
             archives=checkout,
             adapters={},
         )
+
+
+def engine_trial(settings: dict) -> EngineTrial:
+    return EngineTrial(settings, None, Path("engines"), 7)  # type: ignore[arg-type]
+
+
+def output(status: int = 0, stdout: str = "", records=(), transcripts=Path("none")) -> Output:
+    return Output(status, stdout, None, list(records), transcripts)
+
+
+def test_rreview_is_registered_and_runs_its_launch_with_findings_from_stdout():
+    adapter, trial = ADAPTERS["rreview"], engine_trial(test_rreview.settings())
+    launch = adapter.launch(trial)
+    assert (launch.cli, launch.stdin, launch.files, launch.output) == ("rreview", "", {}, None)
+    assert launch.argv == rreview.launch(trial.settings).argv
+    assert adapter.homes(trial).by_flag == {}  # rreview passes model and effort itself
+
+    finding = test_rreview.FINDING
+    out = adapter.result(trial, launch, output(1, json.dumps(test_rreview.result([finding]))))
+    assert [f["severity"] for f in out] == ["P1"]
+    with pytest.raises(EngineFailure, match=r"^engine error: rreview exited 2$"):
+        adapter.result(trial, launch, output(2, "{}"))
+    with pytest.raises(EngineFailure, match=r"^invalid output: rreview: stdout is not JSON$"):
+        adapter.result(trial, launch, output(0, "not json"))
+
+
+def test_codex_review_is_registered_with_findings_from_its_root_rollout(tmp_path):
+    adapter = ADAPTERS["codex-review"]
+    trial = engine_trial(test_codex_review.settings())
+    launch = adapter.launch(trial)
+    assert launch == codex_review.launch(trial.settings)
+    records = test_codex_review.records((test_codex_review.ROOT, test_codex_review.ROOT_META))
+    assert adapter.check(trial, launch, records) == []
+    # Its `exec --json` stdout is the evidence count_usage reads for its launch (design D7).
+    assert trial_module._codex_stdout(launch, records, tmp_path) == {
+        1: tmp_path / trial_module.STDOUT_FILE
+    }
+
+    review = test_codex_review.review(test_codex_review.finding())
+    test_codex_review.rollout(tmp_path, test_codex_review.ROOT, review)
+    assert adapter.result(trial, launch, output(0, records=records, transcripts=tmp_path)) == [
+        test_codex_review.TWO_FINDINGS[0]
+    ]
+    with pytest.raises(EngineFailure, match=r"^engine error: codex exited 1$"):
+        adapter.result(trial, launch, output(1, records=records, transcripts=tmp_path))
+    with pytest.raises(EngineFailure, match=r"^invalid output: codex-review: expected one root"):
+        adapter.result(trial, launch, output(0, transcripts=tmp_path))
