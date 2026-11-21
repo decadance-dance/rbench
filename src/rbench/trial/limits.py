@@ -3,18 +3,21 @@ design D8). Pinned: Claude Code 2.1.316, Codex CLI 0.171.0; `tests/fixtures/limi
 records.
 
 `detect_limits` reads the error record that ends a turn in the session files `hermetic.collect`
-copied out, not the engine's stdout:
-- Claude, every root and subagent transcript: an assistant record with `error: "rate_limit"` and
+copied out, not the engine's stdout, and only in sessions the shim log binds to a shim launch: a
+file that only looks like a transcript, such as one in the reviewed repository, decides nothing.
+- Claude: the transcript at the `transcript_path` reported by the SessionStart hook of a session
+  that ran under a `claude` process a shim started, read for that session's records, and the
+  subagent transcripts beside it (`<transcript without .jsonl>/subagents/`). In them, an assistant record with `error: "rate_limit"` and
   `apiErrorStatus: 429` is the usage limit when `apiError` is `usage_limit_reached`, a terminal
   rate limit otherwise, even when it says `apiErrorIsTransient`: the record ends the turn, so the
   CLI has given up.
-- Codex, every rollout: a `task_complete` whose `error.codex_error_info` is `usage_limit_exceeded`
+- Codex: a rollout a shim launch's CLI held open (a `binding` record). In it, a `task_complete` whose `error.codex_error_info` is `usage_limit_exceeded`
   is the usage limit; `rate_limit_exceeded`, or `response_too_many_failed_attempts` with
   `http_status_code` 429, is a terminal rate limit.
 
 The typed fields win over the text. The text decides only for a record without them: a Claude API
-error message starting with one of the CLI's own usage-limit prefixes, a Codex turn error without
-`codex_error_info`, and, when no rollout holds a turn error at all, the `turn.failed` messages on
+error message starting with one of the CLI's own usage-limit prefixes, a Codex turn error whose
+`codex_error_info` is absent or null, and, when no rollout holds a turn error at all, the `turn.failed` messages on
 the `codex exec --json` stdout the runner captured. A line that is not a JSON object is skipped:
 the files are engine output.
 """
@@ -24,7 +27,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from rbench.trial.sessions import CLAUDE_ROOT, CLAUDE_SUBAGENT, CODEX_ROLLOUT
+from rbench.trial.sessions import CLAUDE_SUBAGENT, _children
 
 USAGE = "usage limit"
 RATE = "rate limit"
@@ -58,15 +61,37 @@ class Limit:
         return f"{self.cli.capitalize()} reported its {self.kind}"
 
 
-def detect_limits(transcripts: Path, codex_stdout: Iterable[Path] = ()) -> list[Limit]:
-    """The limits the session files under `transcripts` (container paths below it) report, sorted
-    and each once; `codex_stdout` are captured `codex exec --json` stdouts, read only when no
-    rollout holds a turn error."""
+def detect_limits(
+    records: list[dict], transcripts: Path, codex_stdout: Iterable[Path] = ()
+) -> list[Limit]:
+    """The limits the sessions the shim log `records` binds report in `transcripts` (container
+    paths below it), sorted and each once; `codex_stdout` are captured `codex exec --json` stdouts,
+    read only when no bound rollout holds a turn error."""
+    children = _children(records)
+    roots = {  # the transcript path a shim-started Claude session's hook reported -> its id
+        r["transcript_path"]: r["session_id"]
+        for r in records
+        if r["kind"] == "hook"
+        and isinstance(r.get("transcript_path"), str)
+        and (r.get("claude_pid"), r.get("claude_start")) in children
+    }
+    rollouts = {r["path"] for r in records if r["kind"] == "binding"}
+    files = sorted(p for p in transcripts.rglob("*.jsonl") if p.is_file() and not p.is_symlink())
+    paths = {"/" + f.relative_to(transcripts).as_posix(): f for f in files}
     found: set[Limit] = set()
+    for path, file in paths.items():
+        if path in roots:
+            records_of = (r for r in _records(file) if r.get("sessionId") == roots[path])
+        elif (m := CLAUDE_SUBAGENT.search(path)) and roots.get(
+            path.rpartition("/subagents/")[0] + ".jsonl"
+        ) == m.group(1):
+            records_of = _records(file)
+        else:
+            continue
+        found |= {Limit("claude", k) for r in records_of if (k := _claude_kind(r))}
     turn_errors = False
-    for file in sorted(p for p in transcripts.rglob("*.jsonl") if p.is_file()):
-        path = "/" + file.relative_to(transcripts).as_posix()
-        if CODEX_ROLLOUT.search(path):
+    for path, file in paths.items():
+        if path in rollouts:
             for record in _records(file):
                 payload = record.get("payload")
                 if record.get("type") != "event_msg" or not isinstance(payload, dict):
@@ -77,8 +102,6 @@ def detect_limits(transcripts: Path, codex_stdout: Iterable[Path] = ()) -> list[
                 turn_errors = True
                 if kind := _codex_kind(error):
                     found.add(Limit("codex", kind))
-        elif CLAUDE_ROOT.search(path) or CLAUDE_SUBAGENT.search(path):
-            found |= {Limit("claude", k) for r in _records(file) if (k := _claude_kind(r))}
     if not turn_errors:
         for file in codex_stdout:
             for event in _records(file):
@@ -109,11 +132,8 @@ def _claude_kind(record: dict) -> str | None:
         return None
     if record.get("error") == "rate_limit" and _is(record.get("apiErrorStatus"), 429):
         return USAGE if record.get("apiError") == "usage_limit_reached" else RATE
-    if (
-        "error" in record
-        or "apiErrorStatus" in record
-        or record.get("isApiErrorMessage") is not True
-    ):
+    typed = record.get("error") is not None or record.get("apiErrorStatus") is not None
+    if typed or record.get("isApiErrorMessage") is not True:
         return None
     message = record.get("message")
     content = message.get("content") if isinstance(message, dict) else None
@@ -126,9 +146,9 @@ def _claude_kind(record: dict) -> str | None:
 
 
 def _codex_kind(error: dict) -> str | None:
-    if "codex_error_info" not in error:
+    # Codex 0.171.0 writes an unclassified error's `codex_error_info` as null.
+    if (info := error.get("codex_error_info")) is None:
         return _codex_text(error.get("message"))
-    info = error["codex_error_info"]
     if info == "usage_limit_exceeded":
         return USAGE
     if info == "rate_limit_exceeded":

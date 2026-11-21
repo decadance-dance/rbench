@@ -166,10 +166,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# A run with hidden tasks keeps its directory out of the output: the resume command names it by
+# this shell variable, which the operator sets.
+RUN_DIR_VARIABLE = "RUN_DIR"
+
+
 def _resume_command(run_dir: Path, plan: Plan, args: argparse.Namespace) -> str:
-    """The command that resumes the run with the options this runner was given, where they differ
-    from `rbench resume`'s defaults; a run with hidden tasks keeps its directory unnamed."""
-    words = []
+    """A `/bin/sh` command that resumes the run with the options this runner was given, where they
+    differ from `rbench resume`'s defaults; `--opt=value` and `--` keep values that start with a
+    hyphen intact."""
+    words = ["rbench", "resume"]
     for flag, value, default in (
         ("--engines", args.engines, Path("engines")),
         ("--tasks", args.tasks, Path("tasks")),
@@ -177,14 +183,18 @@ def _resume_command(run_dir: Path, plan: Plan, args: argparse.Namespace) -> str:
         ("--claude-concurrency", args.claude_concurrency, executor.CLAUDE_CONCURRENCY),
     ):
         if value != default:
-            words += [flag, str(value)]
-    where = "<its run directory>" if "hidden" in plan.task_sets else shlex.quote(str(run_dir))
-    return " ".join(["rbench resume", where, *map(shlex.quote, words)])
+            words.append(f"{flag}={value}")
+    command = shlex.join([*words, "--"])
+    if "hidden" in plan.task_sets:
+        return f'{command} "${RUN_DIR_VARIABLE}"'
+    return f"{command} {shlex.quote(str(run_dir))}"
 
 
 def _execute(command: str, run_dir: Path, plan: Plan, args: argparse.Namespace) -> int:
     """Run the trials left in `run_dir`; the caller holds the run lock."""
     resume = _resume_command(run_dir, plan, args)
+    if "hidden" in plan.task_sets:
+        resume = f"with {RUN_DIR_VARIABLE} set to the run directory: {resume}"
     try:
         queue = recover_trials(run_dir, plan)
         print(f"{len(queue)} trials to run")
@@ -198,7 +208,11 @@ def _execute(command: str, run_dir: Path, plan: Plan, args: argparse.Namespace) 
         counts = executor.run_trials(ctx, queue, claude_concurrency=args.claude_concurrency)
     except executor.LimitReached as e:
         print(f"{command}: stopped at a limit: {e}", file=sys.stderr)
-        print(f"resume after the limit resets: {resume}", file=sys.stderr)
+        if e.errors:
+            print(f"{command}: also stopped on an error: {'; '.join(e.errors)}", file=sys.stderr)
+            print(f"fix the cause, then resume after the limit resets: {resume}", file=sys.stderr)
+        else:
+            print(f"resume after the limit resets: {resume}", file=sys.stderr)
         return ExitCode.STOPPED
     except executor.RunStopped as e:
         print(f"{command}: stopped: {e}", file=sys.stderr)

@@ -15,8 +15,10 @@ the attempt cannot record, the trial goes back to `interrupted`, no new trial st
 finish, and `RunStopped` carries the error. An error after the trial's final state, such as a
 project its attempt could not remove, keeps that state but stops the run the same way.
 
-A trial a limit interrupted stops the run too: no new trial starts, running ones finish, and
-`LimitReached` names the limits, unless an error stopped the run as well.
+A trial a limit interrupted stops the run too: from the moment the attempt detects it (the
+`limit` event, set before the trial's project is removed), no new trial starts; running ones
+finish, and `LimitReached` names the limits and any error that also stopped the run, which the
+operator fixes before resuming after the reset.
 """
 
 import os
@@ -57,7 +59,12 @@ class RunStopped(Exception):
 
 
 class LimitReached(RunStopped):
-    """A CLI reported a rate or usage limit; running trials were let finish."""
+    """A CLI reported a rate or usage limit; running trials were let finish. `errors` are the
+    errors that also stopped the run."""
+
+    def __init__(self, limits: Sequence[str], errors: Sequence[str] = ()) -> None:
+        super().__init__("; ".join(limits))
+        self.errors = list(errors)
 
 
 class _Unclean(Exception):
@@ -95,10 +102,11 @@ def execute(
     claude_concurrency: int = CLAUDE_CONCURRENCY,
     retries: int = RETRIES,
     log: Callable[[str], None] = print,
+    limit: threading.Event | None = None,
 ) -> dict[str, int]:
     """Run `queue` with `attempt` and return the count of each final state; raises `RunStopped`
     once running trials end when a trial could not be run, or `LimitReached` when a trial was
-    interrupted by a limit."""
+    interrupted by a limit. `attempt` sets `limit` when it detects one."""
     if claude_concurrency < 1:
         raise ValueError("the Claude concurrency must be at least 1")
     free = {"claude": claude_concurrency, "codex": 1}
@@ -108,6 +116,8 @@ def execute(
     errors: list[str] = []
     limits: list[str] = []
     guard = threading.Lock()
+    if limit is None:
+        limit = threading.Event()
 
     def work(trial: PlannedTrial) -> str:
         name = label(plan, trial)
@@ -141,7 +151,7 @@ def execute(
 
     with ThreadPoolExecutor(max_workers=claude_concurrency + 1) as pool:
         while pending or running:
-            if not errors and not limits:
+            if not errors and not limits and not limit.is_set():
                 # The earliest attempt each provider group has queued or running.
                 earliest: dict[frozenset[str], int] = {}
                 for trial in [*pending, *running.values()]:
@@ -168,6 +178,10 @@ def execute(
                     continue
                 except _Unclean as e:
                     counts[e.state] = counts.get(e.state, 0) + 1
+                    if e.state == "interrupted":  # a limit, then its teardown failed
+                        limits.append(
+                            f"{label(plan, trial)}: interrupted: {_reason(run_dir, trial)}"
+                        )
                     errors.append(str(e))
                     with guard:
                         log(str(e))
@@ -175,15 +189,19 @@ def execute(
                 counts[state] = counts.get(state, 0) + 1
                 message = f"{label(plan, trial)}: {state}"
                 if state == "interrupted":
-                    message += f": {read_status(run_dir / TRIALS_DIR / trial.id).reason}"
+                    message += f": {_reason(run_dir, trial)}"
                     limits.append(message)
                 with guard:
                     log(message)
+    if limits:
+        raise LimitReached(limits, errors)
     if errors:
         raise RunStopped("; ".join(errors))
-    if limits:
-        raise LimitReached("; ".join(limits))
     return counts
+
+
+def _reason(run_dir: Path, trial: PlannedTrial) -> str | None:
+    return read_status(run_dir / TRIALS_DIR / trial.id).reason
 
 
 def load_tasks(
@@ -291,4 +309,5 @@ def prepare_run(
 
 def run_trials(ctx: RunContext, queue: Sequence[PlannedTrial], **options) -> dict[str, int]:
     """`execute` the queue with `run_attempt` in `ctx`."""
-    return execute(ctx.run_dir, ctx.plan, queue, lambda t: run_attempt(ctx, t), **options)
+    attempt = lambda t: run_attempt(ctx, t)
+    return execute(ctx.run_dir, ctx.plan, queue, attempt, limit=ctx.limit, **options)

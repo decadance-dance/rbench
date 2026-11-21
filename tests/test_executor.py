@@ -10,6 +10,7 @@ stdout, the shim log, the transcripts and the proxy log. Every task, id and outp
 import dataclasses
 import json
 import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -23,6 +24,7 @@ import test_rreview
 from test_ledger import FINDING, USAGE, cli_inputs
 from test_usage import GPT, codex_usage, message, meta, record, turn
 
+import rbench.cli as cli_module
 import rbench.ledger.plan as plan_module
 import rbench.run.trial as trial_module
 from rbench.cli import ExitCode, main
@@ -322,7 +324,7 @@ def test_a_limit_starts_nothing_new_lets_running_trials_finish_and_stops(checkou
 
 
 @pytest.mark.real_executor
-def test_a_teardown_failure_after_a_limit_stops_the_run_without_rerunning_it(checkout):
+def test_a_teardown_failure_after_a_limit_keeps_the_limit_stop_and_reports_the_error(checkout):
     run_dir = make_run(checkout, [OPUS])
     plan = load_plan(run_dir)
     tries = []
@@ -334,14 +336,68 @@ def test_a_teardown_failure_after_a_limit_stops_the_run_without_rerunning_it(che
         interrupt(trial_dir)
         raise TrialError("removing trial project p failed")
 
-    with pytest.raises(executor.RunStopped, match="interrupted, then infrastructure") as stopped:
+    with pytest.raises(executor.LimitReached) as stopped:
         executor.execute(run_dir, plan, plan.trials, attempt, claude_concurrency=1)
 
-    assert not isinstance(stopped.value, executor.LimitReached)  # an error to fix: exit 1
-    assert tries == [plan.trials[0].id]
+    name = f"trial {plan.trials[0].id}"
+    assert str(stopped.value) == f"{name}: interrupted: Claude reported its usage limit"
+    assert stopped.value.errors == [
+        f"{name}: interrupted, then infrastructure error: removing trial project p failed"
+    ]
+    assert tries == [plan.trials[0].id]  # not rerun
     status = read_status(run_dir / TRIALS_DIR / tries[0])
     assert (status.state, status.reason) == ("interrupted", "Claude reported its usage limit")
     assert read_wasted(run_dir / TRIALS_DIR / tries[0]) == [USAGE]
+
+
+@pytest.mark.real_executor
+def test_a_limit_and_another_trials_infrastructure_failure_stop_as_a_limit(checkout):
+    run_dir = make_run(checkout, [OPUS, SONNET])
+    plan = load_plan(run_dir)
+    first, second = plan.trials[:2]
+
+    def attempt(trial):
+        trial_dir = run_dir / TRIALS_DIR / trial.id
+        set_state(trial_dir, "running")
+        if trial == first:
+            return interrupt(trial_dir)
+        raise TrialError("proxy did not become healthy")
+
+    with pytest.raises(executor.LimitReached) as stopped:
+        executor.execute(run_dir, plan, plan.trials, attempt, retries=0, log=lambda _: None)
+
+    assert str(stopped.value) == f"trial {first.id}: interrupted: Claude reported its usage limit"
+    assert stopped.value.errors == [
+        f"trial {second.id}: infrastructure error: proxy did not become healthy (after 0 retries)"
+    ]
+
+
+@pytest.mark.real_executor
+def test_no_trial_starts_once_a_limit_is_detected_even_before_its_teardown_ends(checkout):
+    run_dir = make_run(checkout, [OPUS, SONNET])
+    plan = load_plan(run_dir)
+    first, second = plan.trials[:2]
+    limit, teardown, started = threading.Event(), threading.Event(), []
+
+    def attempt(trial):
+        started.append(trial.id)
+        trial_dir = run_dir / TRIALS_DIR / trial.id
+        set_state(trial_dir, "running")
+        if trial == first:
+            limit.set()  # as `run_attempt` does on detection, before removing its project
+            interrupt(trial_dir)
+            assert teardown.wait(5)
+            return "interrupted"
+        while not limit.is_set():
+            time.sleep(0.01)
+        set_state(trial_dir, "failed", "stand-in")  # frees its slot while the first tears down
+        threading.Timer(0.3, teardown.set).start()
+        return "failed"
+
+    with pytest.raises(executor.LimitReached):
+        executor.execute(run_dir, plan, plan.trials, attempt, log=lambda _: None, limit=limit)
+
+    assert len(plan.trials) > 2 and sorted(started) == sorted([first.id, second.id])
 
 
 @pytest.mark.real_executor
@@ -365,30 +421,79 @@ def test_a_trial_a_limit_interrupted_before_is_retried_on_infrastructure_errors(
 
 def test_a_limit_exits_75_and_prints_the_exact_resume_command(checkout, monkeypatch, capsys):
     def run_trials(ctx, queue, **options):
-        raise executor.LimitReached("trial 1: interrupted: Codex reported its rate limit")
+        raise executor.LimitReached(["trial 1: interrupted: Codex reported its rate limit"])
 
     monkeypatch.setattr(executor, "run_trials", run_trials)
     runs = checkout / "my runs"  # quoted in the command
-    argv = [
-        *cli_inputs(checkout),
-        "--runs",
-        str(runs),
-        "--run-id",
-        "r",
-        "--claude-concurrency",
-        "1",
-    ]
+    argv = [*cli_inputs(checkout), "--runs", str(runs), "--run-id", "r"]
 
-    assert main(argv) == ExitCode.STOPPED == 75
+    assert main([*argv, "--claude-concurrency", "1"]) == ExitCode.STOPPED == 75
 
     err = capsys.readouterr().err
-    run_dir = runs / "r"
     assert "rbench run: stopped at a limit: trial 1: interrupted: Codex reported its" in err
     resume = (
-        f"rbench resume '{run_dir}' --engines {checkout / 'engines'}"
-        f" --tasks {checkout / 'tasks'} --claude-concurrency 1"
+        f"rbench resume --engines={checkout / 'engines'} --tasks={checkout / 'tasks'}"
+        f" --claude-concurrency=1 -- '{runs / 'r'}'"
     )
-    assert f"resume after the limit resets: {resume}\n" in err
+    assert f"\nresume after the limit resets: {resume}\n" in err
+
+
+def shell_words(command: str, **variables: str) -> list[str]:
+    """The words `/bin/sh` makes of `command`, with `variables` set."""
+    script = "".join(f"{k}={shlex.quote(v)}; " for k, v in variables.items())
+    script += f"set -- {command}; printf '%s\\0' \"$@\""
+    done = subprocess.run(["/bin/sh", "-c", script], capture_output=True, check=True)
+    return done.stdout.decode().split("\0")[:-1]
+
+
+@pytest.mark.parametrize("hidden", [False, True])
+def test_the_resume_command_survives_the_shell_and_the_parser(hidden):
+    args = cli_module.build_parser().parse_args(
+        [
+            "resume",
+            "--engines=-engines",
+            "--tasks=-my tasks",
+            "--archives=$HOME/'a'",
+            "--claude-concurrency=3",
+            "--",
+            "-runs/r",
+        ]
+    )
+    plan = types.SimpleNamespace(task_sets={"hidden": "1"} if hidden else {"core": "1"})
+
+    command = cli_module._resume_command(args.run, plan, args)
+
+    assert ("-runs" in command) is not hidden  # a hidden run's directory stays unprinted
+    words = shell_words(command, RUN_DIR="-runs/r") if hidden else shell_words(command)
+    assert words[:2] == ["rbench", "resume"]
+    assert cli_module.build_parser().parse_args(words[1:]) == args
+    defaults = cli_module.build_parser().parse_args(["resume", "r"])
+    assert cli_module._resume_command(Path("r"), plan, defaults).startswith("rbench resume -- ")
+
+
+@pytest.mark.parametrize("command", ["run", "resume"])
+def test_a_limit_with_an_error_still_exits_75_and_reports_both(
+    checkout, monkeypatch, capsys, command
+):
+    def run_trials(ctx, queue, **options):
+        raise executor.LimitReached(
+            ["trial 1: interrupted: Claude reported its usage limit"],
+            ["trial 2: infrastructure error: proxy did not become healthy (after 3 retries)"],
+        )
+
+    argv = cli_inputs(checkout)
+    if command == "resume":
+        run_dir = make_run(checkout, [OPUS])
+        engines, tasks = argv[argv.index("--engines") + 1], argv[argv.index("--tasks") + 1]
+        argv = ["resume", str(run_dir), "--engines", engines, "--tasks", tasks]
+    monkeypatch.setattr(executor, "run_trials", run_trials)
+
+    assert main(argv) == ExitCode.STOPPED
+
+    err = capsys.readouterr().err
+    assert f"rbench {command}: stopped at a limit: trial 1: interrupted: Claude" in err
+    assert f"rbench {command}: also stopped on an error: trial 2: infrastructure error" in err
+    assert "fix the cause, then resume after the limit resets: rbench resume " in err
 
 
 def test_resume_after_a_limit_queues_the_interrupted_trial(checkout, stub_executor, capsys):
@@ -482,7 +587,7 @@ def claude_trial(launch: plain.Launch) -> dict:
         | {"final_argv": final, "added": list(CLAUDE_FLAGS), "rewrites": []},
         {"kind": "child", "launch": 1, "pid": 101, "start": 1},
         {"kind": "hook", "session_id": SESSION, "source": "startup"}
-        | {"claude_pid": 101, "claude_start": 1},
+        | {"claude_pid": 101, "claude_start": 1, "transcript_path": TRANSCRIPT},
         {"kind": "exit", "launch": 1, "status": 0},
     )
     findings = [FINDING | {"severity": "must_fix"}]
@@ -802,6 +907,24 @@ def test_a_claude_usage_limit_interrupts_the_trial_keeping_its_tokens_as_wasted(
     assert executor.run_trials(ctx, queue[:1], log=lambda _: None) == {"done": 1}
     assert read_wasted(trial_dir) == [wasted]
     assert read_results(trial_dir)[1]["engine"] == wasted["engine"]
+
+
+@pytest.mark.real_executor
+def test_a_repository_file_holding_a_limit_record_does_not_interrupt_the_trial(sandbox):
+    replay = "/rbench/repo/testdata/projects/sample/replay.jsonl"
+
+    def replies(launch):
+        trial = claude_trial(launch)
+        trial["diff"] += f"A {replay}\n"
+        trial["copy"][f"agent:{replay}"] = limit_line(
+            "claude/transcript-usage-limit-five-hour.stub.jsonl"
+        )
+        return docker_replies(trial)
+
+    trial_dir, counts, _ = sandbox([OPUS], replies)
+
+    assert counts == {"done": 1}
+    assert read_wasted(trial_dir) == []
 
 
 @pytest.mark.real_executor

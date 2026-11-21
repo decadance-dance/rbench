@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import threading
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -122,6 +123,9 @@ class RunContext:
     codex_login: Path | None = None
     hidden: HiddenConfig | None = None
     timeout: float = TIMEOUT
+    # Set as soon as a trial detects a limit, before its project is removed: the executor starts
+    # no trial after it.
+    limit: threading.Event = field(default_factory=threading.Event)
     configurations: dict[str, PlannedConfiguration] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -207,7 +211,8 @@ def _attempt(ctx: RunContext, trial: PlannedTrial) -> str:
         if audit.contaminated:
             return "contaminated"
         codex_stdout = _codex_stdout(launch, records, raw)
-        if limits := detect_limits(raw / TRANSCRIPTS_DIR, codex_stdout.values()):
+        if limits := detect_limits(records, raw / TRANSCRIPTS_DIR, codex_stdout.values()):
+            ctx.limit.set()
             # Wasted first: a runner killed in between leaves the trial running, which resume
             # reruns, rather than an interrupted trial whose tokens are lost.
             add_wasted(trial_dir, _wasted(records, raw, codex_stdout))
