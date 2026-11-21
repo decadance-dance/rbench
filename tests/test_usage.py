@@ -117,10 +117,30 @@ def counts(i: int, o: int, read: int = 0, created: int = 0) -> dict:
     return {"input": i, "output": o, "cache_read": read, "cache_creation": created}
 
 
-def test_repeated_claude_usage_lines_with_one_message_id_count_once(tmp_path):
+@pytest.fixture
+def root(tmp_path: Path) -> Path:
+    """The collected transcripts, apart from the captured stdout files."""
+    return tmp_path / "transcripts"
+
+
+def stdout(tmp_path: Path, thread: str, *usages: dict, reroute: bool = False) -> Path:
+    """A `codex exec --json` stdout in the pinned CLI's shape."""
+    file = tmp_path / "stdout" / f"{thread}-{len(list(tmp_path.glob('stdout/*')))}.jsonl"
+    file.parent.mkdir(exist_ok=True)
+    events = [{"type": "thread.started", "thread_id": thread}, {"type": "turn.started"}]
+    if reroute:
+        message = f"model rerouted: {GPT} -> gpt-other (HighRiskCyberActivity)"
+        events.append({"type": "item.completed", "item": {"id": "item_0", "type": "error"}})
+        events[-1]["item"]["message"] = message
+    events += [{"type": "turn.completed", "usage": u} for u in usages]
+    file.write_text("".join(json.dumps(e) + "\n" for e in events))
+    return file
+
+
+def test_repeated_claude_usage_lines_with_one_message_id_count_once(root):
     # The transcript repeats a message's usage on each content block (text, then tool_use).
     write(
-        tmp_path,
+        root,
         f"{PROJECT}/s1.jsonl",
         [
             message("s1", "msg-1", OPUS, 2, 59, 11852, 5140),
@@ -128,56 +148,52 @@ def test_repeated_claude_usage_lines_with_one_message_id_count_once(tmp_path):
             message("s1", "msg-2", OPUS, 4, 68, 17068, 54),
         ],
     )
-    usage = count_usage(log(*launch(1, "claude"), hook(1, "s1")), tmp_path)
+    usage = count_usage(log(*launch(1, "claude"), hook(1, "s1")), root)
     assert usage == Usage({OPUS: counts(6, 127, 28920, 5194)}, [])
 
 
-def test_a_repeat_with_another_model_is_rejected(tmp_path):
+@pytest.mark.parametrize("order", [1, -1])
+def test_a_streamed_message_counts_its_final_usage_once(root, order):
+    # An early snapshot of a message under-reports its output (spike #24: 16 against 59).
+    lines = [message("s1", "msg-1", OPUS, 2, 16, 11852), message("s1", "msg-1", OPUS, 2, 59, 11852)]
+    write(root, f"{PROJECT}/s1.jsonl", lines[::order])
+    usage = count_usage(log(*launch(1, "claude"), hook(1, "s1")), root)
+    assert usage == Usage({OPUS: counts(2, 59, 11852)}, [])
+
+
+def test_a_repeat_with_another_model_is_rejected(root):
     write(
-        tmp_path,
+        root,
         f"{PROJECT}/s1.jsonl",
         [message("s1", "msg-1", OPUS, 1, 1), message("s1", "msg-1", HAIKU, 1, 1)],
     )
     with pytest.raises(UsageError, match=r"s1\.jsonl:2: msg-1 was counted for model"):
-        count_usage([], tmp_path)
+        count_usage([], root)
 
 
-def test_multi_process_trial_sums_every_session_by_model_with_side_calls(tmp_path):
+def test_multi_process_trial_sums_every_session_by_model_with_side_calls(tmp_path, root):
     # Three Claude sessions (one with a subagent and a side call, one a fork that copies its
     # parent's message) and two Codex sessions, one with a review thread.
     write(
-        tmp_path,
+        root,
         f"{PROJECT}/s1.jsonl",
         [message("s1", "m1", OPUS, 10, 100, 1000), message("s1", "side-1", HAIKU, 5, 1)],
     )
-    write(tmp_path, f"{PROJECT}/s1/subagents/agent-a.jsonl", [message("s1", "m2", SONNET, 3, 30)])
-    write(tmp_path, f"{PROJECT}/s2.jsonl", [message("s2", "m3", OPUS, 1, 10)])
+    write(root, f"{PROJECT}/s1/subagents/agent-a.jsonl", [message("s1", "m2", SONNET, 3, 30)])
+    write(root, f"{PROJECT}/s2.jsonl", [message("s2", "m3", OPUS, 1, 10)])
     write(
-        tmp_path,
+        root,
         f"{PROJECT}/s3.jsonl",
         [message("s3", "m3", OPUS, 1, 10), message("s3", "m4", OPUS, 2, 20, 0, 7)],
     )
     a, b, c = (f"{SESSIONS}/rollout-{x}.jsonl" for x in "abc")
-    write(
-        tmp_path,
-        a,
-        [meta("t1"), turn("u1", GPT), record("t1", "u1", "r1", codex_usage(100, 60, 5))],
-    )
+    write(root, a, [meta("t1"), turn("u1", GPT), record("t1", "u1", "r1", codex_usage(100, 60, 5))])
     review = record("t2", "u2", "r2", codex_usage(50, 0, 4, written=8))
     # Whether the review thread's usage lands in the parent rollout, the child or both is a
     # smoke check (D7): counted once either way.
-    write(
-        tmp_path,
-        b,
-        [
-            meta("t3"),
-            turn("u3", GPT),
-            turn("u2", GPT),
-            record("t3", "u3", "r3", codex_usage(9, 9, 1)),
-            review,
-        ],
-    )
-    write(tmp_path, c, [meta("t2"), turn("u2", GPT), review])
+    parent = [meta("t3"), turn("u3", GPT), record("t3", "u3", "r3", codex_usage(9, 9, 1)), review]
+    write(root, b, parent)
+    write(root, c, [meta("t2"), turn("u2", GPT), review])
     shim_log = log(
         *launch(1, "claude"),
         hook(1, "s1"),
@@ -192,8 +208,9 @@ def test_multi_process_trial_sums_every_session_by_model_with_side_calls(tmp_pat
         binding(5, c, "t2"),
         *launch(6, "claude", "--version", session=False),
     )
+    out = {4: stdout(tmp_path, "t1"), 5: stdout(tmp_path, "t3")}
 
-    usage = count_usage(shim_log, tmp_path)
+    usage = count_usage(shim_log, root, out)
 
     assert usage.incomplete == []
     assert usage.models == {
@@ -205,10 +222,10 @@ def test_multi_process_trial_sums_every_session_by_model_with_side_calls(tmp_pat
     assert list(usage.models) == sorted(usage.models)
 
 
-def test_fewer_sessions_with_usage_than_launches_flags_the_figure_incomplete(tmp_path):
-    write(tmp_path, f"{PROJECT}/s1.jsonl", [message("s1", "m1", OPUS, 1, 1)])
+def test_fewer_sessions_with_usage_than_launches_flags_the_figure_incomplete(root):
+    write(root, f"{PROJECT}/s1.jsonl", [message("s1", "m1", OPUS, 1, 1)])
     # A session that hit a limit before any request: only the CLI's own message.
-    write(tmp_path, f"{PROJECT}/s2.jsonl", [message("s2", "m2", "<synthetic>", 0, 0)])
+    write(root, f"{PROJECT}/s2.jsonl", [message("s2", "m2", "<synthetic>", 0, 0)])
     shim_log = log(
         *launch(1, "claude"),
         hook(1, "s1"),
@@ -218,104 +235,217 @@ def test_fewer_sessions_with_usage_than_launches_flags_the_figure_incomplete(tmp
         *launch(4, "codex", "--version", session=False),
     )
 
-    usage = count_usage(shim_log, tmp_path)
+    usage = count_usage(shim_log, root)
 
     assert usage.models == {OPUS: counts(1, 1)}
     assert usage.incomplete == [
-        "Launch 2 (claude): no usage for its session s2",
+        "Launch 2 (claude): no usage of its own for its session s2",
         "Launch 3 (claude): no session in the shim log",
     ]
 
 
-def test_a_resumed_session_counts_its_transcript_once(tmp_path):
+def test_a_resumed_session_counts_its_transcript_once(root):
     write(
-        tmp_path,
+        root,
         f"{PROJECT}/s1.jsonl",
         [message("s1", "m1", OPUS, 4, 63), message("s1", "m2", OPUS, 6, 73)],
     )
     shim_log = log(
         *launch(1, "claude"), hook(1, "s1"), *launch(2, "claude"), hook(2, "s1", "resume")
     )
-    assert count_usage(shim_log, tmp_path) == Usage({OPUS: counts(10, 136)}, [])
+    assert count_usage(shim_log, root) == Usage({OPUS: counts(10, 136)}, [])
 
 
-def test_a_partial_line_flags_the_figure_incomplete(tmp_path):
-    write(tmp_path, f"{PROJECT}/s1.jsonl", [message("s1", "m1", OPUS, 1, 1)])
-    with (tmp_path / PROJECT.lstrip("/") / "s1.jsonl").open("a") as f:
-        f.write('{"type": "assistant", "mess')
-    usage = count_usage([], tmp_path)
+@pytest.mark.parametrize(
+    ("raw", "why"),
+    [
+        ('{"type": "assistant", "mess', "not a valid JSON record (Invalid control character"),
+        (
+            json.dumps(message("s1", "m2", OPUS, 1, 1)).replace(
+                '"input_tokens": 1', '"input_tokens": -1, "input_tokens": 1'
+            ),
+            "not a valid JSON record (a key is repeated",
+        ),
+    ],
+)
+def test_a_line_that_cannot_be_read_flags_the_figure_incomplete(root, raw, why):
+    write(root, f"{PROJECT}/s1.jsonl", [message("s1", "m1", OPUS, 1, 1)])
+    with (root / PROJECT.lstrip("/") / "s1.jsonl").open("a") as f:
+        f.write(raw + "\n")
+    usage = count_usage([], root)
     assert usage.models == {OPUS: counts(1, 1)}
-    assert usage.incomplete == [
-        f"{PROJECT}/s1.jsonl:2: not a JSON record, so its usage may be missing"
-    ]
+    [reason] = usage.incomplete
+    assert reason.startswith(f"{PROJECT}/s1.jsonl:2: {why}")
 
 
-def test_a_repository_file_under_projects_is_not_counted(tmp_path):
-    write(tmp_path, "/work/repo/projects/x/notes.jsonl", [message("other", "m1", OPUS, 1, 1)])
-    assert count_usage([], tmp_path) == Usage({}, [])
+def test_a_repository_file_under_projects_is_not_counted(root):
+    write(root, "/work/repo/projects/x/notes.jsonl", [message("other", "m1", OPUS, 1, 1)])
+    assert count_usage([], root) == Usage({}, [])
+
+
+def with_usage(line: dict, **usage: object) -> dict:
+    line["message"]["usage"] |= usage
+    return line
 
 
 @pytest.mark.parametrize(
     ("line", "message"),
     [
-        (message("s1", "m1", OPUS, -1, 1), r"s1\.jsonl:1: message m1: malformed usage"),
-        (message("s1", "m1", OPUS, 1, 1.5), r"s1\.jsonl:1: message m1: malformed usage"),
+        (message("s1", "m1", OPUS, -1, 1), r"s1\.jsonl:1: message m1: input_tokens: expected a"),
+        (message("s1", "m1", OPUS, 1, 1.5), r"s1\.jsonl:1: message m1: output_tokens: expected"),
+        (
+            with_usage(message("s1", "m1", OPUS, 1, 1), cache_read_input_tokens=0.0),
+            r"message m1: cache_read_input_tokens: expected a token count",
+        ),
+        (
+            with_usage(message("s1", "m1", OPUS, 1, 1), cache_creation_input_tokens=True),
+            r"message m1: cache_creation_input_tokens: expected a token count",
+        ),
+        (
+            with_usage(message("s1", "m1", OPUS, 1, 1), input_tokens=None),
+            r"message m1: input_tokens: expected a token count",
+        ),
+        (
+            with_usage(message("s1", "m1", OPUS, 1, 1), output_tokens=9 * 10**4299),
+            r"message m1: output_tokens: expected a token count from 0 below 2\*\*53",
+        ),
         (message("s1", "", OPUS, 1, 1), r"s1\.jsonl:1: a message with usage needs an id"),
+        (
+            {"type": "assistant", "sessionId": "s1", "message": []},
+            r"s1\.jsonl:1: an assistant record needs a message object",
+        ),
     ],
 )
-def test_malformed_claude_usage_is_rejected_whole(tmp_path, line, message):
-    write(tmp_path, f"{PROJECT}/s1.jsonl", [line])
+def test_malformed_claude_usage_is_rejected_whole(root, line, message):
+    write(root, f"{PROJECT}/s1.jsonl", [line])
     with pytest.raises(UsageError, match=message):
-        count_usage([], tmp_path)
+        count_usage([], root)
+
+
+def test_optional_cache_counters_absent_or_null_are_zero(root):
+    line = message("s1", "m1", OPUS, 1, 1)
+    del line["message"]["usage"]["cache_read_input_tokens"]
+    write(root, f"{PROJECT}/s1.jsonl", [with_usage(line, cache_creation_input_tokens=None)])
+    assert count_usage([], root) == Usage({OPUS: counts(1, 1)}, [])
+
+
+def test_totals_that_reach_2_53_are_rejected(root):
+    big = 2**52
+    write(
+        root,
+        f"{PROJECT}/s1.jsonl",
+        [message("s1", "m1", OPUS, big, 1), message("s1", "m2", OPUS, big, 1)],
+    )
+    with pytest.raises(UsageError, match=r"model 'claude-opus-5-5': the input total reaches"):
+        count_usage([], root)
 
 
 A = f"{SESSIONS}/rollout-a.jsonl"
+B = f"{SESSIONS}/rollout-b.jsonl"
 
 
-def test_malformed_codex_record_is_rejected_whole(tmp_path):
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        (
+            record("t1", "u1", "r1", codex_usage(1, 2, 1)),
+            r"rollout-a\.jsonl:3: token_usage_record: cached_input_tokens exceeds input_tokens",
+        ),
+        (
+            record("t1", "u1", "r1", codex_usage(1, 0, 1) | {"output_tokens": 1.0}),
+            r"rollout-a\.jsonl:3: token_usage_record: output_tokens: expected a token count",
+        ),
+        (
+            {"type": "token_usage_record", "payload": []},
+            r"rollout-a\.jsonl:3: token_usage_record: expected a payload object",
+        ),
+        (record("t1", "u1", "", codex_usage(1, 0, 1)), r"expected thread, turn and response ids"),
+    ],
+)
+def test_malformed_codex_record_is_rejected_whole(root, line, message):
+    valid = record("t1", "u1", "r0", codex_usage(5, 0, 1))
+    write(root, A, [meta("t1"), turn("u1", GPT), line, valid])
+    with pytest.raises(UsageError, match=message):
+        count_usage([], root)
+
+
+def test_a_record_without_its_turn_model_is_not_counted_and_flagged(tmp_path, root):
     write(
-        tmp_path, A, [meta("t1"), turn("u1", GPT), record("t1", "u1", "r1", codex_usage(1, 2, 1))]
-    )
-    with pytest.raises(UsageError, match=r"rollout-a\.jsonl:3: malformed token_usage_record"):
-        count_usage([], tmp_path)
-
-
-def test_a_record_without_its_turn_model_is_not_counted_and_flagged(tmp_path):
-    write(
-        tmp_path,
+        root,
         A,
         [meta("t1"), turn("u1", GPT), record("t1", "u1", "r1", codex_usage(5, 0, 1))]
         + [record("t1", "u2", "r2", codex_usage(7, 0, 1))],
     )
-    usage = count_usage(log(*launch(1, "codex", "exec"), binding(1, A, "t1")), tmp_path)
+    shim_log = log(*launch(1, "codex", "exec"), binding(1, A, "t1"))
+    usage = count_usage(shim_log, root, {1: stdout(tmp_path, "t1")})
     assert usage.models == {GPT: counts(5, 1)}
-    assert usage.incomplete == [f"{A}:4: no turn_context names the model of turn u2"]
+    assert usage.incomplete == [f"{A}:4: turn u2 has 0 turn_context models"]
 
 
-def test_a_rerouted_request_puts_the_models_in_doubt(tmp_path):
-    reroute = {"type": "event_msg", "payload": {"type": "model_reroute", "to_model": "other"}}
-    write(
-        tmp_path,
-        A,
-        [meta("t1"), turn("u1", GPT), reroute, record("t1", "u1", "r1", codex_usage(5, 0, 1))],
+def test_a_thread_usage_recorded_in_its_parent_rollout_is_not_counted_again(tmp_path, root):
+    # The child's response is in the parent's rollout; the child's own rollout holds only a
+    # cumulative token_count of the same work.
+    child = record("t2", "u2", "r2", codex_usage(10, 0, 2))
+    write(root, A, [meta("t1"), turn("u1", GPT), turn("u2", GPT), child])
+    write(root, B, [meta("t2"), turn("u2", GPT), snapshot(codex_usage(10, 0, 2))])
+    shim_log = log(*launch(1, "codex", "exec", "review"), binding(1, A, "t1"), binding(1, B, "t2"))
+
+    usage = count_usage(shim_log, root, {1: stdout(tmp_path, "t1")})
+
+    assert usage.models == {GPT: counts(10, 2)}
+    assert usage.incomplete == [f"Launch 1 (codex): no usage of its own for its session {A}"]
+
+
+def test_a_fork_holding_only_its_parent_history_has_no_usage_of_its_own(tmp_path, root):
+    history = [turn("u1", GPT), record("t1", "u1", "r1", codex_usage(10, 0, 2))]
+    write(root, A, [meta("t1"), *history, snapshot(codex_usage(10, 0, 2))])
+    write(root, B, [meta("t9", forked="t1"), *history, snapshot(codex_usage(10, 0, 2))])
+    shim_log = log(
+        *launch(1, "codex", "exec"),
+        binding(1, A, "t1"),
+        *launch(2, "codex", "fork", "t1"),
+        binding(2, B, "t9"),
     )
-    usage = count_usage([], tmp_path)
-    assert usage.models == {GPT: counts(5, 1)}
+
+    usage = count_usage(shim_log, root, {1: stdout(tmp_path, "t1"), 2: stdout(tmp_path, "t9")})
+
+    assert usage.models == {GPT: counts(10, 2)}
     assert usage.incomplete == [
-        f"Codex thread t1 ({A}): a request was rerouted to another model, so models are in doubt"
+        (
+            f"Codex thread t9 ({B}): no token_usage_record, and its token_count total includes"
+            " its parent's usage (a fork)"
+        ),
+        f"Launch 2 (codex): no usage of its own for its session {B}",
     ]
 
 
-def test_without_records_the_last_token_count_total_is_the_thread_usage(tmp_path):
+def test_codex_model_attribution_needs_the_launch_stdout(tmp_path, root):
+    write(root, A, [meta("t1"), turn("u1", GPT), record("t1", "u1", "r1", codex_usage(5, 0, 1))])
+    shim_log = log(*launch(1, "codex", "exec"), binding(1, A, "t1"))
+
+    rerouted = count_usage(shim_log, root, {1: stdout(tmp_path, "t1", reroute=True)})
+    unverified = count_usage(shim_log, root)
+
+    assert rerouted.models == unverified.models == {GPT: counts(5, 1)}
+    assert rerouted.incomplete == [
+        f"Launch 1 (codex): model rerouted: {GPT} -> gpt-other (HighRiskCyberActivity)"
+    ]
+    assert unverified.incomplete == [
+        "Launch 1 (codex): no stdout captured, so the model its responses ran on is unverified"
+    ]
+
+
+def test_without_records_the_last_token_count_total_is_the_thread_usage(tmp_path, root):
     rate_only = copy.deepcopy(TOKEN_COUNT)
     rate_only["payload"]["info"] = None
     write(
-        tmp_path,
+        root,
         A,
         [meta("t1"), turn("u1", GPT), snapshot(codex_usage(15946, 13952, 5))]
         + [turn("u2", GPT), snapshot(codex_usage(31909, 29696, 11)), rate_only],
     )
-    usage = count_usage(log(*launch(1, "codex", "exec"), binding(1, A, "t1")), tmp_path)
+    shim_log = log(*launch(1, "codex", "exec"), binding(1, A, "t1"))
+    usage = count_usage(shim_log, root, {1: stdout(tmp_path, "t1")})
     assert usage == Usage({GPT: counts(31909 - 29696, 11, 29696)}, [])
 
 
@@ -335,31 +465,28 @@ def test_without_records_the_last_token_count_total_is_the_thread_usage(tmp_path
             [meta("t1"), turn("u1", GPT), turn("u2", "gpt-other"), snapshot(codex_usage(9, 0, 1))],
             "covers 2 models",
         ),
-        ([meta("t1"), turn("u1", GPT), snapshot(codex_usage(1, 2, 1))], "has invalid counters"),
+        (
+            [meta("t1"), turn("u1", GPT), snapshot(codex_usage(1, 2, 1))],
+            f"is malformed ({A}:3: cached_input_tokens exceeds input_tokens)",
+        ),
+        (
+            [meta("t1"), turn("u1", GPT), snapshot(codex_usage(1, 0, 1) | {"input_tokens": 1.0})],
+            f"is malformed ({A}:3: input_tokens: expected a token count from 0 below 2**53)",
+        ),
     ],
 )
-def test_a_token_count_total_that_is_not_the_thread_own_is_flagged(tmp_path, lines, why):
-    write(tmp_path, A, lines)
-    usage = count_usage(log(*launch(1, "codex", "exec"), binding(1, A, "t1")), tmp_path)
+def test_a_token_count_total_that_is_not_the_thread_own_is_flagged(tmp_path, root, lines, why):
+    write(root, A, lines)
+    shim_log = log(*launch(1, "codex", "exec"), binding(1, A, "t1"))
+    usage = count_usage(shim_log, root, {1: stdout(tmp_path, "t1")})
     assert usage.models == {}
     assert usage.incomplete == [
         f"Codex thread t1 ({A}): no token_usage_record, and its token_count total {why}",
-        f"Launch 1 (codex): no usage for its session {A}",
+        f"Launch 1 (codex): no usage of its own for its session {A}",
     ]
 
 
-def stdout(tmp_path: Path, thread: str, *usages: dict) -> Path:
-    file = tmp_path / "stdout" / f"{thread}.jsonl"
-    file.parent.mkdir(exist_ok=True)
-    events = [{"type": "thread.started", "thread_id": thread}]
-    events += [{"type": "turn.completed", "usage": u} for u in usages]
-    file.write_text("".join(json.dumps(e) + "\n" for e in events))
-    return file
-
-
-def test_a_missing_rollout_falls_back_to_its_last_launch_stdout(tmp_path):
-    transcripts = tmp_path / "transcripts"
-    transcripts.mkdir()
+def test_a_missing_rollout_falls_back_to_its_last_launch_stdout(tmp_path, root):
     shim_log = log(
         *launch(1, "codex", "-c", f'model="{GPT}"', "exec", "prompt"),
         binding(1, A, "t1"),
@@ -367,29 +494,53 @@ def test_a_missing_rollout_falls_back_to_its_last_launch_stdout(tmp_path):
         binding(2, A, "t1"),
     )
     # turn.completed.usage is cumulative over the thread: the last one covers both launches.
-    out = {2: stdout(tmp_path, "t1", codex_usage(15946, 13952, 5), codex_usage(31909, 29696, 11))}
-    assert count_usage(shim_log, transcripts, out) == Usage({GPT: counts(2213, 11, 29696)}, [])
+    first = stdout(tmp_path, "t1", codex_usage(15946, 13952, 5))
+    last = stdout(tmp_path, "t1", codex_usage(15946, 13952, 5), codex_usage(31909, 29696, 11))
+    usage = count_usage(shim_log, root, {1: first, 2: last})
+    assert usage == Usage({GPT: counts(2213, 11, 29696)}, [])
+
+
+ZERO = codex_usage(0, 0, 0)
 
 
 @pytest.mark.parametrize(
-    ("argv", "extra", "out", "why"),
+    ("argv", "extra", "out", "usage", "why"),
     [
-        (("-m", GPT, "exec"), {}, {}, "no stdout of its last launch 1"),
-        (("exec",), {}, "t1", "its launches do not name one model"),
-        (("-m", GPT, "exec"), {}, "t9", "the stdout of launch 1 is not thread t1's"),
-        (("-m", GPT, "exec"), {"forked_from_id": "t0"}, "t1", "includes its parent's usage"),
+        (("-m", GPT, "exec"), {}, None, ZERO, "no stdout of its last launch 1"),
+        (("exec",), {}, "t1", codex_usage(9, 0, 1), "its launches do not name one model"),
+        (("-m", GPT, "exec"), {}, "t9", ZERO, "the stdout of launch 1 is not thread t1's"),
+        (("-m", GPT, "exec"), {"forked_from_id": "t0"}, "t1", ZERO, "includes its parent's"),
+        # Codex 0.171.0 reports all zeros when it never received a token count.
+        (("-m", GPT, "exec"), {}, "t1", ZERO, "reports no usage (all counters zero)"),
+        (
+            ("-m", GPT, "exec"),
+            {},
+            "t1",
+            codex_usage(9, 0, 1) | {"input_tokens": -9},
+            "turn.completed: input_tokens: expected a token count",
+        ),
     ],
 )
-def test_a_stdout_total_that_does_not_cover_the_thread_is_flagged(tmp_path, argv, extra, out, why):
-    transcripts = tmp_path / "transcripts"
-    transcripts.mkdir()
+def test_a_stdout_total_that_does_not_cover_the_thread_is_flagged(
+    tmp_path, root, argv, extra, out, usage, why
+):
     shim_log = log(*launch(1, "codex", *argv), binding(1, A, "t1", **extra))
-    out = {1: stdout(tmp_path, out, codex_usage(9, 0, 1))} if out else {}
-    usage = count_usage(shim_log, transcripts, out)
-    assert usage.models == {}
-    assert usage.incomplete[0].startswith(f"Codex rollout {A}: missing or unreadable, and ")
-    assert why in usage.incomplete[0]
-    assert usage.incomplete[1:] == [f"Launch 1 (codex): no usage for its session {A}"]
+    out = {1: stdout(tmp_path, out, usage)} if out else {}
+    result = count_usage(shim_log, root, out)
+    assert result.models == {}
+    assert result.incomplete[0].startswith(f"Codex rollout {A}: missing or unreadable, and ")
+    assert why in result.incomplete[0]
+    assert f"Launch 1 (codex): no usage of its own for its session {A}" in result.incomplete
+
+
+def test_a_reroute_on_stdout_flags_the_stdout_fallback_too(tmp_path, root):
+    shim_log = log(*launch(1, "codex", "-m", GPT, "exec"), binding(1, A, "t1"))
+    out = {1: stdout(tmp_path, "t1", codex_usage(9, 0, 1), reroute=True)}
+    usage = count_usage(shim_log, root, out)
+    assert usage.models == {GPT: counts(9, 1)}
+    assert usage.incomplete == [
+        f"Launch 1 (codex): model rerouted: {GPT} -> gpt-other (HighRiskCyberActivity)"
+    ]
 
 
 def test_usage_record_keeps_normalization_apart_in_the_ledger(tmp_path):

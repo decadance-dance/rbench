@@ -103,6 +103,10 @@ def _check_findings(findings: object, where: str) -> None:
 
 def _check_usage(usage: object, where: str) -> None:
     fields = (*USAGE_KINDS, "incomplete")
+    if isinstance(usage, dict) and usage.keys() == set(USAGE_KINDS):
+        raise LedgerError(
+            f"{where}: usage.json from an older rbench: no completeness record; re-run the trial"
+        )
     if not (isinstance(usage, dict) and usage.keys() == set(fields)):
         raise LedgerError(f"{where}: usage must be an object of exactly {', '.join(fields)}")
     incomplete = usage["incomplete"]

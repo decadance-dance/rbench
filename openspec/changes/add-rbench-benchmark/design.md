@@ -592,19 +592,34 @@ latest launch wrote none, the cross-check is unavailable; it never replaces the 
 As implemented (#58, `rbench.trial.usage`):
 - One trial's usage is counted from one collection (shim log and transcripts). The normalization
   step runs in its own project and counts its own collection; `usage.json` keeps both apart, each
-  with its list of reasons for being incomplete (empty when complete).
+  with its list of reasons for being incomplete (empty when complete). A `usage.json` without that
+  list, from before #58, is refused on read and on reuse: the trial is re-run.
 - The expected sessions are those of the session launches: the launches the shims added flags to.
-  Each must have a session in the log (a hook or a binding), and each such session must have usage.
+  Each must have a session in the log (a hook or a binding), and each such session must have usage
+  of its own: a Claude session with a counted message, a Codex thread credited with usage.
 - A record is counted once across all transcripts of the trial (Claude by `message.id`, Codex by
-  thread, turn and response id), so a fork's copied history and a review thread's usage in both
-  rollouts count once. A repeat with other counters keeps the larger of each.
-- Codex `token_usage_record` is read as `payload.{thread_id, turn_id, response_id}` and its
-  per-response `payload.usage`, the layout of a local rollout of a nearby version; at the pin it is
-  still the smoke check above. The only effective-model signal read is a `model_reroute` event in
-  the rollout, which flags the trial.
+  thread, turn and response id). A repeat with other counters keeps the larger of each, the final
+  figure of a streamed message.
+- What the pin persists (Codex CLI 0.171.0 source): a `token_usage_record` per response, with
+  `payload.{thread_id, turn_id, response_id}` and that response's `payload.usage`, next to cumulative
+  turn and thread fields that are not read. Resume and fork restore the earlier history, so a fork's
+  rollout can hold its parent's records and cumulative totals. Each record is credited to the thread
+  it names, wherever it is written; a thread with no record anywhere falls back to its own rollout's
+  `token_count`, and a fork never does. A fork holding only its parent's copied history therefore
+  has no usage of its own and flags the trial.
+- The pin's rollout persistence drops `ModelReroute` and `Warning`, so a rollout cannot show the
+  effective model. Its `exec --json` stdout shows a reroute as an `item.completed` error item whose
+  message starts with `model rerouted: `. A Codex session launch with such an item, or with no
+  stdout captured, flags the trial's model attribution as unverified.
 - The stdout fallback's verified model is the one model that every launch of the thread names on its
-  argv (`-m`, `--model`, `-c model=`); a model set only in `config.toml` flags the trial. The runner
-  passes the stdout it captured per launch; the shims never capture it.
+  argv (`-m`, `--model`, `-c model=`); a model set only in `config.toml` flags the trial. An
+  all-zero `turn.completed.usage`, the pin's default when no token count arrived, is no usage. The
+  runner passes the stdout it captured per launch; the shims never capture it.
+- Counters are integers from 0 below 2**53, and so are the totals. An optional counter that is
+  absent or null is 0. A line that is not valid JSON, a repeated key included, flags the usage
+  incomplete at its file and line. Any other invalid value or a malformed `turn_context`,
+  `token_usage_record` or assistant message rejects the usage, naming the file and line; in a
+  fallback source it only flags the usage incomplete.
 
 **Alternative considered:** capture each process's final result event. Engines own stdout, so it is
 not always visible.

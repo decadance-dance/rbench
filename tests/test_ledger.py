@@ -756,6 +756,29 @@ def test_done_with_matching_hashes_but_invalid_contents_is_rejected(
         read_results(tmp_path)
 
 
+# A done trial stored before usage.json recorded completeness (#58), hashes and all.
+LEGACY_USAGE = b'{\n  "engine": {\n    "m": {"cache_creation": 0, "cache_read": 0, "input": 1, "output": 1}\n  },\n  "normalization": {}\n}\n'
+
+
+def store_legacy(trial_dir: Path) -> None:
+    findings = json.dumps([FINDING]).encode()
+    (trial_dir / FINDINGS_FILE).write_bytes(findings)
+    (trial_dir / USAGE_FILE).write_bytes(LEGACY_USAGE)
+    status = {
+        "state": "done",
+        "findings_sha256": hashlib.sha256(findings).hexdigest(),
+        "usage_sha256": hashlib.sha256(LEGACY_USAGE).hexdigest(),
+    }
+    (trial_dir / STATUS_FILE).write_text(json.dumps(status))
+
+
+def test_usage_from_before_completeness_records_is_refused_by_format(tmp_path: Path) -> None:
+    store_legacy(tmp_path)
+    message = "usage.json from an older rbench: no completeness record; re-run the trial"
+    with pytest.raises(LedgerError, match=message):
+        read_results(tmp_path)
+
+
 @pytest.mark.parametrize(
     "status",
     [
