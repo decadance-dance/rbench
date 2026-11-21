@@ -103,6 +103,7 @@ NIT = re.compile(r"[\s*_>`]*(?:nits?|nitpick|minor|optional|style|typo)\b", re.I
 BLOCKING = re.compile(r"\([^)\n]*\bblocking\b[^)\n]*\)", re.IGNORECASE)
 HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@")
 PAGE = 100
+REVIEW_STATES = ("APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING")
 EXCERPT = 200
 SHEET_COLUMNS = ("task_id", "item_id", "location", "link", "pre_label", "label", "excerpt")
 
@@ -284,65 +285,70 @@ def _mine(repo: str, number: int, language: str, window: Window) -> Mined | tupl
     if author is None or lines > window.max_changed_lines or files > window.max_changed_files:
         return None
 
-    reviews = _pages([f"repos/{repo}/pulls/{number}/reviews"], label)
-    comments = _pages([f"repos/{repo}/pulls/{number}/comments"], label)
-    commits = _pages([f"repos/{repo}/pulls/{number}/commits"], label)
-    try:
-        states = {r["id"]: r["state"] for r in reviews}
-        inline = {c["pull_request_review_id"] for c in comments}
-        rounds = sorted(
-            (_when(r["submitted_at"], label), r["commit_id"])
-            for r in reviews
-            if r["id"] in inline and _human(r["user"]) not in (None, author) and r["submitted_at"]
-        )
-        shas = [c["sha"] for c in commits]
-        merges = [len(c["parents"]) > 1 for c in commits]
-        if not all(isinstance(sha, str) and COMMIT.fullmatch(sha) for sha in shas):
-            raise TypeError("a commit id is malformed")
-    except (KeyError, TypeError) as err:
-        raise TaskImportError(f"{label}: malformed review data from GitHub: {err!r}") from None
-    if not rounds or rounds[0][1] not in shas:
+    reviews = [_review(r, label) for r in _pages([f"repos/{repo}/pulls/{number}/reviews"], label)]
+    comments = [
+        _comment(c, label) for c in _pages([f"repos/{repo}/pulls/{number}/comments"], label)
+    ]
+    commits = [_commit(c, label) for c in _pages([f"repos/{repo}/pulls/{number}/commits"], label)]
+    inline = {c.review for c in comments}
+    rounds = sorted(
+        (r.submitted, r.commit)
+        for r in reviews
+        if r.id in inline
+        and r.submitted is not None
+        and r.commit is not None
+        and _human(r.user) not in (None, author)
+    )
+    if not rounds:
         return None
     head = rounds[0][1]
-
     task_id = f"{repo.replace('/', '_')}_{number}-{head[:8]}".lower()
     if not TASK_ID.fullmatch(task_id) or task_id.startswith(HIDDEN_ID_PREFIX):
         raise TaskImportError(f"{label}: {task_id} is not a valid public task id")
-    open_ = {}
-    for comment in comments:
-        found = _comment(comment, head, author, label)
-        if found is not None:
-            cid, path, start, end, body, review = found
-            open_[cid] = (path, start, end, body, pre_label(body, states.get(review)))
-    tracked = {cid: (path, start, end) for cid, (path, start, end, *_) in open_.items()}
+    shas = [c.sha for c in commits]
+    if head not in shas:
+        # The branch was rewritten after the review: the follow-ups cannot be ordered.
+        return task_id, "the reviewed head is not in the PR's commits"
+
+    states = {r.id: r.state for r in reviews}
+    open_ = {c.id: c for c in comments if c.candidate(head, author)}
+    tracked = {c.id: (c.path, c.start, c.end) for c in open_.values()}
     fixed: dict[int, str] = {}
-    for sha, merge in list(zip(shas, merges))[shas.index(head) + 1 :]:
-        if merge or not tracked:
-            break  # a merge brings in the base branch: its changes are nobody's fix
-        changed = _commit_files(repo, sha, label)
+    for later in commits[shas.index(head) + 1 :]:
+        if not tracked:
+            break
+        files = _commit_files(repo, later.sha, label)
         for cid, (path, start, end) in list(tracked.items()):
-            if path not in changed:
+            if path not in files:
                 continue
-            new_path, status, patch = changed[path]
-            if status != "removed" and patch is None:
+            new_path, status, patch, changes = files[path]
+            if status == "removed":
+                moved = None
+            elif patch is not None:
+                moved = _touches(patch, start, end, label)
+            elif status == "renamed" and changes == 0:
+                moved = start, end
+            else:
                 del tracked[cid]  # GitHub shows no diff (binary, too large): no evidence
                 continue
-            moved = None if status == "removed" else _touches(patch or "", start, end, label)
-            if moved is None:
-                fixed[cid] = sha
-                del tracked[cid]
-            else:
+            if moved is not None:
                 tracked[cid] = (new_path, *moved)
+                continue
+            del tracked[cid]
+            # A merge brings in the base branch, and a commit made before the comment cannot be
+            # an answer to it; either way the lines are gone, so nothing later is evidence.
+            if not later.merge and later.when > open_[cid].created:
+                fixed[cid] = later.sha
     if not fixed:
         return None
     items = tuple(
         Item(
             f"{task_id}#{cid}",
-            open_[cid][0],
-            open_[cid][1],
-            open_[cid][2],
-            open_[cid][3],
-            open_[cid][4],
+            open_[cid].path,
+            open_[cid].start,
+            open_[cid].end,
+            open_[cid].body,
+            pre_label(open_[cid].body, states.get(open_[cid].review)),
             f"https://github.com/{repo}/pull/{number}#discussion_r{cid}",
             fixed[cid],
         )
@@ -362,55 +368,154 @@ def _mine(repo: str, number: int, language: str, window: Window) -> Mined | tupl
     return Mined(task_id, replace(pr, base=base), texts, items)
 
 
-def _comment(comment: object, head: str, author: str, label: str) -> tuple | None:
-    """(id, path, start, end, body, review id) of a comment that can become an item, else None."""
-    if not isinstance(comment, dict):
-        raise TaskImportError(f"{label}: malformed review comment from GitHub")
-    cid = comment.get("id")
-    where = f"{label}: review comment {cid}"
+@dataclass(frozen=True)
+class Review:
+    id: int
+    user: object
+    state: str
+    submitted: datetime | None
+    commit: str | None
+
+
+@dataclass(frozen=True)
+class Comment:
+    id: int
+    review: int | None
+    reply: bool
+    user: object
+    commit: str
+    kind: str
+    side: object
+    start_side: object
+    created: datetime
+    body: str
+    path: str | None
+    start: int | None
+    end: int | None
+
+    def candidate(self, head: str, author: str) -> bool:
+        """A thread-opening human comment, not the author's, on new lines at the head."""
+        return (
+            not self.reply
+            and self.commit == head
+            and _human(self.user) not in (None, author)
+            and self.kind == "line"
+            and self.side == "RIGHT"
+            and self.start_side in (None, "RIGHT")
+            and bool(self.body.strip())
+        )
+
+
+@dataclass(frozen=True)
+class Commit:
+    sha: str
+    merge: bool
+    when: datetime
+
+
+def _review(raw: object, label: str) -> Review:
+    rid = raw.get("id") if isinstance(raw, dict) else None
+    if type(rid) is not int:
+        raise TaskImportError(f"{label}: review without an id")
+    where = f"{label}: review {rid}"
+    state, submitted, commit = raw.get("state"), raw.get("submitted_at"), raw.get("commit_id")
+    if state not in REVIEW_STATES:
+        raise TaskImportError(f"{where}: malformed state")
+    if commit is not None and not (isinstance(commit, str) and COMMIT.fullmatch(commit)):
+        raise TaskImportError(f"{where}: malformed commit id")
+    when = None if submitted is None else _when(submitted, where)
+    return Review(rid, raw.get("user"), state, when, commit)
+
+
+def _comment(raw: object, label: str) -> Comment:
+    """A validated review comment; the fields an item needs are checked on every line comment."""
+    cid = raw.get("id") if isinstance(raw, dict) else None
     if type(cid) is not int:
         raise TaskImportError(f"{label}: review comment without an id")
-    if (
-        "in_reply_to_id" in comment
-        or comment.get("original_commit_id") != head
-        or _human(comment.get("user")) in (None, author)
-        or comment.get("subject_type", "line") != "line"
-        or comment.get("side") != "RIGHT"
-        or comment.get("start_side") not in (None, "RIGHT")
-    ):
-        return None
-    path, end, body = comment.get("path"), comment.get("original_line"), comment.get("body")
-    start = comment.get("original_start_line") or end
-    if not (isinstance(path, str) and path.strip() and not path.startswith("/")):
-        raise TaskImportError(f"{where}: malformed path")
-    if ".." in PurePosixPath(path).parts:
-        raise TaskImportError(f"{where}: malformed path")
-    if not (type(start) is int and type(end) is int and 1 <= start <= end):
-        raise TaskImportError(f"{where}: malformed line range")
-    if not (isinstance(body, str) and body.strip()):
-        return None
-    return cid, path, start, end, body, comment.get("pull_request_review_id")
+    where = f"{label}: review comment {cid}"
+    review, reply = raw.get("pull_request_review_id"), raw.get("in_reply_to_id")
+    if review is not None and type(review) is not int:
+        raise TaskImportError(f"{where}: malformed review id")
+    if reply is not None and type(reply) is not int:
+        raise TaskImportError(f"{where}: malformed reply id")
+    commit, kind, body = (
+        raw.get("original_commit_id"),
+        raw.get("subject_type", "line"),
+        raw.get("body"),
+    )
+    if not (isinstance(commit, str) and COMMIT.fullmatch(commit)):
+        raise TaskImportError(f"{where}: malformed commit id")
+    if not (isinstance(kind, str) and isinstance(body, str)):
+        raise TaskImportError(f"{where}: malformed subject type or body")
+    try:
+        created = _time(raw.get("created_at"))
+    except (TypeError, ValueError):
+        raise TaskImportError(f"{where}: malformed timestamp") from None
+    path = start = end = None
+    if kind == "line":
+        path, end, first = raw.get("path"), raw.get("original_line"), raw.get("original_start_line")
+        start = end if first is None else first
+        if not (isinstance(path, str) and path.strip() and not path.startswith("/")):
+            raise TaskImportError(f"{where}: malformed path")
+        if ".." in PurePosixPath(path).parts:
+            raise TaskImportError(f"{where}: malformed path")
+        if not (type(start) is int and type(end) is int and 1 <= start <= end):
+            raise TaskImportError(f"{where}: malformed line range")
+    return Comment(
+        cid,
+        review,
+        reply is not None,
+        raw.get("user"),
+        commit,
+        kind,
+        raw.get("side"),
+        raw.get("start_side"),
+        created,
+        body,
+        path,
+        start,
+        end,
+    )
 
 
-def _commit_files(repo: str, sha: str, label: str) -> dict[str, tuple[str, str, str | None]]:
-    """The files one commit changes: old path -> (new path, status, patch or None)."""
-    reply = _gh_object(["api", f"repos/{repo}/commits/{sha}"], label)
-    files = reply.get("files")
-    if not isinstance(files, list):
+def _commit(raw: object, label: str) -> Commit:
+    try:
+        sha, parents = raw["sha"], raw["parents"]
+        when = _time(raw["commit"]["committer"]["date"])
+        if not (isinstance(sha, str) and COMMIT.fullmatch(sha) and isinstance(parents, list)):
+            raise TypeError("sha or parents")
+    except (KeyError, TypeError, ValueError) as err:
+        raise TaskImportError(f"{label}: malformed commit from GitHub: {err!r}") from None
+    return Commit(sha, len(parents) > 1, when)
+
+
+def _commit_files(repo: str, sha: str, label: str) -> dict[str, tuple[str, str, str | None, int]]:
+    """The files one commit changes, every page: old path -> (new path, status, patch, changes).
+
+    A merge commit's files are its changes against its first parent, the PR's previous commit.
+    """
+    pages = _gh(["api", "--paginate", "--slurp", f"repos/{repo}/commits/{sha}"], label)
+    if not (isinstance(pages, list) and all(isinstance(p, dict) for p in pages)):
         raise TaskImportError(f"{label}: malformed commit {sha} from GitHub")
     changed = {}
-    for entry in files:
-        try:
-            name, status = entry["filename"], entry["status"]
-            old = entry.get("previous_filename", name)
-            patch = entry.get("patch")
-            if not (isinstance(name, str) and isinstance(old, str) and isinstance(status, str)):
-                raise TypeError("filename or status is not a string")
-            if patch is not None and not isinstance(patch, str):
-                raise TypeError("patch is not a string")
-        except (KeyError, TypeError) as err:
-            raise TaskImportError(f"{label}: malformed commit {sha}: {err!r}") from None
-        changed[old] = (name, status, patch)
+    for page in pages:
+        files = page.get("files")
+        if not isinstance(files, list):
+            raise TaskImportError(f"{label}: malformed commit {sha} from GitHub")
+        for entry in files:
+            try:
+                name, status, changes = entry["filename"], entry["status"], entry["changes"]
+                old = entry.get("previous_filename", name)
+                patch = entry.get("patch")
+                if not (isinstance(name, str) and isinstance(old, str) and isinstance(status, str)):
+                    raise TypeError("filename or status is not a string")
+                if patch is not None and not isinstance(patch, str):
+                    raise TypeError("patch is not a string")
+                if type(changes) is not int or changes < 0:
+                    raise TypeError("changes is not a count")
+            except (KeyError, TypeError) as err:
+                raise TaskImportError(f"{label}: malformed commit {sha}: {err!r}") from None
+            changed[old] = (name, status, patch, changes)
     return changed
 
 
