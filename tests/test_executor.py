@@ -760,7 +760,7 @@ def test_a_teardown_that_keeps_failing_is_retried_then_stops_the_run(sandbox, mo
     with pytest.raises(executor.RunStopped, match="done, then infrastructure error: removing"):
         sandbox([OPUS], lambda launch: docker_replies(claude_trial(launch)))
 
-    assert len(downs) == 1 + trial_module.DOWN_TRIES
+    assert len(downs) == 1 + 3  # `up` first, then three tries after the trial
 
 
 @pytest.mark.real_executor

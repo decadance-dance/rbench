@@ -26,6 +26,7 @@ from rbench.ledger.plan import (
     PlannedRound,
     PlannedTask,
     PlannedTrial,
+    run_identity,
 )
 from rbench.run.adapters import Adapter, EngineFailure
 from rbench.run.trial import PROJECT_DIR, RunContext, project_name, run_attempt
@@ -90,10 +91,12 @@ def test_a_trial_attempt_reads_the_real_collectors_shim_log(images, tmp_path, re
     trial_dir = run_dir / TRIALS_DIR / trial.id
     (trial_dir / "raw").mkdir(parents=True)
     set_state(trial_dir, "pending")
-    name = project_name(run_dir, trial.id)
+    identity = run_identity(run_dir)
+    name = project_name(identity, trial.id)
     request.addfinalizer(lambda: TrialProject(name, trial_dir / PROJECT_DIR).down())
     ctx = RunContext(
         run_dir,
+        identity,
         plan,
         tmp_path,
         {task.id: task},

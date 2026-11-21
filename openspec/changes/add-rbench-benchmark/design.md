@@ -258,13 +258,24 @@ server or build step, and opens from disk as the spec requires.
     executor (#55) gives each trial a name unique to the run and the trial on the Docker daemon,
     stable across its retries, and reuses a name only while it holds the run's lock. A trial id
     alone is unique only within its plan, so two runs could otherwise stop each other's trials.
-    The name is `rbench-` and the first 16 hex digits of the SHA-256 of the resolved run directory
-    and the trial id, so no task id reaches the daemon. `rbench run` takes the lock before the new
-    run directory is renamed into place; `run` and `resume` then list the daemon's compose projects
+    The name is `rbench-` and the first 16 hex digits of the SHA-256 of the run's identity and the
+    trial id, so no task id reaches the daemon. The identity is 32 random hex digits in the run
+    directory's `identity` file (D8), written when the run is created, or under the lock before
+    the first trial of a run created without one: neither another client using the same path nor
+    a move of the run directory changes the names. `rbench run` takes the lock before the new run
+    directory is renamed into place; `run` and `resume` then list the daemon's compose projects
     and remove every one named for a trial of the run before any trial starts.
   - The engine runs under coreutils `timeout` inside the agent: on the limit, the engine's process
     group gets TERM and, 30 seconds later, KILL, so the shims still log each CLI's exit before
-    the audit reads the log. The trial is then `failed` with reason `timeout`.
+    the audit reads the log. A shell wrapper around `timeout` ends the engine's stderr with its
+    own line, the exit status and the seconds spent inside the agent. The trial is `failed` with
+    reason `timeout` when that status is `timeout`'s (124, or 137 after KILL) and the time reached
+    the limit; time Docker spends outside the agent does not count. With no such line, the launch
+    never completed in the agent, and the attempt is an infrastructure error. The host waits for
+    `docker compose exec` at most the limit plus 90 seconds, then treats it as one too.
+  - A Codex trial holds an exclusive `flock` on its login home directory from before its project
+    starts until it is removed, so trials of any runner on the host that share the login run one
+    after the other.
 
 **Alternatives considered:**
 - *Anthropic's devcontainer firewall (iptables).* It allows GitHub and port 22, and resolves domains
@@ -679,6 +690,7 @@ not always visible.
 **Choice.** `runs/<run-id>/` holds:
 - `plan.json`;
 - `ledger.lock`;
+- `identity`, random hex that names the run's compose projects (D3);
 - one directory per trial with `status.json`, `findings.json`, `usage.json` and `raw/`;
 - `judge/`.
 
