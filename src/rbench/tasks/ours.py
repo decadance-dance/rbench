@@ -5,14 +5,17 @@ human, are taken in merge order until `max_per_repo` of them make tasks. A PR ma
 
 - it changes at most `max_changed_lines` lines in at most `max_changed_files` files;
 - the reviewed head is the commit of its first review by a human other than its author that has
-  inline comments, and that commit is one of the PR's commits;
-- at least one of that review round's comments is acted on: a thread-opening comment by a human
-  other than the author, on the new side of the diff at the reviewed head, whose lines a later
-  commit of the PR changes (`_touches`). Each such comment is one ground-truth item, with the
-  comment and the commit as its source; a comment nobody acted on is not ground truth;
+  inline comments; a head missing from the PR's commits (a rewritten branch) skips the PR;
+- at least one comment is acted on: a thread-opening comment by a human other than the author, on
+  the new side of the diff at the reviewed head, whose lines a later non-merge commit, committed
+  after the comment, changes (`_touches`). The lines are followed through every commit in between,
+  merges and pure renames included. Each such comment is one ground-truth item, with the comment
+  and the commit as its source; a comment nobody acted on is not ground truth;
 - its title and description were in force while the reviewed head was its head (design D1), and
   its repository's license allows redistribution (spec review-tasks, Source license). Failing
-  either skips it, and the changelog names it.
+  either skips it, and the changelog names it. Both are checked before the PR takes a place.
+
+The window may only be narrowed, and a private repository is refused before any PR is read.
 
 Severity follows the rule in `pre_label` unless a label sheet filled by the maintainer says
 otherwise: `write_label_sheet` writes one row per mined item, `import_ours(labels=...)` applies the

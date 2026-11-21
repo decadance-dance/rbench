@@ -667,12 +667,15 @@ judges (D13, O1), with an end fixed so the set can be mined again. The cutoffs w
 | `gpt-6.2-astra` | May 18, 2026 ("knowledge cutoff") | https://developers.openai.com/api/docs/models/gpt-6.2-astra |
 
 A month without a day is read as its last day, so June 2026 ends the training data, and the window
-starts on July 1. A new model in the matrix with a later cutoff needs a later window, and so a new
-set version.
+starts on July 1. The window is a hard bound: `--merged-after` and `--merged-before` may narrow it,
+and a value outside it is refused before anything is read. A new model in the matrix with a later
+cutoff needs a later window, a change to this decision and a new set version.
 
 **Repositories.** A repository qualifies when:
 - GitHub identifies its license as one on the allowed list (`read_license`, spec `review-tasks`,
   Source license; the import checks it again at each reviewed head);
+- it is public: the import refuses a private repository before it reads any PR, since its token
+  could read private review text;
 - it is not archived and was pushed in the last 30 days;
 - it has a human review culture. Among the 50 most recent PRs merged in the window, at least 2 have
   a review thread whose lines a later commit changed (GitHub `isOutdated`), opened by a user who is
@@ -698,11 +701,17 @@ of these hold:
 - it changes at most 1500 lines in at most 30 files;
 - it has at least one item (below);
 - its title and description pass D1's rule;
-- its license passes the check.
+- its license at the reviewed head passes the check.
+
+These checks run before the PR takes one of its repository's 3 places or a row of the label sheet,
+so a refused PR never crowds out an eligible one; the changelog names every refused PR that had
+items.
 
 The *reviewed head* is the commit of the PR's first review that has inline comments and comes from
 a human other than the author. That is the state before the review's follow-ups, as ReviewBench's
-head is. The *base* is the merge base of the PR's base commit and the reviewed head.
+head is. The *base* is the merge base of the PR's base commit and the reviewed head. When the
+reviewed head is no longer among the PR's commits (the branch was rewritten after the review), the
+follow-ups cannot be ordered: the PR is skipped and the changelog names it.
 
 **Reading of O5.** O5 takes ground truth from "review comments, plus follow-up commits that change
 the commented lines". This design makes that wording precise without changing it:
@@ -717,14 +726,26 @@ A comment becomes an item when all of these hold:
 - it opens its thread (it is not a reply);
 - it sits on the new side of the diff at the reviewed head, with a line range;
 - its author is a GitHub `User`, not a bot and not the PR's author;
-- a later non-merge commit of the PR changes those lines. Changing means it deletes or replaces one
-  of them, or inserts lines between them or right after the last one. The lines are followed
-  through earlier commits' diffs and renames, and a deleted file counts as a change.
+- a later non-merge commit of the PR, committed after the comment was posted, changes those lines.
+  Changing means it deletes or replaces one of them, or inserts lines between them or right after
+  the last one; a deleted file counts as a change.
 
-Tracking ends at the first merge commit, which brings in the base branch and is nobody's fix. A
-commit whose diff GitHub does not show (binary or too large) gives no evidence. Comments on removed
-lines and comments on a whole file are not items, because the item format needs a line range in the
-reviewed tree. The GitHub API lists at most 250 commits of a PR; a longer PR is read only that far.
+The lines are followed from the reviewed head through every later commit's diff, read on all its
+pages:
+- An edit above them moves them, and a pure rename (no content change) carries them to the new
+  path.
+- A merge commit's diff against the PR's previous commit (GitHub's diff of a merge) moves them too,
+  but a merge is never evidence: it brings in the base branch. If it changes the lines, they are
+  gone and the comment is not an item.
+- A commit whose committer date is not after the comment changes the lines before anyone could act
+  on the comment, so it is not evidence either, and the lines are gone. The committer date is no
+  later than the push, so this rule only errs toward dropping an item.
+- A commit whose diff GitHub does not show (binary or too large) gives no evidence, and the lines
+  are no longer followed.
+
+Comments on removed lines and comments on a whole file are not items, because the item format needs
+a line range in the reviewed tree. The GitHub API lists at most 250 commits of a PR; a longer PR is
+read only that far.
 
 **Field mapping to spec `review-tasks`.**
 
@@ -744,13 +765,14 @@ reviewed tree. The GitHub API lists at most 250 commits of a PR; a longer PR is 
 | severity | the rule below, or the maintainer's label |
 | producer | `human` |
 | source | `<comment URL> fixed-by <commit sha>`: the comment and the commit that acted on it |
-| canary | generated by the import, one per task |
+| canary | `rbench-canary-` and the first 32 hex digits of the SHA-256 of `rbench-ours-canary:<task id>`, so a fresh import is byte-reproducible; a task that already has a canary keeps it |
 
 **Severity rule.** The import gives every item a pre-label with no model call. The rules are
 applied in this order:
 - `nit`: the comment opens with nit, nitpick, minor, optional, style or typo, as a word or as a
   Conventional Comments label;
-- `must`: the comment's first line has a `(blocking)` decoration, or it belongs to a review that
+- `must`: the comment's first line has `blocking` as one token of a decoration, as in `(blocking)`
+  or `(blocking, security)` but not `(non-blocking)`, or the comment belongs to a review that
   requested changes;
 - `should`: every other item.
 
@@ -758,9 +780,14 @@ applied in this order:
 lines, link, pre-label and an empty label. The maintainer labels each row `M`, `S` or `N` (spec
 `review-tasks`, Severity mapping from external sets). `--labels <file>` applies the filled sheet.
 With `--require-labels`, an item without a label refuses the import and is named. The sheet is
-working data for the maintainer and is never committed. The manifest's `source` records the
-repositories, the window, the filters, the M/S/N map, this rule, and whether the severities come
-from the `rule`, the `maintainer` or both (`rule+maintainer`).
+working data for the maintainer and is never committed: the import refuses a path that git tracks,
+and it quotes every cell built from GitHub text that a spreadsheet would read as a formula (one
+starting with `=`, `+`, `-`, `@`, a tab or a carriage return). The manifest's `source` records the
+repositories, the window, the filters, the M/S/N map, this rule, and where the imported items'
+severities came from: all from the `rule`, all from the `maintainer`, or both (`rule+maintainer`).
+
+A run that finds a skip the changelog does not name yet makes a new version that names it, even
+when no task changed.
 
 **Open:** whether the pre-label is final (B) or every item is confirmed by the maintainer (A).
 
