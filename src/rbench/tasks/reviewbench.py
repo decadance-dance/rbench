@@ -41,7 +41,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from rbench.atomic import atomic_write
-from rbench.tasks.archive import ArchiveError, build_archive
+from rbench.tasks.archive import ArchiveError, archive_name, build_archive
 from rbench.tasks.importing import (
     ImportResult,
     PullRequest,
@@ -131,10 +131,10 @@ def import_reviewbench(
 ) -> ImportResult:
     """Import the PRs of `subset` at `commit` of the ReviewBench clone `checkout` into `set_dir`.
 
-    Archives go to `archive_dir/<task-id>-<sha256>.bundle`. Against an existing set in `set_dir`,
-    a run that changes nothing writes no set file; any change, and any other commit or subset,
-    makes a new version whose changelog entry names every imported task with its hash and every
-    removed or skipped task with null.
+    Archives go to `archive_dir/<sha256>.bundle`, the name `rbench tasks release` uploads. Against
+    an existing set in `set_dir`, a run that changes nothing writes no set file; any change, and any
+    other commit or subset, makes a new version whose changelog entry names every imported task
+    with its hash and every removed or skipped task with null.
     """
     set_dir, archive_dir = Path(set_dir), Path(archive_dir)
     sets, archives = set_dir.resolve(), archive_dir.resolve()
@@ -207,9 +207,10 @@ def _import(
                 check_version_history(old, new)
             except TaskError as err:
                 raise ReviewBenchError(f"the new version does not validate: {err}") from None
-        # A new name per archive content, so this never touches a file the installed set uses.
-        for task_id, archive in bundles.items():
-            os.replace(archive.path, archive_dir / f"{task_id}-{archive.sha256}.bundle")
+        # A name per archive content: a replaced file has the same bytes, so the installed set's
+        # archives never change.
+        for archive in bundles.values():
+            os.replace(archive.path, archive_dir / archive_name(archive.sha256))
         if changelog is not None:
             _swap(set_dir, stage)
     finally:

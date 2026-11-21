@@ -26,21 +26,16 @@ import sys
 import tempfile
 from pathlib import Path
 
-from rbench.tasks.archive import LICENSED_SETS, ArchiveError
+from rbench.tasks.archive import LICENSED_SETS, ArchiveError, archive_name
 from rbench.tasks.loader import REPO, Task, TaskError
 from rbench.tasks.manifest import MANIFEST_FILE, _git, _repo_path, load_task_set
 
 # The repository whose releases carry the public archives; a fork reruns the same archives.
 RELEASE_REPO = "decadance-dance/rbench"
-ARCHIVE_SUFFIX = ".bundle"
 
 
 def release_tag(task_set: str, version: int) -> str:
     return f"tasks-{task_set}-v{version}"
-
-
-def archive_name(task: Task) -> str:
-    return f"{task.archive_sha256}{ARCHIVE_SUFFIX}"
 
 
 def default_archive_dir() -> Path:
@@ -163,7 +158,9 @@ def publish_release(
     archive_dir = Path(archive_dir)
     # Only hash-named basenames reach gh, run inside the archive directory: gh expands an asset
     # argument as a glob and splits it at '#', which a full path may contain.
-    assets = sorted({verify_archive(t, archive_dir / archive_name(t)).name for t in tasks})
+    assets = sorted(
+        {verify_archive(t, archive_dir / archive_name(t.archive_sha256)).name for t in tasks}
+    )
     tag = release_tag(task_set, version)
     target = _manifest_commit(set_dir)
     _gh(
@@ -232,7 +229,7 @@ def fetch_archives(
 
 def _fetch_one(task: Task, tag: str, archive_dir: Path, repo: str) -> bool:
     """Download and install the archive of `task` unless a matching one is there; True if fetched."""
-    dest = archive_dir / archive_name(task)
+    dest = archive_dir / archive_name(task.archive_sha256)
     if dest.is_file() and _sha256(dest) == task.archive_sha256:
         return False
     fd, tmp = tempfile.mkstemp(dir=archive_dir, prefix=f".{dest.name}.", suffix=".tmp")

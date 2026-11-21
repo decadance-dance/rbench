@@ -42,7 +42,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path, PurePosixPath
 
 from rbench.atomic import atomic_write
-from rbench.tasks.archive import ArchiveError, build_archive
+from rbench.tasks.archive import ArchiveError, archive_name, build_archive
 from rbench.tasks.importing import (
     ImportResult,
     PullRequest,
@@ -713,7 +713,7 @@ def import_ours(
     require_labels: bool = False,
     source_base: str = SOURCE_BASE,
 ) -> ImportResult:
-    """Mine `window` into the set `set_dir`; archives go to `archive_dir/<task-id>-<sha256>.bundle`.
+    """Mine `window` into the set `set_dir`; archives go to `archive_dir/<sha256>.bundle`.
 
     `labels` (from `read_labels`) set the severity of the items they name; with `require_labels`
     every imported item needs one. A run that changes nothing writes no set file; any change
@@ -834,8 +834,8 @@ def _import(
                 check_version_history(old, new)
             except TaskError as err:
                 raise TaskImportError(f"the new version does not validate: {err}") from None
-        for task_id, archive in bundles.items():
-            os.replace(archive.path, archive_dir / f"{task_id}-{archive.sha256}.bundle")
+        for archive in bundles.values():
+            os.replace(archive.path, archive_dir / archive_name(archive.sha256))
         if changelog is not None:
             _swap(set_dir, stage)
     finally:
