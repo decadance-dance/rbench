@@ -153,9 +153,9 @@ def records(*items: dict) -> list[dict]:
     return [{"seq": n} | item for n, item in enumerate(items, 1)]
 
 
-def launch(n: int, pid: int) -> list[dict]:
+def launch(n: int, pid: int, *argv: str, cli: str = "x") -> list[dict]:
     return [
-        {"kind": "launch", "launch": n, "cli": "x", "argv": [str(n)]},
+        {"kind": "launch", "launch": n, "cli": cli, "argv": list(argv) or [str(n)]},
         {"kind": "child", "launch": n, "pid": pid, "start": pid * 10},
     ]
 
@@ -253,7 +253,7 @@ def test_codex_rollouts_bound_by_origin_resume_and_child_lineage(tmp_path):
         *launch(1, 40),
         binding(1, A, "t1"),
         binding(1, B, "t2", parent="t1"),  # codex-review's child thread, same launch
-        *launch(2, 50),
+        *launch(2, 50, "exec", "resume", "t1", "-", cli="codex"),
         binding(2, A, "t1"),  # `codex exec resume` reopens the rollout
         *launch(3, 60),
         binding(3, C, "t3"),  # in a home of rreview's own
@@ -280,6 +280,42 @@ def test_codex_rollouts_that_do_not_bind(tmp_path):
         f"Codex thread t2 ({B}): its parent thread t1 is not a root thread of launch 2",
         "Codex rollout /tmp/x/rollout-d.jsonl: no session_meta with a thread id",
         f"Codex thread t3 ({C}): no origin launch in the shim log",
+    ]
+
+
+RESUME = ("-c", "x=1", "exec", "-m", "m", "resume", "t1", "-")
+
+
+def test_a_codex_resume_never_supplies_the_missing_origin(tmp_path):
+    # The real binary started t1 (no binding); shim launches then resumed it, also from the TUI.
+    log = records(
+        *launch(1, 40, *RESUME, cli="codex"),
+        binding(1, A, "t1"),
+        *launch(2, 50, "resume", "t1", cli="codex"),
+        binding(2, A, "t1"),
+    )
+    rollout(tmp_path, A, "t1")
+
+    assert unbound_sessions(log, tmp_path) == [
+        f"Codex thread t1 ({A}): no origin launch, only resumes [1, 2] in the shim log"
+    ]
+
+
+def test_codex_origin_counts_launches_that_do_not_resume(tmp_path):
+    log = records(
+        *launch(1, 40, "exec", "-", cli="codex"),
+        binding(1, A, "t1"),
+        *launch(2, 50, *RESUME, cli="codex"),
+        binding(2, A, "t1"),
+        *launch(3, 60, "exec", "--", "resume", cli="codex"),  # a prompt, not a resume
+        binding(3, B, "t2"),
+        binding(3, A, "t1"),  # a second origin
+    )
+    rollout(tmp_path, A, "t1")
+    rollout(tmp_path, B, "t2")
+
+    assert unbound_sessions(log, tmp_path) == [
+        f"Codex thread t1 ({A}): origin launches [1, 3] in the shim log"
     ]
 
 

@@ -47,6 +47,8 @@ def claude_process() -> tuple[int | None, int | None]:
 def main() -> None:
     try:
         data = json.load(sys.stdin)
+        if not isinstance(data, dict):  # not a hook event: nothing to report
+            return
         record = {k: data[k] for k in FIELDS if isinstance(data.get(k), str)}
         record["kind"] = "hook"
         record["claude_pid"], record["claude_start"] = claude_process()

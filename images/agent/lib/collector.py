@@ -59,6 +59,16 @@ FIELDS = {
         "claude_start": NUM_OR_NONE,
     },
 }
+# A binding's `meta`: the shim's META_KEYS of the rollout's session_meta. `source` is a string or,
+# for a child thread, an object that names its parent.
+META = {"source": (str, dict, type(None))} | {
+    k: (str, type(None))
+    for k in (
+        "id", "session_id", "forked_from_id", "timestamp", "cwd", "originator", "cli_version",
+        "thread_source", "model_provider",
+    )
+}  # fmt: skip
+REWRITE = {"index": INT, "from": STR, "to": STR}
 REQUIRED = {
     "launch": {"cli", "argv", "final_argv", "added"},
     "child": {"pid"},
@@ -79,20 +89,31 @@ def check(record: object, kinds: tuple[str, ...]) -> dict:
     kind = record.get("kind")
     if kind not in kinds:
         raise Rejected(f"kind {kind!r} here; expected one of {', '.join(kinds)}")
-    fields = FIELDS[kind]
-    for key, value in record.items():
-        if key == "kind":
-            continue
-        if key not in fields:
-            raise Rejected(f"{kind}: unknown field {key!r}")
-        if not isinstance(value, fields[key]) or isinstance(value, bool):
-            raise Rejected(f"{kind}: field {key!r} has type {type(value).__name__}")
+    _types({k: v for k, v in record.items() if k != "kind"}, FIELDS[kind], kind)
     if missing := REQUIRED.get(kind, set()) - record.keys():
         raise Rejected(f"{kind}: missing {', '.join(sorted(missing))}")
     for key in ("argv", "final_argv", "added"):
         if not all(isinstance(a, str) for a in record.get(key, [])):
             raise Rejected(f"{kind}: {key} holds a non-string")
+    if kind == "launch" and record["cli"] not in ("claude", "codex"):
+        raise Rejected(f"launch: unknown cli {record['cli']!r}")
+    for name, value in record.get("homes", {}).items():
+        if not isinstance(value, (str, type(None))):
+            raise Rejected(f"{kind}: homes[{name!r}] has type {type(value).__name__}")
+    for n, rewrite in enumerate(record.get("rewrites", [])):
+        if not isinstance(rewrite, dict) or rewrite.keys() != REWRITE.keys():
+            raise Rejected(f"{kind}: rewrites[{n}] is not an object of {', '.join(REWRITE)}")
+        _types(rewrite, REWRITE, f"{kind}: rewrites[{n}]")
+    _types(record.get("meta", {}), META, f"{kind}: meta")
     return record
+
+
+def _types(value: dict, fields: dict, where: str) -> None:
+    for key, item in value.items():
+        if key not in fields:
+            raise Rejected(f"{where}: unknown field {key!r}")
+        if not isinstance(item, fields[key]) or isinstance(item, bool):
+            raise Rejected(f"{where}: field {key!r} has type {type(item).__name__}")
 
 
 def parent(pid: int) -> int | None:

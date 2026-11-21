@@ -295,7 +295,10 @@ server or build step, and opens from disk as the spec requires.
     session command takes);
   - logs the argv and what binds the launch to its sessions (below);
   - starts the real binary as its own child, with the engine's stdio unchanged, forwards signals to
-    it and exits with its status.
+    it and exits with its status, or dies by the signal that killed it;
+  - reads the engine's options, and rewrites one (below), only before `--`, and for Codex only
+    before the first positional argument (a prompt or a session id). Text after them is the
+    prompt and is never read as an option.
 - Shim settings and log. Before the engine starts, the runner writes one settings file at a fixed
   path in the container, read-only to every trial process. It holds only the trial's public launch
   settings (the policy flags, and the model and effort for roles delivered by flag) and the log
@@ -307,7 +310,11 @@ server or build step, and opens from disk as the spec requires.
   file `/etc/rbench/shim.json`, written by root with mode `0444`; the collector
   `/opt/rbench/lib/collector.py`, started by `docker exec --user rbench-collector`, its socket
   `/run/rbench/collector.sock` and its log `/var/log/rbench/shim.jsonl` (mode `0600`). A shim
-  without its settings or its collector refuses to start the CLI. The shims, the watcher, the
+  without its settings or its collector refuses to start the CLI. Every exchange with the collector
+  has a 10-second limit: a collector that does not accept the launch in time counts as absent.
+  Once the CLI runs, a record lost to the limit leaves its sessions unbound, and a watcher still
+  running 10 seconds after the CLI exits is killed, which leaves the rollouts it had not reported
+  unbound; the trial fails closed and the shim never hangs. The shims, the watcher, the
   collector and the hook are Python scripts on the image's Debian `python3`, because Node has no
   `SO_PEERCRED`.
 - Threat model of the audit (decided). The audit detects a CLI session started without the shims:
@@ -344,9 +351,14 @@ server or build step, and opens from disk as the spec requires.
     (`sessions/**/rollout-*.jsonl`) only while the CLI holds it open for writing: the flags in
     `/proc/<pid>/fdinfo` must include write or read-write access and append. A file that is only
     read, such as by Codex's metadata reader for existing rollouts, binds nothing. The watcher logs
-    the thread id from the rollout's `session_meta`. A launch that opens a rollout with no earlier
-    binding is its origin. A launch that reopens a bound rollout for append, as `codex exec resume`
-    does without writing a new `session_meta`, is a resume launch. Checked offline with Codex CLI
+    the thread id from the rollout's `session_meta`. Whether a launch is an origin or a resume
+    comes from its own argv, never from the order of bindings: a launch with `resume` among its
+    arguments before `--` (`codex resume`, `codex exec resume`) is a resume launch of every root
+    rollout it binds, which it reopens for append without writing a new `session_meta`. Any other
+    launch that binds a root rollout is its origin. A rollout bound only by resume launches, such
+    as a session the real binary started and a shim launch resumed, has no origin. A `resume`
+    that is a prompt or an option's value makes a fresh session look like a resume, which fails
+    closed. Checked offline with Codex CLI
     0.171.0 (#25): `codex exec` keeps its rollout open for read-write and append (`O_RDWR |
     O_APPEND`) for the whole session, `codex exec resume <id>` reopens the same file the same way,
     and `codex exec review` holds both the parent rollout and the review thread's rollout in the

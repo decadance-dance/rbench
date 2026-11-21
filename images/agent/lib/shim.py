@@ -19,12 +19,14 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 import uuid
 
 SETTINGS = "/etc/rbench/shim.json"
 REAL = {"claude": "/usr/local/bin/claude", "codex": "/usr/local/bin/codex"}
 PROC = "/proc"
 POLL_SECONDS = 0.05
+TIMEOUT = 10.0  # seconds for each exchange with the collector, and for the watcher to finish
 FORWARDED = (
     signal.SIGHUP,
     signal.SIGINT,
@@ -45,11 +47,13 @@ CLAUDE_COMMANDS = frozenset({
 CLAUDE_INFO = frozenset({"-v", "--version", "-h", "--help"})
 CLAUDE_CONTINUATION = ("-c", "--continue", "-r", "--resume", "--from-pr")
 
-# Codex CLI 0.171.0 `codex --help`: the top-level options that take a value, and the commands.
+# Codex CLI 0.171.0 `codex --help`: the options that take a value, at the top level and in `exec`
+# and its subcommands, and the commands.
 CODEX_VALUE_OPTIONS = frozenset({
     "-c", "--config", "--enable", "--disable", "--remote", "--remote-auth-token-env", "-i",
     "--image", "-m", "--model", "--local-provider", "-p", "--profile", "-s", "--sandbox", "-C",
-    "--cd", "--add-dir", "-a", "--ask-for-approval",
+    "--cd", "--add-dir", "-a", "--ask-for-approval", "--thread-source", "--cyber-access-program",
+    "--output-schema", "--color", "-o", "--output-last-message", "--base", "--commit", "--title",
 })  # fmt: skip
 CODEX_COMMANDS = frozenset({
     "agents", "exec", "e", "review", "login", "logout", "mcp", "plugin", "app-server",
@@ -69,6 +73,28 @@ class ShimError(Exception):
     pass
 
 
+def claude_options(argv: list[str]) -> list[str]:
+    """The part of `argv` Claude reads options from: commander takes them before and after the
+    prompt, up to `--`."""
+    # limit: an option's value that starts like an option name (`--system-prompt -c`) reads as one.
+    return argv[: argv.index("--")] if "--" in argv else argv
+
+
+def codex_options(argv: list[str]) -> list[str]:
+    """The options and commands that lead `argv`, up to `--` or the first positional argument (a
+    prompt or a session id); what follows is never read as an option or rewritten."""
+    i = 0
+    while i < len(argv) and argv[i] != "--":
+        a = argv[i]
+        if a.startswith("-") and a != "-":
+            i += 2 if a in CODEX_VALUE_OPTIONS else 1
+        elif a in CODEX_COMMANDS:
+            i += 1
+        else:
+            break
+    return argv[: min(i, len(argv))]
+
+
 def has_option(argv: list[str], *names: str) -> bool:
     """Whether `argv` passes one of the options `names`, also as `--name=value` or `-xvalue`."""
     for a in argv:
@@ -81,18 +107,19 @@ def has_option(argv: list[str], *names: str) -> bool:
 
 def claude_launch(argv: list[str], settings: dict) -> tuple[list[str], list[str], str | None]:
     """The argv for the real `claude`, the flags added and the session id the shim set."""
-    if (argv and argv[0] in CLAUDE_COMMANDS) or any(a in CLAUDE_INFO for a in argv):
+    options = claude_options(argv)
+    if (argv and argv[0] in CLAUDE_COMMANDS) or any(a in CLAUDE_INFO for a in options):
         return list(argv), [], None
     added = list(settings.get("flags", []))
-    if "model" in settings and not has_option(argv, "--model"):
+    if "model" in settings and not has_option(options, "--model"):
         added += ["--model", settings["model"]]
-    if "effort" in settings and not has_option(argv, "--effort"):
+    if "effort" in settings and not has_option(options, "--effort"):
         added += ["--effort", settings["effort"]]
     session = None
-    continuation = has_option(argv, *CLAUDE_CONTINUATION)
+    continuation = has_option(options, *CLAUDE_CONTINUATION)
     # Claude refuses --session-id with a continuation unless it forks (design D5).
-    if not has_option(argv, "--session-id") and (
-        not continuation or has_option(argv, "--fork-session")
+    if not has_option(options, "--session-id") and (
+        not continuation or has_option(options, "--fork-session")
     ):
         session = str(uuid.uuid4())
         added += ["--session-id", session]
@@ -133,20 +160,21 @@ def codex_launch(argv: list[str], settings: dict) -> tuple[list[str], list[str],
     """The argv for the real `codex`, the flags added and the engine flags rewritten."""
     command = codex_command(argv)
     name = argv[command] if command is not None else None
-    if any(a in CODEX_INFO for a in argv) or (name is not None and name not in CODEX_SESSIONS):
+    options = codex_options(argv)
+    if any(a in CODEX_INFO for a in options) or (name is not None and name not in CODEX_SESSIONS):
         return list(argv), [], []
     final, rewrites = list(argv), []
-    for i, a in enumerate(argv):
+    for i, a in enumerate(options):
         # The engine's read-only sandbox needs user namespaces the container lacks (design D5).
-        if a in ("-s", "--sandbox") and i + 1 < len(argv) and argv[i + 1] == "read-only":
+        if a in ("-s", "--sandbox") and i + 1 < len(options) and argv[i + 1] == "read-only":
             final[i + 1] = "danger-full-access"
             rewrites.append({"index": i + 1, "from": "read-only", "to": "danger-full-access"})
         elif a in ("--sandbox=read-only", "-sread-only"):
             final[i] = a.replace("read-only", "danger-full-access")
             rewrites.append({"index": i, "from": a, "to": final[i]})
     added = list(settings.get("flags", []))
-    keys = _config_keys(argv)
-    if "model" in settings and "model" not in keys and not has_option(argv, "-m", "--model"):
+    keys = _config_keys(options)
+    if "model" in settings and "model" not in keys and not has_option(options, "-m", "--model"):
         added += ["-c", "model=" + json.dumps(settings["model"])]
     if "effort" in settings and "model_reasoning_effort" not in keys:
         added += ["-c", "model_reasoning_effort=" + json.dumps(settings["effort"])]
@@ -281,8 +309,10 @@ def quiet_send(conn: socket.socket, record: dict) -> None:
 
 
 def connect(path: str, first: dict) -> socket.socket:
-    """Open a connection to the collector and have it accept `first`."""
+    """Open a connection to the collector and have it accept `first`; every later exchange on it
+    times out too, so a stalled collector costs a record (fail closed, D5), never a hang."""
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    conn.settimeout(TIMEOUT)
     try:
         conn.connect(path)
         send(conn, first)
@@ -313,6 +343,18 @@ def fork_watcher(child: int, socket_path: str) -> tuple[int, int]:
         status = 0
     finally:
         os._exit(status)
+
+
+def stop_watcher(pid: int) -> None:
+    """Reap the watcher once it has reported; kill it if it takes longer than TIMEOUT, which
+    leaves the rollouts it had not reported unbound."""
+    deadline = time.monotonic() + TIMEOUT
+    while os.waitpid(pid, os.WNOHANG) == (0, 0):
+        if time.monotonic() > deadline:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            return
+        time.sleep(POLL_SECONDS)
 
 
 def load_settings(cli: str) -> dict:
@@ -366,7 +408,7 @@ def run(cli: str, argv: list[str]) -> int:
     status = child.wait()
     if watcher:
         os.close(watcher[1])
-        os.waitpid(watcher[0], 0)
+        stop_watcher(watcher[0])
     quiet_send(conn, {"kind": "exit", "status": status})
     conn.close()
     return status
@@ -381,9 +423,10 @@ def main() -> None:
     except ShimError as e:
         sys.exit(f"rbench shim ({cli}): {e}")
     if status < 0:  # the CLI died by a signal: die by the same one
-        signal.signal(-status, signal.SIG_DFL)
+        if -status != signal.SIGKILL:  # SIGKILL's disposition cannot be set, nor needs it
+            signal.signal(-status, signal.SIG_DFL)
         os.kill(os.getpid(), -status)
-    sys.exit(status if status >= 0 else 128 - status)
+    sys.exit(status if status >= 0 else 128 - status)  # as a shell does, if still alive
 
 
 if __name__ == "__main__":

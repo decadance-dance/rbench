@@ -14,9 +14,10 @@ contamination audit (#41).
 - Claude: a hook joins its `claude` process with a launch's child. Sources `startup`, `fork` and
   `clear` start a session, so the launch is its origin; `resume` and `compact` continue one.
   A subagent transcript is bound through its session.
-- Codex: the first launch to bind a rollout is its origin, a later one a resume. A child thread
-  (its session_meta names a `parent_thread_id`) is bound when the launch that bound it also bound
-  that parent root thread.
+- Codex: a launch that resumes (`codex resume`, `codex exec resume`) binds a root thread as a
+  resume, any other launch as its origin; a root thread no other launch bound has no origin. A child
+  thread (its session_meta names a `parent_thread_id`) is bound when the launch that bound it also
+  bound that parent root thread.
 """
 
 import json
@@ -136,7 +137,8 @@ def unbound_sessions(records: list[dict], transcripts: Path) -> list[str]:
         elif r["source"] in ORIGIN_SOURCES:
             origins.setdefault(r["session_id"], []).append(launch)
 
-    # Codex: rollout path -> launches that bound it, in order; the first is the origin.
+    # Codex: rollout path -> launches that bound it, in order, and the launches that resume.
+    resumes = {r["launch"] for r in records if r["kind"] == "launch" and _resumes(r)}
     bound: dict[str, list[int]] = {}
     roots: dict[int, set[str]] = {}  # launch -> root thread ids it bound
     for r in records:
@@ -151,7 +153,7 @@ def unbound_sessions(records: list[dict], transcripts: Path) -> list[str]:
     for file in files:
         path = "/" + file.relative_to(transcripts).as_posix()
         if CODEX_ROLLOUT.search(path):
-            problems += _codex_problems(path, file, bound, roots)
+            problems += _codex_problems(path, file, bound, roots, resumes)
         elif m := CLAUDE_ROOT.search(path):
             session = m.group(1)
             if not any(r.get("sessionId") == session for r in _lines(file)):
@@ -169,8 +171,22 @@ def unbound_sessions(records: list[dict], transcripts: Path) -> list[str]:
     return problems
 
 
+def _resumes(launch: dict) -> bool:
+    """Whether a Codex launch resumes a session: `resume` among its arguments before `--`."""
+    # It may also be a prompt or an option's value; that launch then fails closed, as a resume.
+    argv = launch.get("argv") or []
+    return (
+        launch.get("cli") == "codex"
+        and "resume" in argv[: argv.index("--") if "--" in argv else None]
+    )
+
+
 def _codex_problems(
-    path: str, file: Path, bound: dict[str, list[int]], roots: dict[int, set[str]]
+    path: str,
+    file: Path,
+    bound: dict[str, list[int]],
+    roots: dict[int, set[str]],
+    resumes: set[int],
 ) -> list[str]:
     first = next(_lines(file), {})
     meta = first.get("payload") if first.get("type") == "session_meta" else None
@@ -180,7 +196,13 @@ def _codex_problems(
     if not launches:
         return [f"Codex thread {thread} ({path}): no origin launch in the shim log"]
     parent = _find(meta, "parent_thread_id")
-    if parent is not None and not any(parent in roots.get(n, set()) for n in launches):
+    if parent is not None:
+        if any(parent in roots.get(n, set()) for n in launches):
+            return []
         why = f"its parent thread {parent} is not a root thread of launch {launches[0]}"
         return [f"Codex thread {thread} ({path}): {why}"]
-    return []
+    origins = [n for n in launches if n not in resumes]
+    if len(origins) == 1:
+        return []
+    what = f"origin launches {origins}" if origins else f"no origin launch, only resumes {launches}"
+    return [f"Codex thread {thread} ({path}): {what} in the shim log"]

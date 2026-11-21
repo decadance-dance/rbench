@@ -7,10 +7,14 @@ through a real collector needs Linux (SO_PEERCRED, /proc) and runs in CI.
 import importlib.util
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
+import tempfile
+import threading
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -185,6 +189,33 @@ def test_codex_non_session_calls_pass_unchanged(argv):
     assert shim.codex_launch(argv, CODEX | {"model": "m"}) == (argv, [], [])
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["exec", "--skip-git-repo-check", "--", "--sandbox=read-only"],  # the review's repro
+        ["exec", "-o", "out.md", "--", "-s", "read-only"],
+        ["exec", "--", "--help"],
+        ["exec", "--", "-m", "gpt-x", "-c", "model=gpt-x"],
+    ],
+)
+def test_codex_reads_and_rewrites_options_only_never_the_prompt(argv):
+    final, added, rewrites = shim.codex_launch(argv, CODEX | {"model": "gpt-6.2-astra"})
+
+    model = ["-c", 'model="gpt-6.2-astra"']
+    assert (added, rewrites) == ([*CODEX_FLAGS, *model, "--ignore-rules"], [])
+    assert final == [*CODEX_FLAGS, *model, "exec", "--ignore-rules", *argv[1:]]
+
+
+@pytest.mark.parametrize(
+    "argv", [["-p", "--", "--resume"], ["-p", "--", "--version"], ["-p", "--", "--model", "x"]]
+)
+def test_claude_reads_options_only_never_the_prompt(argv):
+    final, added, session = shim.claude_launch(argv, CLAUDE | {"model": "m"})
+
+    assert added == [*CLAUDE_FLAGS, "--model", "m", "--session-id", session]
+    assert final == added + argv
+
+
 def fake_proc(root: Path, processes: dict[int, int], fds: dict[int, dict[str, tuple[str, int]]]):
     """A /proc with `processes` (pid -> ppid) and their open files (fd -> (target, flags))."""
     for pid, ppid in processes.items():
@@ -232,6 +263,11 @@ def test_session_meta_is_read_from_the_first_line(tmp_path):
     assert shim.session_meta(str(rollout)) == {"id": "t1"}
 
 
+LAUNCH = {"kind": "launch", "cli": "codex", "argv": [], "final_argv": [], "added": []}
+REWRITE = {"index": 2, "from": "read-only", "to": "danger-full-access"}
+BINDING = {"kind": "binding", "path": "/s/rollout-a.jsonl", "pid": 3}
+
+
 @pytest.mark.parametrize(
     ("record", "kinds", "error"),
     [
@@ -248,6 +284,15 @@ def test_session_meta_is_read_from_the_first_line(tmp_path):
         ({"kind": "child", "pid": True}, ("child",), "has type bool"),
         ({"kind": "launch", "cli": "c", "argv": [1], "final_argv": [], "added": []}, None, "non-"),
         ([], None, "not a JSON object"),
+        ({"kind": "launch", "cli": "x", "argv": [], "final_argv": [], "added": []}, None, "cli"),
+        ({**LAUNCH, "homes": {"CODEX_HOME": 3}}, None, r"homes\['CODEX_HOME'\] has type int"),
+        ({**LAUNCH, "rewrites": ["x"]}, None, r"rewrites\[0\] is not an object"),
+        ({**LAUNCH, "rewrites": [{**REWRITE, "index": "2"}]}, None, "'index' has type str"),
+        ({**LAUNCH, "rewrites": [REWRITE], "homes": {"CODEX_HOME": None}}, None, None),
+        ({**BINDING, "meta": {"id": 7}}, ("binding",), "meta: field 'id' has type int"),
+        ({**BINDING, "meta": {"instructions": "x"}}, ("binding",), "meta: unknown field"),
+        ({**BINDING, "meta": {"id": "t", "source": ["x"]}}, ("binding",), "'source' has type"),
+        ({**BINDING, "meta": {"id": "t", "source": {"subagent": {}}}}, ("binding",), None),
     ],
 )
 def test_collector_accepts_only_well_formed_records(record, kinds, error):
@@ -259,10 +304,54 @@ def test_collector_accepts_only_well_formed_records(record, kinds, error):
             collector.check(record, kinds)
 
 
-# The launch flow on Linux: a real collector, the shim, a fake CLI and the hook.
+def test_hook_ignores_input_that_is_not_an_event():
+    result = subprocess.run(
+        [sys.executable, "-I", str(LIB / "session_hook.py")],
+        input="[]",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+
+
+def test_managed_files_pin_the_hermetic_policy():
+    """Every managed key, also those no request to the provider stub can show (D5)."""
+    settings = json.loads((LIB.parent / "managed-settings.json").read_text())
+    requirements = tomllib.loads((LIB.parent / "requirements.toml").read_text())
+
+    assert settings == {
+        "autoMemoryEnabled": False,
+        "env": {
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "DISABLE_AUTOUPDATER": "1",
+            "DISABLE_ERROR_REPORTING": "1",
+            "DISABLE_TELEMETRY": "1",
+            "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+        },
+        "hooks": {
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": "/opt/rbench/lib/session_hook.py"}]}
+            ]
+        },
+        "permissions": {"deny": ["WebFetch", "WebSearch"]},
+        "sandbox": {"enableWeakerNestedSandbox": True},
+    }
+    assert requirements == {
+        "allowed_web_search_modes": ["disabled"],
+        "cli_auth_credentials_store": "file",
+    }
+
+
+# The launch flow: a collector, the shim, a fake CLI and the hook. The real collector needs Linux.
 
 FAKE_CLI = """\
 import json, os, subprocess, sys, time
+if "FAKE_SIGNAL" in os.environ:  # die by a signal
+    os.kill(os.getpid(), int(os.environ["FAKE_SIGNAL"]))
 if "FAKE_SESSION" in os.environ:  # a Claude session: run the SessionStart hook under this process
     event = {"session_id": os.environ["FAKE_SESSION"], "source": "startup", "cwd": os.getcwd()}
     hook = [sys.executable, "-c", os.environ["FAKE_HOOK"]]
@@ -285,8 +374,9 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 SHIM = """\
 import sys
 sys.path.insert(0, {lib!r})
-import shim
+import os, shim
 shim.SETTINGS, shim.REAL = {settings!r}, {{"claude": {cli!r}, "codex": {cli!r}}}
+shim.TIMEOUT = float(os.environ.get("SHIM_TIMEOUT", "10"))
 sys.argv[0] = {name!r}
 shim.main()
 """
@@ -435,3 +525,95 @@ def test_shim_fails_closed_without_its_collector(trial):
 
     assert result.returncode == 1 and "cannot reach the collector" in result.stderr
     assert result.stdout == ""  # the CLI never started
+
+
+@linux
+def test_codex_resume_of_a_session_no_shim_started_stays_without_origin(trial):
+    launch, log, home, root = trial
+    launch("codex", "exec", "-", FAKE_THREAD="t1", via_shim=False)  # the real binary by path
+    launch("codex", "exec", "resume", "t1", "-", FAKE_THREAD="t1")  # launch 1 reopens it
+    launch("codex", "exec", "-", FAKE_THREAD="t2")  # launch 2: an origin
+    launch("codex", "exec", "resume", "t2", "-", FAKE_THREAD="t2")  # launch 3: its resume
+
+    records = wait_for_log(log, 15)
+    problems = unbound_sessions(records, transcripts_of(home, root))
+
+    assert [r["launch"] for r in records if r["kind"] == "binding"] == [1, 2, 3]
+    assert len(problems) == 1
+    assert "Codex thread t1" in problems[0] and "no origin launch, only resumes [1]" in problems[0]
+
+
+@pytest.fixture
+def stub(tmp_path):
+    """A collector that answers only the record kinds a test names and holds every connection
+    open, and a way to launch through the shim against it."""
+    folder = Path(tempfile.mkdtemp(prefix="rbench-", dir="/tmp"))  # macOS's short AF_UNIX paths
+    sock = folder / "c.sock"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock))
+    server.listen()
+    answer: set[str] = set()
+    held: list[socket.socket] = []
+
+    def serve() -> None:
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            held.append(conn)
+            line = conn.makefile("rb").readline()
+            if line and json.loads(line)["kind"] in answer:
+                conn.sendall(b'{"ok": true}\n')
+
+    threading.Thread(target=serve, daemon=True).start()
+    settings = folder / "shim.json"
+    settings.write_text(json.dumps({"socket": str(sock), "claude": CLAUDE, "codex": CODEX}))
+    cli = tmp_path / "fake-cli"
+    cli.write_text(f"#!{sys.executable}\n" + FAKE_CLI)
+    cli.chmod(0o755)
+    env = os.environ | {"FAKE_HOME": str(tmp_path / "home"), "SHIM_TIMEOUT": "0.5"}
+
+    def launch(name: str, *argv: str, answers: tuple[str, ...], **extra: str):
+        answer.clear()
+        answer.update(answers)
+        code = SHIM.format(lib=str(LIB), settings=str(settings), cli=str(cli), name=name)
+        started = time.monotonic()
+        result = subprocess.run(
+            [sys.executable, "-c", code, *argv],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env | extra,
+            timeout=20,
+        )
+        return result, time.monotonic() - started
+
+    yield launch
+    server.close()
+    for conn in held:
+        conn.close()
+    sock.unlink()
+    settings.unlink()
+    folder.rmdir()
+
+
+def test_shim_refuses_to_start_the_cli_when_the_collector_does_not_answer(stub):
+    result, seconds = stub("codex", "exec", "-", answers=(), FAKE_THREAD="t1")
+
+    assert result.returncode == 1 and "timed out" in result.stderr
+    assert result.stdout == "" and seconds < 10  # the CLI never started
+
+
+def test_shim_exits_with_the_cli_when_its_watcher_gets_no_answer(stub):
+    result, seconds = stub("codex", "exec", "-", answers=("launch",), FAKE_THREAD="t1")
+
+    assert result.returncode == 0 and seconds < 10
+    assert json.loads(result.stdout)[-2:] == ["--ignore-rules", "-"]
+
+
+@pytest.mark.parametrize("signum", [signal.SIGKILL, signal.SIGTERM])
+def test_shim_dies_by_the_signal_that_killed_the_cli(stub, signum):
+    result, _ = stub("claude", "-p", "hi", answers=("launch",), FAKE_SIGNAL=str(int(signum)))
+
+    assert result.returncode == -signum and result.stderr == ""
