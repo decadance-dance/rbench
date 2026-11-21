@@ -16,6 +16,8 @@ from pathlib import Path
 import pytest
 from conftest import FakeBin
 from test_archive import MIT, commit, git, license_reply
+from test_release import commit as commit_all
+from test_release import creates
 
 from rbench.cli import main
 from rbench.tasks import MANIFEST_FILE, load_task_set
@@ -32,6 +34,7 @@ from rbench.tasks.ours import (
     read_labels,
     write_label_sheet,
 )
+from rbench.tasks.release import publish_release
 
 NWO = "acme/widget"
 API = f"repos/{NWO}"
@@ -326,7 +329,19 @@ def test_acted_on_human_comments_become_items_with_their_source(w: World) -> Non
     assert data["source"]["severity_map"] == SEVERITY_MAP
     assert data["source"]["severity_rule"] == SEVERITY_RULE
     assert data["source"]["severity_labels"] == "rule"
-    assert list(w.archives.glob(f"{pr.task_id}-*.bundle"))
+    assert (w.archives / f"{task.archive_sha256}.bundle").is_file()
+
+
+def test_import_archive_dir_passes_the_release_preflight(w: World) -> None:
+    w.run()
+    commit_all(w.set_dir.parent)
+    w.fake.scenario("gh")  # no release, draft or tag of this version yet
+
+    publish_release(w.set_dir, "ours", w.archives)
+
+    [create] = creates(w.fake)
+    [task] = load_task_set(w.set_dir, "ours")[1]
+    assert create["argv"][3] == f"{task.archive_sha256}.bundle"
 
 
 def test_same_window_again_writes_nothing(w: World) -> None:
