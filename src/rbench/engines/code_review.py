@@ -121,7 +121,7 @@ def report(stdout: str, where: str) -> str:
     # offline with Claude Code 2.1.316): no review ran, and a blank result is no clean review.
     if not _made_a_model_call(result.get("modelUsage")):
         raise CodeReviewOutputError(
-            f"{where}: the session made no model call: modelUsage lists no model with token counts"
+            f"{where}: modelUsage is missing, malformed or shows no output tokens: no review ran"
         )
     text = result.get("result")
     if not isinstance(text, str):

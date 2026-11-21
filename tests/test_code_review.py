@@ -183,15 +183,39 @@ def test_a_blank_report_has_no_findings_and_runs_no_normalizer(fake_bin, tmp_pat
         ('{"type": "result", "type": "result"}', "not one JSON object"),
         (session_result(is_error=True, subtype="error_during_execution"), "error_during_execution"),
         (session_result(subtype=SECRET), "an unknown subtype"),
-        (session_result(modelUsage={}), "made no model call"),
-        (session_result(modelUsage={"claude-sonnet-5-5": None}, result=""), "made no model call"),
-        (session_result(modelUsage={"claude-sonnet-5-5": {}}), "made no model call"),
-        (session_result(modelUsage={SECRET: {"inputTokens": 1}}), "made no model call"),
-        (session_result(modelUsage={" ": MODEL_USAGE["claude-sonnet-5-5"]}), "made no model call"),
-        (session_result(modelUsage=_usage(outputTokens=0)), "made no model call"),
-        (session_result(modelUsage=_usage(inputTokens=-1)), "made no model call"),
-        (session_result(modelUsage=_usage(inputTokens=1.0)), "made no model call"),
-        (session_result(modelUsage=_usage(inputTokens=True)), "made no model call"),
+        (session_result(modelUsage={}), "modelUsage is missing, malformed or shows no output"),
+        (
+            session_result(modelUsage={"claude-sonnet-5-5": None}, result=""),
+            "modelUsage is missing, malformed or shows no output",
+        ),
+        (
+            session_result(modelUsage={"claude-sonnet-5-5": {}}),
+            "modelUsage is missing, malformed or shows no output",
+        ),
+        (
+            session_result(modelUsage={SECRET: {"inputTokens": 1}}),
+            "modelUsage is missing, malformed or shows no output",
+        ),
+        (
+            session_result(modelUsage={" ": MODEL_USAGE["claude-sonnet-5-5"]}),
+            "modelUsage is missing, malformed or shows no output",
+        ),
+        (
+            session_result(modelUsage=_usage(outputTokens=0)),
+            "modelUsage is missing, malformed or shows no output",
+        ),
+        (
+            session_result(modelUsage=_usage(inputTokens=-1)),
+            "modelUsage is missing, malformed or shows no output",
+        ),
+        (
+            session_result(modelUsage=_usage(inputTokens=1.0)),
+            "modelUsage is missing, malformed or shows no output",
+        ),
+        (
+            session_result(modelUsage=_usage(inputTokens=True)),
+            "modelUsage is missing, malformed or shows no output",
+        ),
         (session_result(modelUsage=_usage(inputTokens=float("nan"))), "not one JSON object"),
         (session_result(cost=float("inf")), "not one JSON object"),
         (session_result(result=None), "has no text"),
