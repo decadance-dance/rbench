@@ -691,6 +691,11 @@ def test_result_file_that_does_not_match_done_is_rejected(tmp_path: Path) -> Non
         ([FINDING], usage(input=-1), r"engine usage of model 'input': expected exactly"),
         ([FINDING], usage(m=COUNTS | {"output": -1}), r"'m': output: expected a token count"),
         ([FINDING], usage(m=COUNTS | {"output": 1.5}), r"'m': output: expected a token count"),
+        (
+            [FINDING],
+            usage(m=COUNTS | {"input": 2**53}),
+            r"'m': input: expected a token count from 0 below 2\*\*53",
+        ),
         ([FINDING], usage(**{"": COUNTS}), r"model '': expected a model"),
         ([FINDING], USAGE | {"normalization": []}, r"usage\.normalization must be an object"),
         (
@@ -737,6 +742,11 @@ def test_invalid_results_are_rejected_whole(tmp_path: Path, findings, usage, mes
                 b' "incomplete": {"engine": [], "normalization": []}}'
             ),
             r"engine usage of model 'm': expected exactly",
+        ),
+        (
+            b"[]",
+            json.dumps(USAGE | {"engine": {"m": COUNTS | {"input": 2**53}}}).encode(),
+            r"engine usage of model 'm': input: expected a token count from 0 below 2\*\*53",
         ),
         (b'[{"file": "a", "file": "b"}]', b"{}", r"findings.json: not valid JSON"),
     ],

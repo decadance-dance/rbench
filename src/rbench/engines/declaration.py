@@ -207,8 +207,17 @@ def load_engine(path: Path) -> Engine:
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise DeclarationError(f"{path}: not a valid UTF-8 TOML file: {e}") from e
     engine = parse_engine(data, str(path))
+    # The adapters import this module.
     if engine.name == "plain":
-        from rbench.engines.plain import bind  # plain imports this module
+        from rbench.engines.plain import bind
 
         engine = bind(engine, Path(path).parent)
+    elif engine.name == "rreview":
+        from rbench.engines.rreview import bind
+
+        engine = bind(engine, Path(path).parent)
+    elif engine.name == "code-review":
+        from rbench.engines import code_review  # it imports this module
+
+        engine = code_review.bind(engine, str(path))
     return engine

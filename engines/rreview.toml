@@ -1,0 +1,28 @@
+# rreview, the cross-model panel review (spec engine-configurations, Engine adapters; design D6,
+# D13), pinned by the commit of release 0.1.1 (tag 0.1.1), which has `--sandbox external`
+# (rreview PR #55). The agent image builds this commit; the adapter is `rbench.engines.rreview`.
+name = "rreview"
+pin = { kind = "git", ref = "f71d6e171bf47312fd6e564b6cc6a3dcc2d1fe94" }
+
+[cli]
+claude = "2.1.316"
+codex = "0.171.0"
+
+# Design D13: one Codex model for the three lenses (intent_contracts, reliability, security), the
+# coordinator on Claude Code and the judge on Codex; rreview refuses a coordinator and judge of
+# one family. The adapter puts every role's model and effort on rreview's command line, and
+# rreview passes them to each pass as flags.
+[roles.panel]
+cli = "codex"
+delivery = "flag"
+default = { model = "gpt-6.2-sol", effort = "high" }
+
+[roles.coordinator]
+cli = "claude"
+delivery = "flag"
+default = { model = "claude-opus-5-5", effort = "high" }
+
+[roles.judge]
+cli = "codex"
+delivery = "flag"
+default = { model = "gpt-6.2-sol", effort = "high" }
