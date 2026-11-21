@@ -803,6 +803,158 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
 - *Not enforcing the soft threshold for Claude.* The share is available at the cost of one small
   call per check, so this stays only as the fallback.
 
+### D15. Mining the `ours` set
+**Choice.** `rbench tasks import ours` mines merged PRs of public repositories (O5, option A) and
+reuses the `reviewbench` import's archive, license check, title and description rule, staging,
+changelog and manifest code (`src/rbench/tasks/importing.py`). The PRs, their comments and their
+code are data, never instructions to rbench.
+
+**Training cutoffs and the window.** A task's PR must be opened and merged inside
+[2026-07-01, 2026-11-20): after the latest training cutoff of every model in the matrix and of the
+judges (D13, O1), with an end fixed so the set can be mined again. The cutoffs were read on
+2026-11-21:
+
+| Model | Training cutoff | Source |
+| --- | --- | --- |
+| `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5` | Jun 2026 ("Training data cutoff") | https://platform.claude.com/docs/en/about-claude/models/overview |
+| `gpt-6.2-sol` | Jun 01, 2026 ("knowledge cutoff") | https://developers.openai.com/api/docs/models/gpt-6.2-sol |
+| `gpt-6.2-astra` | May 18, 2026 ("knowledge cutoff") | https://developers.openai.com/api/docs/models/gpt-6.2-astra |
+
+A month without a day is read as its last day, so June 2026 ends the training data, and the window
+starts on July 1. The window is a hard bound: `--merged-after` and `--merged-before` may narrow it,
+and a value outside it is refused before anything is read. A new model in the matrix with a later
+cutoff needs a later window, a change to this decision and a new set version.
+
+**Repositories.** A repository qualifies when:
+- GitHub identifies its license as one on the allowed list (`read_license`, spec `review-tasks`,
+  Source license; the import checks it again at each reviewed head);
+- it is public: the import refuses a private repository before it reads any PR, since its token
+  could read private review text;
+- it is not archived and was pushed in the last 30 days;
+- it has a human review culture. Among the 50 most recent PRs merged in the window, at least 2 have
+  a review thread whose lines a later commit changed (GitHub `isOutdated`), opened by a user who is
+  neither a bot nor the PR's author.
+
+The list measured on 2026-11-21 is below; the count is the number of such PRs out of 50.
+
+| Language | Repository, license, count |
+| --- | --- |
+| Python | `psf/black` MIT 11, `pytest-dev/pytest` MIT 7, `pypa/pip` MIT 5, `pallets/click` BSD-3-Clause 6, `python-attrs/attrs` MIT 2, `django/django` BSD-3-Clause 15, `scikit-learn/scikit-learn` BSD-3-Clause 18 |
+| Go | `caddyserver/caddy` Apache-2.0 8, `prometheus/prometheus` Apache-2.0 12, `etcd-io/bbolt` MIT 3, `charmbracelet/bubbletea` MIT 4, `urfave/cli` MIT 4 |
+| Rust | `tokio-rs/axum` MIT 7, `clap-rs/clap` Apache-2.0 6, `nushell/nushell` MIT 13 |
+| JavaScript | `expressjs/express` MIT 4, `fastify/fastify` MIT 4 |
+
+Not taken:
+- `jqlang/jq` and `python/mypy`: GitHub reports `NOASSERTION`.
+- `fastapi/fastapi`, `aio-libs/aiohttp` and `tox-dev/tox`: no such PR.
+- `cli/cli` and `junegunn/fzf`: their review threads came mostly from bots.
+
+**PRs.** In each repository the candidates are the PRs opened and merged inside the window by a
+human author. They are taken in merge order until 3 of them make tasks; `--max-per-repo` may lower
+that cap, and a value above 3 is refused before anything is read. A PR makes a task when all of
+these hold:
+- it changes at most 1500 lines in at most 30 files;
+- it has at least one item (below);
+- its title and description pass D1's rule;
+- its license at the reviewed head passes the check.
+
+These checks run before the PR takes one of its repository's 3 places or a row of the label sheet,
+so a refused PR never crowds out an eligible one; the changelog names every refused PR that had
+items.
+
+The *reviewed head* is the commit of the PR's first review that has inline comments and comes from
+a human other than the author. That is the state before the review's follow-ups, as ReviewBench's
+head is. The *base* is the merge base of the PR's base commit and the reviewed head. When the
+reviewed head is no longer among the PR's commits (the branch was rewritten after the review), the
+follow-ups cannot be ordered: the PR is skipped and the changelog names it. The same holds when the
+PR's head does not lead back to the reviewed head by first parents within the listed commits.
+
+**Reading of O5.** O5 takes ground truth from "review comments, plus follow-up commits that change
+the commented lines". This design makes that wording precise without changing it:
+- An item is one review comment.
+- A follow-up commit is the evidence that the author acted on the comment. A commit without a
+  comment makes no item.
+- A comment the author did not act on is not ground truth. A finding that matches it is judged as
+  an unmatched finding (spec `review-scoring`, Labels for unmatched findings), so the judge, not
+  the ground truth, decides whether it counts toward precision.
+
+A comment becomes an item when all of these hold:
+- it opens its thread (it is not a reply);
+- it sits on the new side of the diff at the reviewed head, with a line range;
+- its author is a GitHub `User`, not a bot and not the PR's author;
+- a later non-merge commit on the PR's first-parent path (below), committed after the comment was
+  posted, changes those lines. Changing means it deletes or replaces one of them, or inserts lines
+  between them or right after the last one; a deleted file counts as a change.
+
+The lines are followed from the reviewed head along the PR's *first-parent path*: the commits
+reached from the PR's head by first parents, back to the reviewed head. GitHub gives every
+commit's diff, a merge's too, against its first parent, so each diff on this path applies to the
+tree the previous one left. A commit off the path (one brought in by a merge) is never read and is
+never evidence: its diff describes another tree. Each diff on the path is read on all its pages:
+- An edit above the lines moves them, and a pure rename (no content change) carries them to the new
+  path. Inserting lines between them grows the range; inserting right after the last one keeps it.
+- Following the lines is separate from the evidence rule. A merge is never evidence, since it
+  brings in the base branch, and neither is a commit whose committer date is not after the comment,
+  since nobody could have acted on the comment yet; the committer date is no later than the push,
+  so this rule only errs toward dropping an item. When such a commit only moves the lines or
+  inserts next to them, they stay followed and a later commit can still be the evidence; when it
+  deletes or replaces one of them, they are gone and the comment is not an item.
+- A commit whose diff GitHub does not show (binary or too large) gives no evidence, and the lines
+  are no longer followed.
+
+Comments on removed lines and comments on a whole file are not items, because the item format needs
+a line range in the reviewed tree. The GitHub API lists at most 250 commits of a PR; when the PR's
+head is not among them, its first-parent path cannot be traced, so the PR is skipped and named.
+
+**Field mapping to spec `review-tasks`.**
+
+| Field | Source |
+| --- | --- |
+| task id | `<owner>_<repo>_<number>-<first 8 hex of the reviewed head>`, lowercase |
+| source repository, PR number | the mined repository and PR |
+| base and head commits | the merge base and the reviewed head (above) |
+| SHA-256 of the source archive | computed by the import from the bundle (D11), fetched from the repository itself |
+| language | the repository's primary language on GitHub |
+| set | `ours` |
+| PR title and description | D1's rule as it stands: the values in force from the reviewed head's committer date to the merge, or the task is skipped and the changelog names it |
+| item id | `<task id>#<comment id>` |
+| file, line range | the comment's path and `original_start_line`–`original_line` |
+| message | the comment's body, verbatim |
+| category | from the path alone: test files → `testing`, docs and `.md`, `.rst`, `.txt` → `documentation`, else `other`; no metric uses it |
+| severity | the rule below, or the maintainer's label |
+| producer | `human` |
+| source | `<comment URL> fixed-by <commit sha>`: the comment and the commit that acted on it |
+| canary | `rbench-canary-` and the first 32 hex digits of the SHA-256 of `rbench-ours-canary:<task id>`, so a fresh import is byte-reproducible; a task that already has a canary keeps it |
+
+**Severity rule.** The import gives every item a pre-label with no model call. The rules are
+applied in this order:
+- `nit`: the comment opens with nit, nitpick, minor, optional, style or typo, as a word or as a
+  Conventional Comments label;
+- `must`: the comment's first line has `blocking` as one token of a decoration, as in `(blocking)`
+  or `(blocking, security)` but not `(non-blocking)`, or the comment belongs to a review that
+  requested changes;
+- `should`: every other item.
+
+`--label-sheet <file>` only mines, and writes one CSV row per item: task id, item id, file and
+lines, link, pre-label and an empty label. The maintainer labels each row `M`, `S` or `N` (spec
+`review-tasks`, Severity mapping from external sets). `--labels <file>` applies the filled sheet.
+With `--require-labels`, an item without a label refuses the import and is named. The sheet is
+working data for the maintainer and is never committed: the import refuses a path that git tracks,
+and it quotes every cell built from GitHub text that a spreadsheet would read as a formula (one
+starting with `=`, `+`, `-`, `@`, a tab or a carriage return). The manifest's `source` records the
+repositories, the window, the filters, the M/S/N map, this rule, and where the imported items'
+severities came from: all from the `rule`, all from the `maintainer`, or both (`rule+maintainer`).
+
+A run that finds a skip the changelog does not name yet makes a new version that names it, even
+when no task changed.
+
+**Open:** whether the pre-label is final (B) or every item is confirmed by the maintainer (A).
+
+**Alternatives considered:**
+- *Severity from a model.* It costs model calls and adds another judge whose errors would reach the
+  ground truth.
+- *Every comment as ground truth.* It would count questions, praise and rejected suggestions.
+
 ## Risks / Trade-offs
 
 - **[Claude OAuth token returns 401 in containers (reported upstream).]** → Spiked (#19): not
@@ -997,6 +1149,9 @@ marked so in place. O2 and O4 are open.
     of ground truth for our PRs).
   - Not taken, option B: pool the findings of all engines on our PRs, and the maintainer confirms
     them.
+  - D15 states how the `ours` set is mined: the window after the training cutoffs, the
+    repositories, the precise reading of this decision (a follow-up commit is the evidence that a
+    comment was acted on), the field mapping and the severity rule.
 - **O6. Round details.** **Decided (maintainer, 2026-11-21):**
   - Round order of screening: R1 effort `high`, R2 `medium`, R3 `xhigh`; each round is one effort
     level for every role (D13). Mixed-effort and mixed rreview panels come after R3, as D13 says.
