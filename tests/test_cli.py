@@ -33,7 +33,7 @@ def test_bad_command_line_exits_2(argv):
     assert exit_.value.code == ExitCode.USAGE == 2
 
 
-@pytest.mark.parametrize("argv", [["run", "--wait"], ["tasks", "fetch"], ["publish"]])
+@pytest.mark.parametrize("argv", [["resume"], ["tasks", "fetch"], ["publish"]])
 def test_stubs_fail_as_not_implemented(argv, capsys):
     assert main(argv) == ExitCode.ERROR
     assert "not implemented yet" in capsys.readouterr().err

@@ -7,7 +7,10 @@ import argparse
 import sys
 from enum import IntEnum
 from importlib.metadata import version
+from pathlib import Path
 
+from rbench.ledger import load_plan, start_run
+from rbench.plan import command as plan_command
 from rbench.tasks import reviewbench
 
 
@@ -61,7 +64,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, help_ in COMMANDS:
         sub = commands.add_parser(name, help=help_, description=help_, **common)
+        if name == "plan":
+            plan_command.add_arguments(sub)
         if name == "run":
+            sub.add_argument("matrix", type=Path, help="the matrix file")
+            sub.add_argument("--round", required=True, help="the matrix round to run")
+            sub.add_argument(
+                "--images",
+                type=Path,
+                required=True,
+                help="JSON file: per engine, its image by digest and the CLI versions in it",
+            )
+            sub.add_argument(
+                "--engines",
+                type=Path,
+                default=Path("engines"),
+                help="engine declarations (default: engines)",
+            )
+            sub.add_argument(
+                "--tasks", type=Path, default=Path("tasks"), help="task sets (default: tasks)"
+            )
+            sub.add_argument(
+                "--runs", type=Path, default=Path("runs"), help="run directories (default: runs)"
+            )
+            sub.add_argument(
+                "--run-id", help="the run directory's name (default: UTC time, stage, round)"
+            )
             sub.add_argument(
                 "--wait",
                 action="store_true",
@@ -70,11 +98,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _run(args: argparse.Namespace) -> int:
+    try:
+        run_dir = start_run(
+            args.matrix,
+            args.round,
+            images_path=args.images,
+            engines_dir=args.engines,
+            tasks_root=args.tasks,
+            runs_dir=args.runs,
+            run_id=args.run_id,
+        )
+        trials = len(load_plan(run_dir).trials)
+    except (OSError, ValueError) as e:
+        print(f"rbench run: {e}", file=sys.stderr)
+        return ExitCode.ERROR
+    print(f"created {run_dir}: {trials} trials pending")
+    print("rbench run: the trial executor is not implemented yet", file=sys.stderr)
+    return ExitCode.ERROR
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "tasks" and args.task_command == "import":
         return reviewbench.run(args)
+    if args.command == "plan":
+        return plan_command.run(args)
+    if args.command == "run":
+        return _run(args)
     name = " ".join(filter(None, [args.command, getattr(args, "task_command", None)]))
     print(f"rbench {name}: not implemented yet", file=sys.stderr)
     return ExitCode.ERROR
