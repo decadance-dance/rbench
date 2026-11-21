@@ -463,6 +463,23 @@ measure a different task from the engines, which all read the repository.
   | `rreview` | panel × coordinator × judge | 2 × 3 × 2 |
   | **Total** | | **33** |
 
+- `codex-review` runs the built-in review from the `reviewed` checkout:
+
+  ```sh
+  codex exec -m "$model" -c "model_reasoning_effort=$effort" --sandbox danger-full-access \
+    --json -o "$review_text" review --base base
+  ```
+
+  The D5 shim supplies the hermetic flags. Inside Docker, the container is the sandbox (D6).
+  The inner Linux sandbox could not create a user namespace in the spike. The top-level
+  `codex review` also runs headless. The `exec review` form exposes both capture options and
+  reaches the same `review/start` handler as the TUI.
+- Capture stdout JSONL and the final text file for diagnostics. The final
+  `item.completed` event with `item.type = "agent_message"` contains the same rendered review as
+  `-o`. Keep session persistence on and normalize the structured findings from the parent rollout
+  in `$CODEX_HOME/sessions/`. Its `event_msg` record has `payload.type = "item_completed"`,
+  `payload.item.type = "ExitedReviewMode"`, and `payload.item.review_output` with the findings,
+  including each finding's priority and file/line range.
 - review-council: the Claude side is the main session (orchestrator and judge) plus the subagents
   `reviewer-claude`, `reviewer-security` and the Claude verifier, all `model: inherit`, so the
   session's `--model` and `--effort` set them. The Codex side is the Codex reviewer and verifier,
@@ -573,8 +590,10 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
 
   So rbench never copies `auth.json`. There is one login file in a directory-mounted login home,
   and Codex refreshes it in place.
-- **[`codex-review` may not run non-interactively.]** → Codex's built-in review is a TUI command;
-  the spike finds a non-interactive way to run it. Without one, `codex-review` leaves the matrix.
+- **[Headless `codex-review` execution and capture.]** → Confirmed in #22 with Codex CLI 0.171.0
+  on Linux arm64. The D13 command ran without a TTY, used D5's directory-mounted login and returned
+  one structured finding on the changed line of a synthetic two-commit repository. The D3 proxy
+  remains a smoke check.
 - **[Claude Code reports its used share only on stream-json stdout (spike #23).]** → The runner
   reads it from its own calls and a throttled probe (D14). When no reading is available, the soft
   threshold is not enforced for Claude for that check, the run log says so, and the round budget is
