@@ -267,15 +267,22 @@ server or build step, and opens from disk as the spec requires.
     and remove every one named for a trial of the run before any trial starts.
   - The engine runs under coreutils `timeout` inside the agent: on the limit, the engine's process
     group gets TERM and, 30 seconds later, KILL, so the shims still log each CLI's exit before
-    the audit reads the log. A shell wrapper around `timeout` ends the engine's stderr with its
-    own line, the exit status and the seconds spent inside the agent. The trial is `failed` with
-    reason `timeout` when that status is `timeout`'s (124, or 137 after KILL) and the time reached
-    the limit; time Docker spends outside the agent does not count. With no such line, the launch
-    never completed in the agent, and the attempt is an infrastructure error. The host waits for
-    `docker compose exec` at most the limit plus 90 seconds, then treats it as one too.
+    the audit reads the log. A shell wrapper runs `timeout -v` with `timeout`'s own stderr in a
+    file and the engine's on the real stderr, and ends stderr with its own line: the outcome and
+    the status. The outcome is `timeout` when `timeout` reported sending a signal (the trial is
+    `failed` with reason `timeout`), `start` when the engine is not an executable on `PATH` or
+    `timeout` reported failing to run it (an infrastructure error), and `exit` otherwise, the
+    engine's own status, 124 included. With no such line, the launch never completed in the
+    agent: an infrastructure error too. The host waits for `docker compose exec` at most the
+    limit plus 90 seconds, and for `docker compose down` at most 120 seconds, then treats the
+    call as an infrastructure error.
   - A Codex trial holds an exclusive `flock` on its login home directory from before its project
     starts until it is removed, so trials of any runner on the host that share the login run one
-    after the other.
+    after the other. An agent that mounts a login carries the label `rbench.codex-login`, a hash
+    of the login's path. Under the lock, before it starts, a trial lists running agents with
+    that label: another project's agent means a runner died or failed to remove its project
+    while that agent may still hold the login, so the run stops and names that project, which
+    its own run removes.
 
 **Alternatives considered:**
 - *Anthropic's devcontainer firewall (iptables).* It allows GitHub and port 22, and resolves domains
