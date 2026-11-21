@@ -8,9 +8,10 @@ repository (spec trial-isolation, Scrubbed repository):
 
 The bundle holds those two branches and the objects they reach, nothing else: no remotes, tags,
 reflog or earlier history, as none of these travel in a bundle. Both commits have a fixed author,
-committer, date and message, and every delta is recomputed from those two commits, so the same
-base and head give the same commit ids and, with the same git version, the same bundle bytes,
-however the source packed its objects.
+committer, date and message, and every object is recompressed and every delta recomputed from those
+two commits, so the same base and head give the same commit ids and the same bundle bytes, however
+the source packed or compressed its objects (checked with git 2.39 and 2.44, zlib 1.2.12 and 1.2.13;
+another deflate implementation, such as zlib-ng, may give other bytes).
 
 Git runs with no system or user configuration and no inherited `GIT_*` variables, so the
 operator's settings (URL rewrites, identities, hooks) cannot change what is fetched or built.
@@ -96,9 +97,10 @@ def build_archive(
         reviewed = git("commit-tree", f"{head}^{{tree}}", "-p", base_commit, "-m", "reviewed")
         git("update-ref", "refs/heads/base", base_commit)
         git("update-ref", "refs/heads/reviewed", reviewed)
-        # Recompute every delta from the two commits alone, single-threaded, so the bundle bytes do
-        # not depend on how the source happened to pack its objects.
-        git("repack", "-a", "-d", "-f", "-q", "--window=10", "--depth=50")
+        # Recompress every object and recompute every delta (-F, not -f, which keeps the source's
+        # zlib bytes), single-threaded, so the bundle bytes do not depend on how the source packed
+        # or compressed its objects.
+        git("repack", "-a", "-d", "-F", "-q", "--window=10", "--depth=50")
         bundle = Path(tmp) / "source.bundle"
         git("bundle", "create", "--quiet", str(bundle), "refs/heads/base", "refs/heads/reviewed")
         with bundle.open("rb") as f:

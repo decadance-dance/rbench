@@ -811,6 +811,11 @@ anywhere.
 - Archives of public sets are GitHub release assets, one release per set version.
   `rbench tasks fetch` downloads them and checks each SHA-256 against the manifest.
 - Archives of hidden tasks live next to the tasks in the hidden directory.
+- Archive bytes are canonical: the same base and head trees give the same bundle bytes, however
+  the source packed or compressed its objects (`build_archive` repacks with `-F`). ReviewBench
+  version 1 was built before this, with `-f`, which kept the source's compressed bytes: a rebuild
+  gives different bytes for 10 of its 14 archives. Its released archives stay valid, as fetch
+  checks them against the manifest; a re-import would make a new version.
 
 **Alternatives considered:**
 - *Bundles committed to git.* They bloat every clone, and history keeps old versions forever.
