@@ -352,14 +352,15 @@ not stdout (engines own stdout, D7):
   - Claude Code 2.1.316: the transcript's synthetic assistant message has `error: "rate_limit"`,
     `apiErrorStatus: 429` and `apiError: "usage_limit_reached"`.
   - Codex CLI 0.171.0: the rollout's `task_complete` has `error.codex_error_info:
-    "usage_limit_exceeded"`. Codex also uses this code for `usage_not_included` and
-    `insufficient_quota`.
+    "usage_limit_exceeded"`. Inferred from the pinned source, not observed in the spike: Codex
+    also maps `usage_not_included` and `insufficient_quota` to this code.
 - **Terminal rate limit.**
   - Claude: `error: "rate_limit"` with `apiErrorStatus: 429` and no `apiError` ("not your usage
     limit"). This holds even when the record says `apiErrorIsTransient: true`: the record ends the
     turn, so the CLI has given up.
   - Codex: `codex_error_info.response_too_many_failed_attempts.http_status_code: 429`, recorded
-    after retries run out, or `rate_limit_exceeded`.
+    after retries run out. `codex_error_info: "rate_limit_exceeded"` (a rate limit inside the
+    response stream) is inferred from the pinned source's error enum, not observed in the spike.
 
 Both kinds are a limit under spec `run-ledger` (Limit detection and stop; Waiting for the limit to
 reset). The trial becomes `interrupted` and keeps its tokens as wasted. By default the runner drains
@@ -519,7 +520,7 @@ transcripts it keeps for D7. D3 and D5 do not change. The reading:
 **Choice for Claude: runner-owned readings with a throttled probe.** Engines own stdout (D7), so the
 runner reads Claude's share only from stream-json output of its own calls:
 - *Free readings:* first those from calls it makes anyway (the judge, any runner-owned
-  `claude -p`).
+  `claude -p`). The validity rule under *Outcomes* applies to them too.
 - *When it probes:* before a Claude trial starts and there is no reading yet, or the newest is
   older than N minutes (default 10, configurable), the runner makes one minimal probe call
   (`haiku`, "Reply OK"). Probes are throttled per login by the last attempt, successful or not: no
@@ -527,9 +528,12 @@ runner reads Claude's share only from stream-json output of its own calls:
 - *How the probe runs:* it is runner-owned and runs like a trial under D3 and D5: the managed
   policy, the benchmark login, the proxy and an empty workspace with no task input. The runner owns
   its stdout. Its tokens are run overhead, never attributed to a trial.
-- *Outcomes:* a `rate_limit_event` is a reading. A failed probe, or one with no event, leaves the
-  soft threshold unenforced for Claude for that check, and the run log says so (the fallback in
-  Risks). A typed hard limit in the probe (D8: usage limit or terminal rate limit) goes to the limit
+- *Outcomes:* a `rate_limit_event` refreshes the reading only when it carries a valid window
+  utilization (a number in `unifiedWindows.five_hour` or `seven_day`). Any of these leaves the soft
+  threshold unenforced for Claude for that check, and the run log says so (the fallback in Risks):
+  - a failed probe;
+  - a probe with no event;
+  - an event without a valid utilization. A typed hard limit in the probe (D8: usage limit or terminal rate limit) goes to the limit
   handler like a trial's.
 
 The probe was not run as a runner step in the spike; one equivalent manual call produced the event.
