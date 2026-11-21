@@ -35,6 +35,9 @@ nothing.
 
 A round's providers are those its configurations run on plus those with a non-zero normalization
 or judge estimate; each needs a budget in the round, or planning refuses the round.
+
+A structured configuration has no normalization estimate, whatever the smoke run measured: only a
+Markdown engine's trials run the normalizer (design D9).
 """
 
 import json
@@ -208,7 +211,18 @@ def default_estimate(config: Configuration) -> Tokens:
 
 
 def trial_estimate(config: Configuration, smoke: SmokeMedians | None) -> tuple[Tokens, str]:
-    """The per-trial estimate of `config` and its source: `smoke`, `smoke: <id>` or `DEFAULT`."""
+    """The per-trial estimate of `config` and its source: `smoke`, `smoke: <id>` or `DEFAULT`.
+
+    A structured configuration runs no normalization step, so a measured normalization median,
+    from a smoke run made while its engine was Markdown, does not apply to it.
+    """
+    tokens, source = _measured_estimate(config, smoke)
+    if not config.markdown:
+        tokens = tokens | {"normalization": {}}
+    return tokens, source
+
+
+def _measured_estimate(config: Configuration, smoke: SmokeMedians | None) -> tuple[Tokens, str]:
     if smoke is not None and config.id in smoke.configurations:
         return smoke.configurations[config.id][1], "smoke"
     measured = smoke.for_engine(config.engine) if smoke is not None else None

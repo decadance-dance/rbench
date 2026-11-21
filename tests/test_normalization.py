@@ -21,7 +21,7 @@ from rbench.engines.normalization import (
 )
 from rbench.ledger import PLAN_FILE, LedgerError, create_run, load_plan, store_results
 from rbench.matrix.expansion import MatrixError
-from rbench.plan.estimate import default_estimate
+from rbench.plan.estimate import SmokeMedians, default_estimate, trial_estimate
 from rbench.trial import TrialProject
 
 AGENT = "rbench-agent@sha256:" + "a" * 64
@@ -453,6 +453,36 @@ def test_the_default_estimate_follows_the_output_kind_not_the_engine_name():
         engines_ = engines() | {"report": parse_engine(structured | {"output": output}, "e")}
         (config,) = configs(entry, engines_=engines_)
         assert default_estimate(config)["normalization"] == want
+
+
+def test_a_smoke_normalization_median_does_not_apply_to_a_structured_configuration():
+    report = {
+        "name": "report",
+        "pin": {"kind": "git", "ref": COMMIT},
+        "cli": CLI,
+        "roles": {"reviewer": flag("claude-opus-5-5", "high")},
+    }
+    entry = {"engine": "report", "default": True}
+
+    def config(output: str):
+        engines_ = engines() | {"report": parse_engine(report | {"output": output}, "e")}
+        (c,) = configs(entry, engines_=engines_)
+        return c
+
+    markdown, structured = config("markdown"), config("structured")
+    # Measured while the engine was Markdown: 1,000 engine, 30,000 normalization, 100 judge.
+    measured = {
+        "engine": {"claude": 1000},
+        "normalization": {"claude": 30000},
+        "judge": {"claude": 100},
+    }
+    for config_id in (markdown.id, structured.id):  # by engine, and by the same id
+        smoke = SmokeMedians("smoke.json", {config_id: ("report", measured)})
+        tokens, _ = trial_estimate(structured, smoke)
+        assert tokens == measured | {"normalization": {}}
+        assert sum(n for kind in tokens.values() for n in kind.values()) == 1100
+    smoke = SmokeMedians("smoke.json", {markdown.id: ("report", measured)})
+    assert trial_estimate(markdown, smoke) == (measured, "smoke")
 
 
 def markdown_plan(tmp_path: Path):
