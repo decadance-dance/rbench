@@ -210,10 +210,19 @@ server or build step, and opens from disk as the spec requires.
 ### D5. Managed configuration enforces the hermetic policy; shims log
 **Choice.**
 - The policy lives in each CLI's managed configuration inside the image:
-  `/etc/claude-code/managed-settings.json` for Claude Code, and `/etc/codex/managed_config.toml` or
-  `requirements.toml` for Codex (whichever the pinned Codex version enforces; spike item). An agent
-  with a shell can start the real binary by absolute path and skip any shim, but not the managed
-  configuration.
+  `/etc/claude-code/managed-settings.json` for Claude Code, and `/etc/codex/requirements.toml` for
+  Codex. An agent with a shell can start the real binary by absolute path and skip any shim, but
+  not the managed configuration.
+- Codex managed files, tested with Codex CLI 0.171.0 (spike #20):
+  - `requirements.toml` sets allowed values, and Codex enforces them over the user `config.toml`
+    and `-c` flags. With `allowed_web_search_modes = ["disabled"]`, a user `web_search = "live"`
+    and `-c web_search="live"` both fell back to `disabled`, with a startup warning that names the
+    file. A `[features]` entry there pinned a feature against `--enable`. The policy also sets
+    `cli_auth_credentials_store = "file"`.
+  - `managed_config.toml` is still read, as a legacy file. Codex makes it the top config layer:
+    its `model` beat both the user `config.toml` and `-c model=...`. It would therefore override
+    the model and effort that engines set in the trial's `config.toml`, so the image does not ship
+    it.
 - Engines launch CLIs themselves, so `claude` and `codex` shims still sit first on `PATH`. Each
   shim:
   - repeats the policy flags as a second layer: Claude `--strict-mcp-config` and denied
@@ -233,8 +242,13 @@ The shims never change the prompt.
 
 The trial has one `CLAUDE_CONFIG_DIR` and one `CODEX_HOME`. All processes share them. Codex uses a
 login made only for the benchmark (its own `codex login`, so its own refresh-token chain), kept in a
-login home no other tool uses. Its `auth.json` is bind-mounted into the trial, and refreshed tokens
-go back only to that home. The trial homes hold:
+login home no other tool uses. That login home holds only `auth.json`. The whole directory is
+bind-mounted read-write into the trial, and the trial's `CODEX_HOME/auth.json` is a symlink to the
+`auth.json` in it. Mounting the file alone does not work: Codex 0.171.0 replaces `auth.json` by a
+temporary file and a rename in the target's directory, and a rename onto a mount point fails with
+`EBUSY`. Codex follows the symlink, so the temporary file and its `auth.json.lock` both land in the
+login home. Refreshed tokens therefore go back only to that home. Sessions, logs and state stay in
+the trial's `CODEX_HOME` inside the container. The trial homes hold:
 - the policy settings;
 - `ENABLE_CLAUDEAI_MCP_SERVERS=false`;
 - auto-memory and background tasks off, non-essential traffic off;
@@ -386,7 +400,13 @@ limit stops the run by default; waiting for the reset is opt-in (`--wait`).
   fails, try the `sbx` microVM, then run Claude on a separate host user with the proxy as fallback.
 - **[Codex `auth.json` refresh races between processes.]** → One login file per trial, at most one
   Codex trial per login, and a login only the benchmark uses, so Orca and the operator's own Codex
-  never share its refresh-token chain. The spike runs several Codex processes in one trial.
+  never share its refresh-token chain. The spike (#20, Codex CLI 0.171.0) ran 3 concurrent
+  `codex exec` in one container on one mounted login, and all 3 finished. On a copy whose access
+  token had expired, 3 concurrent processes had to refresh at the same time, and all 3 finished.
+  The new tokens landed only in the mounted login home, and a later refresh from them succeeded.
+  Codex re-reads `auth.json` before it refreshes, and saves by compare-and-save under
+  `auth.json.lock`. The benchmark never copies a login: a copy shares the refresh token, so a
+  refresh in one copy can leave the other with a used refresh token.
 - **[`codex-review` may not run non-interactively.]** → Codex's built-in review is a TUI command;
   the spike finds a non-interactive way to run it. Without one, `codex-review` leaves the matrix.
 - **[Claude Code may not report the used share of its subscription window.]** → The spike checks.
