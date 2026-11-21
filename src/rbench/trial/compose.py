@@ -5,6 +5,10 @@ no route out, no host address on the bridge and no external DNS. The proxy sits 
 on `egress`, an ordinary bridge, and is the agent's only way out. Nothing is mounted into the
 agent here: the scrubbed repository is copied in (#39) and the Codex login home mounted (#40) by
 the steps that own them.
+
+The project name is the project's identity, and `up` removes whatever runs under it first. The
+caller owns the name: unique to the run and the trial on the Docker daemon, stable across the
+trial's retries, and reused only while the caller holds the run's lock (design D3).
 """
 
 import json

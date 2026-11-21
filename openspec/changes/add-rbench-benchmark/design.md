@@ -241,6 +241,10 @@ server or build step, and opens from disk as the spec requires.
   containers left under it, so starting a trial first removes whatever an earlier attempt left
   under that name. A start that fails removes the containers and networks it created, and the
   error names the trial.
+  - The name therefore grants the authority to remove that project, a running one included. The
+    executor (#55) gives each trial a name unique to the run and the trial on the Docker daemon,
+    stable across its retries, and reuses a name only while it holds the run's lock. A trial id
+    alone is unique only within its plan, so two runs could otherwise stop each other's trials.
 
 **Alternatives considered:**
 - *Anthropic's devcontainer firewall (iptables).* It allows GitHub and port 22, and resolves domains

@@ -72,8 +72,12 @@ def trial(request, tmp_path_factory, images):
 
 def leftovers(name: str) -> tuple[str, str]:
     label = f"label=com.docker.compose.project={name}"
-    containers = docker("ps", "--all", "--quiet", "--filter", label).stdout.strip()
-    return containers, docker("network", "ls", "--quiet", "--filter", label).stdout.strip()
+    found = []
+    for query in (["ps", "--all"], ["network", "ls"]):
+        result = docker(*query, "--quiet", "--filter", label)
+        assert result.returncode == 0, f"docker {' '.join(query)}: {result.stderr}"
+        found.append(result.stdout.strip())
+    return found[0], found[1]
 
 
 def run(project: TrialProject, *argv: str) -> subprocess.CompletedProcess[str]:
