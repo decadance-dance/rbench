@@ -25,10 +25,11 @@ _COMMIT = re.compile(r"[0-9a-f]{40}")
 _VERSION_OUTPUT = {"claude": "{} (Claude Code)", "codex": "codex-cli {}", "rreview": "rreview {}"}
 _PLUGIN_REPO = re.compile(r"https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+")
 PLUGINS_DIR = "/opt/rbench/plugins"
-# Prints "<dir> <name> <version>" for each installed plugin, from its .claude-plugin/plugin.json.
+# Prints "<dir> <name> <version>" for each installed plugin, from its .claude-plugin/plugin.json;
+# `.agents` there is the local Codex marketplace, not a plugin.
 _PLUGINS_SCRIPT = (
     "const fs = require('fs'); const d = process.argv[1];"
-    " for (const n of fs.existsSync(d) ? fs.readdirSync(d).sort() : []) {"
+    " for (const n of fs.existsSync(d) ? fs.readdirSync(d).filter((n) => !n.startsWith('.')).sort() : []) {"
     " const p = require(`${d}/${n}/.claude-plugin/plugin.json`);"
     " console.log(`${n} ${p.name} ${p.version}`); }"
 )
