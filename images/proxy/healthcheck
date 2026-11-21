@@ -1,0 +1,6 @@
+#!/bin/bash
+# Healthy once squid answers a request. A complete request, so that `!self` in squid.conf keeps it
+# out of the access log; a bare connect would be logged as an aborted transaction.
+exec 3<>/dev/tcp/127.0.0.1/3128 || exit 1
+printf 'HEAD http://localhost/ HTTP/1.0\r\n\r\n' >&3
+read -r -t 2 status <&3 && [[ $status == HTTP/* ]]
