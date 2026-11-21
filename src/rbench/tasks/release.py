@@ -6,6 +6,11 @@ Each version of a public set (`reviewbench`, `ours`) has one GitHub release, tag
 to verify; tasks that share an archive share one asset. Hidden archives are never published: they
 stay next to the hidden tasks.
 
+`rbench tasks release` creates a version's release once: it targets the commit that last changed
+the set's manifest (which must be on GitHub), and it refuses a tag that already has a release, a
+draft or a git tag, so a published version never changes. A draft left by an interrupted upload
+is deleted by hand (`gh release delete <tag>`) before publishing again.
+
 `rbench tasks fetch` downloads the archives of a set into a local, content-addressed directory
 (default `$XDG_CACHE_HOME/rbench/archives`): every download is verified against the SHA-256 that
 the task records, which the set's manifest pins, before it is renamed into place, so the
@@ -23,7 +28,7 @@ from pathlib import Path
 
 from rbench.tasks.archive import LICENSED_SETS, ArchiveError
 from rbench.tasks.loader import REPO, Task, TaskError
-from rbench.tasks.manifest import load_task_set
+from rbench.tasks.manifest import MANIFEST_FILE, _git, _repo_path, load_task_set
 
 # The repository whose releases carry the public archives; a fork reruns the same archives.
 RELEASE_REPO = "decadance-dance/rbench"
@@ -39,7 +44,11 @@ def archive_name(task: Task) -> str:
 
 
 def default_archive_dir() -> Path:
-    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "rbench" / "archives"
+    cache = Path(os.environ.get("XDG_CACHE_HOME", ""))
+    # The XDG spec says a relative path is invalid and must be ignored.
+    if not cache.is_absolute():
+        cache = Path.home() / ".cache"
+    return cache / "rbench" / "archives"
 
 
 def _label(task: Task) -> str:
@@ -86,7 +95,10 @@ def _public_set(set_dir: Path, task_set: str, repo: str) -> tuple[int, list[Task
     return manifest.version, tasks
 
 
-def _gh(args: list[str], what: str, **kwargs) -> None:
+def _gh(args: list[str], what: str, **kwargs) -> str:
+    """Run `gh`; return its stdout, or raise `ArchiveError` starting with `what`."""
+    kwargs.setdefault("stdout", subprocess.PIPE)
+    kwargs.setdefault("stderr", subprocess.PIPE)
     try:
         result = subprocess.run(["gh", *args], stdin=subprocess.DEVNULL, check=False, **kwargs)
     except OSError as e:
@@ -94,6 +106,30 @@ def _gh(args: list[str], what: str, **kwargs) -> None:
     if result.returncode != 0:
         stderr = (result.stderr or b"").decode(errors="replace").strip()
         raise ArchiveError(f"{what}: gh failed: {stderr}")
+    return (result.stdout or b"").decode(errors="replace")
+
+
+def _manifest_commit(set_dir: Path) -> str:
+    """The commit that last changed the manifest of `set_dir`, which must be fully committed."""
+    found = _git(set_dir, ["rev-parse", "--show-toplevel"], f"{set_dir} is not in a git repository")
+    root = Path(found.strip())
+    rel_set = _repo_path(root, set_dir)
+    rel_manifest = _repo_path(root, set_dir / MANIFEST_FILE)
+    status = _git(
+        root,
+        ["status", "--porcelain", "--untracked-files=all", "--", rel_set],
+        f"cannot read the git status of {set_dir}",
+    )
+    if status.strip():
+        raise TaskError(f"{set_dir} has uncommitted changes; commit the set before releasing it")
+    commit = _git(
+        root,
+        ["log", "-1", "--format=%H", "HEAD", "--", rel_manifest],
+        f"cannot find the commit of {set_dir / MANIFEST_FILE}",
+    ).strip()
+    if not commit:
+        raise TaskError(f"{set_dir / MANIFEST_FILE} is not committed")
+    return commit
 
 
 def publish_release(
@@ -101,24 +137,53 @@ def publish_release(
 ) -> str:
     """Create the release of the current version of `task_set`, with every archive as an asset.
 
-    Each archive is verified first. A release that already exists is never changed: `gh` refuses
-    the tag, and a changed task needs a new set version. Return the tag.
+    Each archive is verified first. The release targets the commit that last changed the manifest,
+    which must be on `repo`; an existing release, draft or tag of this version is refused. Return
+    the tag.
     """
-    version, tasks = _public_set(Path(set_dir), task_set, repo)
+    set_dir = Path(set_dir)
+    version, tasks = _public_set(set_dir, task_set, repo)
     if not tasks:
         raise TaskError(f"task set {task_set!r} has no tasks to release")
-    archive_dir = Path(archive_dir).resolve()
-    assets = sorted({str(verify_archive(t, archive_dir / archive_name(t))) for t in tasks})
+    archive_dir = Path(archive_dir)
+    # Only hash-named basenames reach gh, run inside the archive directory: gh expands an asset
+    # argument as a glob and splits it at '#', which a full path may contain.
+    assets = sorted({verify_archive(t, archive_dir / archive_name(t)).name for t in tasks})
     tag = release_tag(task_set, version)
+    target = _manifest_commit(set_dir)
+    _gh(
+        ["api", f"repos/{repo}/commits/{target}", "--jq", ".sha"],
+        f"release {tag}: commit {target}, which holds the manifest, is not on {repo}; push it first",
+    )
+    # Drafts are listed only here, not by gh's own preflight, which checks published releases.
+    releases = _gh(
+        ["api", "--paginate", f"repos/{repo}/releases", "--jq", ".[].tag_name"],
+        f"release {tag}: cannot list the releases of {repo}",
+    )
+    if tag in releases.split():
+        raise ArchiveError(
+            f"release {tag}: {repo} already has a release or draft with this tag; a published"
+            " version never changes (a changed task needs a new set version), and a draft left by"
+            f" an interrupted upload must be deleted by hand: gh release delete {tag} --repo {repo}"
+        )
+    refs = _gh(
+        ["api", f"repos/{repo}/git/matching-refs/tags/{tag}", "--jq", ".[].ref"],
+        f"release {tag}: cannot list the tags of {repo}",
+    )
+    if f"refs/tags/{tag}" in refs.split():
+        raise ArchiveError(
+            f"release {tag}: {repo} already has the tag {tag} without a release; a release would"
+            " keep its commit instead of the manifest's. Delete the tag by hand if it is stale"
+        )
     notes = (
         f"Source archives of the `{task_set}` task set, version {version}. Each asset is named by"
         " its SHA-256; `rbench tasks fetch` downloads and verifies them against the manifest."
     )
     _gh(
-        ["release", "create", tag, *assets, "--repo", repo, "--title", tag, "--notes", notes]
-        + ["--latest=false"],
+        ["release", "create", tag, *assets, "--repo", repo, "--target", target]
+        + ["--title", tag, "--notes", notes, "--latest=false"],
         f"release {tag}",
-        capture_output=True,
+        cwd=archive_dir,
     )
     return tag
 
@@ -134,31 +199,44 @@ def fetch_archives(
     version, tasks = _public_set(Path(set_dir), task_set, repo)
     tag = release_tag(task_set, version)
     archive_dir = Path(archive_dir)
-    archive_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise ArchiveError(f"archive directory {archive_dir}: {e.strerror}") from None
     fetched = []
     for task in tasks:
-        dest = archive_dir / archive_name(task)
-        if dest.is_file() and _sha256(dest) == task.archive_sha256:
-            continue
-        fd, tmp = tempfile.mkstemp(dir=archive_dir, prefix=f".{dest.name}.", suffix=".tmp")
         try:
-            with os.fdopen(fd, "wb") as f:
-                _gh(
-                    ["release", "download", tag, "--repo", repo]
-                    + ["--pattern", dest.name, "--output", "-"],
-                    f"{_label(task)}: download from release {tag}",
-                    stdout=f,
-                    stderr=subprocess.PIPE,
-                )
-                f.flush()
-                os.fsync(f.fileno())
-            verify_archive(task, Path(tmp))
-            os.replace(tmp, dest)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
-        fetched.append(task.id)
+            if _fetch_one(task, tag, archive_dir, repo):
+                fetched.append(task.id)
+        except OSError as e:
+            raise ArchiveError(
+                f"{_label(task)}: archive directory {archive_dir}: {e.strerror}"
+            ) from None
     return fetched
+
+
+def _fetch_one(task: Task, tag: str, archive_dir: Path, repo: str) -> bool:
+    """Download and install the archive of `task` unless a matching one is there; True if fetched."""
+    dest = archive_dir / archive_name(task)
+    if dest.is_file() and _sha256(dest) == task.archive_sha256:
+        return False
+    fd, tmp = tempfile.mkstemp(dir=archive_dir, prefix=f".{dest.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            _gh(
+                ["release", "download", tag, "--repo", repo]
+                + ["--pattern", dest.name, "--output", "-"],
+                f"{_label(task)}: download from release {tag}",
+                stdout=f,
+            )
+            f.flush()
+            os.fsync(f.fileno())
+        verify_archive(task, Path(tmp))
+        os.replace(tmp, dest)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return True
 
 
 def _common_arguments(parser: argparse.ArgumentParser) -> None:

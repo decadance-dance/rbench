@@ -2,7 +2,7 @@
 """Fake `claude`, `codex`, `docker` and `gh` for tests; each name is a symlink to this file.
 
 Environment:
-  RBENCH_FAKE_LOG       file that gets one JSON line per call: {"tool", "argv", "stdin"}.
+  RBENCH_FAKE_LOG       file that gets one JSON line per call: {"tool", "argv", "stdin", "cwd"}.
   RBENCH_FAKE_SCENARIO  JSON object mapping a tool name to its scenario; a tool without one
                         prints nothing and exits 0. Scenario keys, all optional:
                           delay   seconds to sleep before answering
@@ -29,7 +29,8 @@ stdin = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
 log = os.environ.get("RBENCH_FAKE_LOG")
 if log:
     with open(log, "a", encoding="utf-8") as f:
-        f.write(json.dumps({"tool": tool, "argv": sys.argv[1:], "stdin": stdin}) + "\n")
+        call = {"tool": tool, "argv": sys.argv[1:], "stdin": stdin, "cwd": os.getcwd()}
+        f.write(json.dumps(call) + "\n")
 
 scenario = json.loads(os.environ.get("RBENCH_FAKE_SCENARIO") or "{}").get(tool, {})
 time.sleep(scenario.get("delay", 0))
