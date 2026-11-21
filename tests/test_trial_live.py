@@ -1,8 +1,8 @@
 """The trial sandbox on a real Docker engine (design D3): docker only, no credentials, no model call.
 
 Run: RBENCH_LIVE=1 uv run pytest -m live tests/test_trial_live.py -s
-It builds both images, starts one trial project, and removes the project, the listener and both
-image tags it built afterwards.
+It builds both images under tags of its own and removes, by name, every project, listener and tag
+it created, also when a step fails.
 """
 
 import json
@@ -11,12 +11,20 @@ import uuid
 
 import pytest
 
-from rbench.trial import TrialProject, build_agent_image, build_proxy_image, image_id
+from rbench.trial import (
+    TrialError,
+    TrialProject,
+    build_agent_image,
+    build_proxy_image,
+    image_id,
+)
 
 pytestmark = pytest.mark.live
 
 CLIS = {"claude": "2.1.316", "codex": "0.171.0"}  # the versions the #21 smoke run fixed
 LISTENER_PORT = 18765
+RUN = uuid.uuid4().hex[:8]
+TAG = f"live-{RUN}"  # test-owned, so an operator's rbench-agent or rbench-proxy tag survives
 
 
 def docker(*argv: str) -> subprocess.CompletedProcess[str]:
@@ -28,30 +36,44 @@ def gateway(network: str) -> str | None:
     return next((c["Gateway"] for c in json.loads(out) if c.get("Gateway")), None)
 
 
+# Each cleanup is registered before its resource exists. pytest runs every finalizer even when an
+# earlier one fails, so a failed `down` does not keep the image tags.
 @pytest.fixture(scope="module")
-def trial(tmp_path_factory):
-    proxy = build_proxy_image()
-    agent = build_agent_image(CLIS)
-    name = f"rbench-live-{uuid.uuid4().hex[:8]}"
-    project = TrialProject.create(tmp_path_factory.mktemp("trial"), name, agent.ref, proxy)
-    listener = f"{name}-host-listener"
-    try:
-        project.up()
-        # A service in the Docker host's network namespace, listening on every address.
-        server = (
-            f"require('http').createServer((q, r) => r.end('listener')).listen({LISTENER_PORT})"
-        )
-        started = docker(
-            "run", "-d", "--rm", "--name", listener, "--network", "host",
-            image_id(agent.ref), "node", "-e", server,
-        )  # fmt: skip
-        assert started.returncode == 0, started.stderr
-        yield project, agent
-    finally:
-        docker("rm", "-f", listener)
-        project.down()
-        docker("image", "rm", f"rbench-agent:claude-{CLIS['claude']}-codex-{CLIS['codex']}")
-        docker("image", "rm", "rbench-proxy:latest")
+def images(request):
+    request.addfinalizer(lambda: docker("image", "rm", f"rbench-proxy:{TAG}"))
+    proxy = build_proxy_image(tag=TAG)
+    request.addfinalizer(lambda: docker("image", "rm", f"rbench-agent:{TAG}"))
+    return build_agent_image(CLIS, tag=TAG), proxy
+
+
+def new_project(request, tmp_path_factory, images, suffix: str, name: str | None = None):
+    agent, proxy = images
+    name = name or f"rbench-live-{RUN}-{suffix}"
+    project = TrialProject.create(tmp_path_factory.mktemp(suffix), name, agent.ref, proxy)
+    request.addfinalizer(project.down)
+    return project
+
+
+@pytest.fixture(scope="module")
+def trial(request, tmp_path_factory, images):
+    project = new_project(request, tmp_path_factory, images, "sandbox")
+    listener = f"{project.name}-host-listener"
+    request.addfinalizer(lambda: docker("rm", "-f", listener))
+    project.up()
+    # A service in the Docker host's network namespace, listening on every address.
+    server = f"require('http').createServer((q, r) => r.end('listener')).listen({LISTENER_PORT})"
+    started = docker(
+        "run", "-d", "--rm", "--name", listener, "--network", "host",
+        image_id(images[0].ref), "node", "-e", server,
+    )  # fmt: skip
+    assert started.returncode == 0, started.stderr
+    return project, images[0]
+
+
+def leftovers(name: str) -> tuple[str, str]:
+    label = f"label=com.docker.compose.project={name}"
+    containers = docker("ps", "--all", "--quiet", "--filter", label).stdout.strip()
+    return containers, docker("network", "ls", "--quiet", "--filter", label).stdout.strip()
 
 
 def run(project: TrialProject, *argv: str) -> subprocess.CompletedProcess[str]:
@@ -128,3 +150,34 @@ def test_trial_sandbox(trial):
     assert mounts == "[]"
     assert run(project, "ls", "/home").stdout.split() == ["node"]
     assert run(project, "id", "-un").stdout.strip() == "node"
+
+
+def test_a_new_attempt_never_gets_a_leftover_container(request, tmp_path_factory, images):
+    earlier = new_project(request, tmp_path_factory, images, "attempt1")
+    earlier.up()
+    assert earlier.exec_agent(["touch", "/tmp/earlier-attempt"]).returncode == 0
+
+    # Same name, another directory: what a retry after a crash looks like.
+    retry = new_project(request, tmp_path_factory, images, "attempt2", name=earlier.name)
+    retry.up()
+
+    assert retry.exec_agent(["test", "-e", "/tmp/earlier-attempt"]).returncode == 1
+
+
+def test_failed_start_leaves_nothing_behind(request, tmp_path_factory, images):
+    project = new_project(request, tmp_path_factory, images, "unhealthy")
+    file = project.directory / "compose.json"
+    spec = json.loads(file.read_text())
+    spec["services"]["proxy"]["healthcheck"] = {
+        "test": ["CMD", "false"],
+        "interval": "1s",
+        "retries": 1,
+        "start_period": "0s",
+    }
+    file.write_text(json.dumps(spec))
+
+    with pytest.raises(TrialError, match=f"trial project {project.name}: cannot start") as e:
+        project.up()
+
+    print(e.value)
+    assert leftovers(project.name) == ("", "")
