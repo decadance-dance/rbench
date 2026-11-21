@@ -992,7 +992,9 @@ def test_full_run_hidden_input_io_error_keeps_its_details_private(
     assert not (checkout / "runs").exists()
 
 
-@pytest.mark.parametrize("destination", ["unignored", "symlink", "unignored staging"])
+@pytest.mark.parametrize(
+    "destination", ["unignored", "symlink", "unignored staging", "unignored final"]
+)
 def test_full_run_rejects_unignored_results(full_inputs, monkeypatch, capsys, destination) -> None:
     checkout, argv, task = full_inputs
     output = checkout / "output"
@@ -1002,6 +1004,8 @@ def test_full_run_rejects_unignored_results(full_inputs, monkeypatch, capsys, de
     elif destination == "unignored staging":
         (checkout / ".gitignore").write_text("/output/fixture\n")
         output.mkdir()
+    elif destination == "unignored final":
+        (checkout / ".gitignore").write_text("/output/.rbench.*\n")
     else:
         output /= task.name
 
@@ -1018,6 +1022,20 @@ def test_full_run_rejects_unignored_results(full_inputs, monkeypatch, capsys, de
         assert list(output.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    ("suffix", "message"), [("/invalid", "bad run id"), ("", "run already exists")]
+)
+def test_full_run_id_errors_omit_private_values(full_inputs, capsys, suffix, message) -> None:
+    checkout, argv, task = full_inputs
+    if not suffix:
+        (checkout / "runs" / task.name).mkdir(parents=True)
+
+    assert main([*argv, "--run-id", task.name + suffix]) == ExitCode.ERROR
+    err = capsys.readouterr().err
+    assert message in err
+    assert_private_output(err, task)
+
+
 def test_full_run_creation_error_keeps_the_hidden_trial_private(
     full_inputs, monkeypatch, capsys
 ) -> None:
@@ -1025,11 +1043,12 @@ def test_full_run_creation_error_keeps_the_hidden_trial_private(
 
     def fail_hidden_trial(trial_dir, state):
         if trial_dir.name.startswith(task.name + "--"):
+            assert task.name not in trial_dir.parent.parent.name
             raise OSError(errno.ENOSPC, "No space left on device", str(trial_dir))
         set_state(trial_dir, state)
 
     monkeypatch.setattr(plan_module, "set_state", fail_hidden_trial)
-    assert main(argv) == ExitCode.ERROR
+    assert main([*argv, "--run-id", task.name]) == ExitCode.ERROR
     err = capsys.readouterr().err
     assert "cannot create the run with hidden tasks: No space left on device" in err
     assert_private_output(err, task)

@@ -673,6 +673,7 @@ def start_run(
     matrix = parse_matrix(data, str(matrix_path), engines)
     hidden_set = None
     if matrix.tasks == "all":
+        # The hidden-task API already reports validation failures and symlink loops as TaskError.
         try:
             hidden_set = load_hidden_task_set(hidden_config())
         except OSError as e:
