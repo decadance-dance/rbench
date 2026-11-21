@@ -16,6 +16,10 @@ ledger's uncached input, output, cache read and cache creation:
 - Codex's rollout does not record a model reroute; only a launch's stdout shows one, and only for
   the threads it starts. A Codex thread's usage has a verified model only when a captured stdout
   that reads whole, with no reroute, shows that thread.
+- Cross-check, Claude: a session's counted messages (its transcript's and its subagents') against
+  the cumulative `modelUsage` of its transcript's last `cost-state` record, when that snapshot
+  covers the same work. On a mismatch the snapshot replaces the session's counts and the figure is
+  flagged; without a covering snapshot the message counts stand.
 
 The figure is flagged incomplete, with a reason per gap, when a session launch in the shim log has
 no session with usage of its own, when a thread's usage cannot be recovered, or when a response's
@@ -73,6 +77,16 @@ class _Rollout:
     snapshots: list[tuple[object, str]] = field(default_factory=list)  # (token_count info, where)
 
 
+@dataclass
+class _Session:
+    """What a Claude session's transcripts hold for the cross-check (D7)."""
+
+    keys: set[tuple] = field(default_factory=set)  # the messages counted from them
+    last_message: int = 0  # the line of the root transcript's last assistant record
+    # Its cost-state records, in order: (line, record, where).
+    states: list[tuple[int, dict, str]] = field(default_factory=list)
+
+
 def count_usage(
     records: list[dict], transcripts: Path, codex_stdout: Mapping[int, Path] | None = None
 ) -> Usage:
@@ -85,16 +99,19 @@ def count_usage(
     seen: dict[tuple, tuple[str, Counts]] = {}  # what is counted once -> (model, counts)
     used: set[str] = set()  # Claude session ids and Codex threads with usage of their own
     rollouts: list[_Rollout] = []
+    claude: dict[str, _Session] = {}
     for file in sorted(p for p in transcripts.rglob("*.jsonl") if p.is_file()):
         path = "/" + file.relative_to(transcripts).as_posix()
         if CODEX_ROLLOUT.search(path):
             if (rollout := _rollout(file, path, incomplete)) is not None:
                 rollouts.append(rollout)
-        elif (m := CLAUDE_ROOT.search(path) or CLAUDE_SUBAGENT.search(path)) and _claude(
-            file, path, m.group(1), CLAUDE_ROOT.search(path) is None, seen, incomplete
-        ):
-            used.add(m.group(1))
+        elif m := CLAUDE_ROOT.search(path) or CLAUDE_SUBAGENT.search(path):
+            session = claude.setdefault(m.group(1), _Session())
+            subagent = CLAUDE_ROOT.search(path) is None
+            if _claude(file, path, m.group(1), subagent, session, seen, incomplete):
+                used.add(m.group(1))
     used |= _codex(rollouts, seen, incomplete)
+    used |= _cross_check(claude, records, seen, incomplete)
 
     launches = {r["launch"]: r for r in records if r["kind"] == "launch"}
     bindings = [r for r in records if r["kind"] == "binding"]
@@ -241,9 +258,16 @@ def _codex_counts(usage: object, where: str) -> Counts:
 
 
 def _claude(
-    file: Path, path: str, session: str, subagent: bool, seen: dict, incomplete: list[str]
+    file: Path,
+    path: str,
+    session: str,
+    subagent: bool,
+    found_in: _Session,
+    seen: dict,
+    incomplete: list[str],
 ) -> bool:
-    """Count a Claude transcript's messages; whether it holds any usage."""
+    """Count a Claude transcript's messages, noting in `found_in` what the cross-check reads;
+    whether it holds any usage."""
     try:
         lines, bad = _lines(file, path)
     except OSError as e:
@@ -254,8 +278,12 @@ def _claude(
     incomplete += bad
     found = False
     for n, r in lines:
+        if not subagent and r.get("type") == "cost-state" and r.get("sessionId") == session:
+            found_in.states.append((n, r, f"{path}:{n}"))
         if r.get("type") != "assistant":
             continue
+        if not subagent:
+            found_in.last_message = n
         where = f"{path}:{n}"
         message = r.get("message")
         if not isinstance(message, dict):
@@ -266,8 +294,90 @@ def _claude(
             raise UsageError(f"{where}: a message with usage needs an id and a model")
         counts = _claude_counts(message["usage"], f"{where}: message {message['id']}")
         _add(seen, ("claude", message["id"]), message["model"], counts, where)
+        found_in.keys.add(("claude", message["id"]))
         found = True
     return found
+
+
+def _cross_check(
+    claude: Mapping[str, _Session], records: list[dict], seen: dict, incomplete: list[str]
+) -> set[str]:
+    """Check each Claude session's counted messages against its covering `modelUsage` snapshot,
+    and count the snapshot instead where they differ (D7); the sessions it replaced."""
+    children = _children(records)
+    launches: dict[str, set[int | None]] = {}
+    for r in records:
+        if r["kind"] == "hook":
+            launch = children.get((r.get("claude_pid"), r.get("claude_start")))
+            launches.setdefault(r.get("session_id"), set()).add(launch)
+    replaced: dict[str, dict[str, Counts]] = {}
+    for name, session in sorted(claude.items()):
+        try:
+            covering = _covering(session, launches.get(name, set()))
+        except UsageError as e:
+            incomplete.append(f"Claude session {name}: {e}, so the cross-check is unavailable")
+            continue
+        if covering is None:
+            continue
+        snapshot, where = covering
+        counted: dict[str, Counts] = {}
+        for model, counts in (seen[key] for key in session.keys):
+            total = counted.setdefault(model, dict.fromkeys(counts, 0))
+            for k, v in counts.items():
+                total[k] += v
+        if {m: c for m, c in counted.items() if any(c.values())} != snapshot:
+            replaced[name] = snapshot
+            incomplete.append(
+                f"Claude session {name}: its messages' usage differs from the modelUsage of"
+                f" {where}, which is counted instead"
+            )
+    # A message another session also holds (a fork copies its parent's) stays counted for it.
+    kept = set().union(*(s.keys for name, s in claude.items() if name not in replaced))
+    for name, snapshot in replaced.items():
+        for key in claude[name].keys - kept:
+            del seen[key]
+        for model, counts in snapshot.items():
+            seen[("session", name, model)] = (model, counts)
+    return set(replaced)
+
+
+def _covering(session: _Session, launches: set[int | None]) -> tuple[dict, str] | None:
+    """The session's last `cost-state` snapshot as usage per model, and where it is, when it
+    covers the same work as the counted messages, or None (D7)."""
+    if not session.states:
+        return None
+    line, record, where = session.states[-1]
+    if line < session.last_message:
+        return None  # its latest process wrote none, or no final one
+    starts = []
+    for _, state, at in session.states:
+        start = state.get("startTime")
+        if type(start) is not int:
+            raise UsageError(f"{at}: cost-state startTime: expected an integer")
+        if not starts or starts[-1] != start:
+            starts.append(start)
+    # Each process writes its own start time, and a later launch starts later. The shim log has
+    # no wall clock (yet: #46), so one start time per launch of the session, in order, shows the
+    # last snapshot is its latest launch's.
+    if None in launches or len(starts) != len(launches) or starts != sorted(set(starts)):
+        return None
+    usage = record.get("modelUsage")
+    if not isinstance(usage, dict):
+        raise UsageError(f"{where}: cost-state modelUsage: expected an object")
+    snapshot = {}
+    at = f"{where}: cost-state modelUsage"  # the reason is stored: it quotes no model name
+    for model, entry in usage.items():
+        if not (_text(model) and isinstance(entry, dict)):
+            raise UsageError(f"{at}: expected a model name and an object per model")
+        counts = {
+            "input": _number(entry, "inputTokens", at),
+            "output": _number(entry, "outputTokens", at),
+            "cache_read": _number(entry, "cacheReadInputTokens", at, optional=True),
+            "cache_creation": _number(entry, "cacheCreationInputTokens", at, optional=True),
+        }
+        if any(counts.values()):
+            snapshot[model] = counts
+    return snapshot, where
 
 
 def _rollout(file: Path, path: str, incomplete: list[str]) -> _Rollout | None:

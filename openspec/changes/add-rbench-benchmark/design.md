@@ -690,6 +690,24 @@ As implemented (#58, `rbench.trial.usage`):
   `token_usage_record` or assistant message rejects the usage, naming the file and line; in a
   fallback source it only flags the usage incomplete.
 
+The cross-check as implemented (#117, `rbench.trial.usage`):
+- A Claude session's counted messages are those of its transcript and its subagents'. Its snapshot
+  is the last `cost-state` record of its transcript with its `sessionId`. Its `modelUsage`
+  counters map as the transcript's: `inputTokens`, `outputTokens`, `cacheReadInputTokens` and
+  `cacheCreationInputTokens`; `thinkingTokens` is not read.
+- The snapshot covers when it comes after the transcript's last assistant record and belongs to the
+  latest launch. A process writes its own `startTime`, and the shim log has no wall clock, so it
+  belongs when the transcript's distinct `startTime`s rise in order, one per launch the session's
+  hooks bind. A snapshot of any other session, or one no launch binds, is not used.
+- A mismatch on any model or counter replaces the session's messages with the snapshot. A message
+  another session also holds (a fork copies its parent's) stays counted for that one. The flag is a
+  reason in `usage.json`'s `incomplete` list, which the report shows; a session whose usage is the
+  snapshot has usage of its own.
+- A malformed `startTime` or `modelUsage` in a snapshot that is read flags the usage and leaves the
+  message counts.
+- The result event is not read: the runner sees only its engine launch's stdout, and the spike found
+  a `cost-state` at the end of every process.
+
 **Alternative considered:** capture each process's final result event. Engines own stdout, so it is
 not always visible.
 

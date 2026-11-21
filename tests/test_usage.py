@@ -659,3 +659,141 @@ def test_usage_record_keeps_normalization_apart_in_the_ledger(tmp_path):
     store_results(tmp_path, [], record)
     assert read_results(tmp_path) == ([], record)
     assert usage_record(engine)["normalization"] == {}
+
+
+def cost_state(session: str, start: int, **models: tuple[int, int, int, int]) -> dict:
+    """A `cost-state` line of Claude Code 2.1.316: the process's start time (ms) and the
+    session's cumulative `modelUsage`, in the field layout the CLI writes (#24)."""
+    usage = {
+        model.replace("_", "-"): {
+            "inputTokens": i,
+            "outputTokens": o,
+            "thinkingTokens": 0,
+            "cacheReadInputTokens": read,
+            "cacheCreationInputTokens": created,
+            "webSearchRequests": 0,
+            "costUSD": 0.01,
+        }
+        for model, (i, o, read, created) in models.items()
+    }
+    return {"type": "cost-state", "sessionId": session, "startTime": start, "modelUsage": usage}
+
+
+O, H = OPUS.replace("-", "_"), HAIKU.replace("-", "_")  # keyword names for cost_state
+
+
+def differs(session: str, line: int) -> str:
+    return (
+        f"Claude session {session}: its messages' usage differs from the modelUsage of"
+        f" {PROJECT}/{session}.jsonl:{line}, which is counted instead"
+    )
+
+
+def test_a_covering_snapshot_that_matches_keeps_the_message_counts(root):
+    lines = [
+        message("s1", "m1", OPUS, 4, 63, 100, 7),
+        cost_state("s1", 1000, **{O: (4, 63, 100, 7)}),
+    ]
+    write(root, f"{PROJECT}/s1.jsonl", lines)
+    usage = count_usage(log(*launch(1, "claude"), hook(1, "s1")), root)
+    assert usage == Usage({OPUS: counts(4, 63, 100, 7)}, [])
+
+
+def test_a_mismatch_with_a_covering_snapshot_counts_the_snapshot_and_flags(root):
+    # The snapshot also holds a side call the transcript does not show; s2 has no snapshot.
+    s1 = [
+        message("s1", "m1", OPUS, 4, 63, 100),
+        cost_state("s1", 1000, **{O: (4, 63, 100, 0)}),  # an earlier turn of the same process
+        message("s1", "m2", OPUS, 6, 73),
+        cost_state("s1", 1000, **{O: (10, 136, 100, 0), H: (1252, 17, 0, 0)}),
+    ]
+    write(root, f"{PROJECT}/s1.jsonl", s1)
+    write(root, f"{PROJECT}/s1/subagents/agent-a.jsonl", [message("s1", "m3", SONNET, 3, 30)])
+    write(root, f"{PROJECT}/s2.jsonl", [message("s2", "m4", OPUS, 1, 1)])
+    shim_log = log(*launch(1, "claude"), hook(1, "s1"), *launch(2, "claude"), hook(2, "s2"))
+
+    usage = count_usage(shim_log, root)
+
+    assert usage.models == {HAIKU: counts(1252, 17), OPUS: counts(11, 137, 100)}
+    assert usage.incomplete == [differs("s1", 4)]
+
+
+def test_a_resumed_session_needs_a_snapshot_from_its_latest_launch(root):
+    shim_log = log(
+        *launch(1, "claude"), hook(1, "s1"), *launch(2, "claude"), hook(2, "s1", "resume")
+    )
+    first = [message("s1", "m1", OPUS, 4, 63), cost_state("s1", 1000, **{O: (4, 63, 0, 0)})]
+    covered = [
+        *first,
+        message("s1", "m2", OPUS, 6, 73),
+        cost_state("s1", 2000, **{O: (9, 9, 0, 0)}),
+    ]
+    write(root, f"{PROJECT}/s1.jsonl", covered)
+    assert count_usage(shim_log, root) == Usage({OPUS: counts(9, 9)}, [differs("s1", 4)])
+
+    # The latest launch wrote no snapshot: the earlier one does not cover its messages.
+    write(root, f"{PROJECT}/s1.jsonl", [*first, message("s1", "m2", OPUS, 6, 73)])
+    assert count_usage(shim_log, root) == Usage({OPUS: counts(10, 136)}, [])
+    # Nor when the latest launch wrote none at all: two launches, one start time (an empty
+    # modelUsage would replace the counts if it were used).
+    write(root, f"{PROJECT}/s1.jsonl", [*first[:1], first[1] | {"modelUsage": {}}])
+    assert count_usage(shim_log, root) == Usage({OPUS: counts(4, 63)}, [])
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        [message("s1", "m1", OPUS, 4, 63)],  # no snapshot at all
+        [cost_state("s1", 1000, **{O: (1, 1, 0, 0)}), message("s1", "m1", OPUS, 4, 63)],
+        [message("s1", "m1", OPUS, 4, 63), cost_state("other", 1000, **{O: (1, 1, 0, 0)})],
+    ],
+    ids=["none", "before-the-last-message", "another-session"],
+)
+def test_without_a_covering_snapshot_the_message_counts_stand(root, lines):
+    write(root, f"{PROJECT}/s1.jsonl", lines)
+    usage = count_usage(log(*launch(1, "claude"), hook(1, "s1")), root)
+    assert usage == Usage({OPUS: counts(4, 63)}, [])
+
+
+def test_a_snapshot_of_a_session_no_launch_binds_is_not_used(root):
+    lines = [message("s1", "m1", OPUS, 4, 63), cost_state("s1", 1000, **{O: (1, 1, 0, 0)})]
+    write(root, f"{PROJECT}/s1.jsonl", lines)
+    assert count_usage([], root) == Usage({OPUS: counts(4, 63)}, [])
+
+
+def test_a_session_without_counted_messages_takes_its_covering_snapshot(root):
+    write(root, f"{PROJECT}/s1.jsonl", [cost_state("s1", 1000, **{O: (4, 63, 0, 0)})])
+    usage = count_usage(log(*launch(1, "claude"), hook(1, "s1")), root)
+    assert usage == Usage({OPUS: counts(4, 63)}, [differs("s1", 1)])
+
+
+def test_a_replaced_fork_leaves_its_parent_messages_counted(root):
+    write(root, f"{PROJECT}/s1.jsonl", [message("s1", "m1", OPUS, 1, 10)])
+    fork = [
+        message("s2", "m1", OPUS, 1, 10),  # copied from its parent
+        message("s2", "m2", OPUS, 2, 20),
+        cost_state("s2", 2000, **{O: (2, 25, 0, 0)}),  # its own process only
+    ]
+    write(root, f"{PROJECT}/s2.jsonl", fork)
+    shim_log = log(*launch(1, "claude"), hook(1, "s1"), *launch(2, "claude"), hook(2, "s2", "fork"))
+    usage = count_usage(shim_log, root)
+    assert usage == Usage({OPUS: counts(3, 35)}, [differs("s2", 3)])
+
+
+@pytest.mark.parametrize(
+    ("change", "why"),
+    [
+        ({"startTime": "1000"}, "cost-state startTime: expected an integer"),
+        ({"modelUsage": []}, "cost-state modelUsage: expected an object"),
+        ({"modelUsage": {OPUS: {"inputTokens": -1, "outputTokens": 1}}}, "inputTokens: expected"),
+    ],
+)
+def test_a_malformed_snapshot_flags_the_figure_and_keeps_the_message_counts(root, change, why):
+    lines = [message("s1", "m1", OPUS, 4, 63), cost_state("s1", 1000) | change]
+    write(root, f"{PROJECT}/s1.jsonl", lines)
+    usage = count_usage(log(*launch(1, "claude"), hook(1, "s1")), root)
+    assert usage.models == {OPUS: counts(4, 63)}
+    [reason] = usage.incomplete
+    assert reason.startswith(f"Claude session s1: {PROJECT}/s1.jsonl:2: ")
+    assert why in reason
+    assert reason.endswith(", so the cross-check is unavailable")
