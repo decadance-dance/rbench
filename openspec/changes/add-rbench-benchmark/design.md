@@ -884,6 +884,25 @@ measure a different task from the engines, which all read the repository.
   session's `--model` and `--effort` set them. The Codex side is the Codex reviewer and verifier,
   set only through `config.toml`. The Google and Perplexity seats are disabled in
   `.review-council/config.local.yml`.
+- `ponytail-review` is pinned by the plugin's release, 5.3.3 (tag `v5.3.3` = commit
+  `7801d061243d7b753bad0e0b3c057cd250b11755` of `https://github.com/DietrichGebert/ponytail`). The
+  adapter records the release, its tag and commit; a version it does not know is refused, and a
+  floating one (`latest`, a range) fails the declaration. The image holds the plugin at that commit
+  in `/opt/rbench/plugins/ponytail`. One `reviewer` role; its model picks the CLI and the shims add
+  its model and effort. The request reviews the trial's PR, which the `gh` stub answers for, and
+  goes on stdin:
+  - Claude Code: `claude -p --plugin-dir /opt/rbench/plugins/ponytail --permission-mode
+    bypassPermissions --output-format json` with `/ponytail:ponytail-review PR #<n>`. The review is
+    the result's text.
+  - Codex: first `codex plugin marketplace add /opt/rbench/plugins` and `codex plugin add
+    ponytail@rbench`, which install the plugin from the image's local marketplace into the trial's
+    `CODEX_HOME` with no network (D5, Plugins at the pin), then `codex exec --sandbox
+    danger-full-access --json --output-last-message <file> -` with `$ponytail:ponytail-review PR
+    #<n>`. The review is that file, once the `--json` events show a completed turn and no failed
+    one.
+  - Both reviews are Markdown and go through D9's normalizer. The trial home does not pre-trust
+    the plugin's Codex lifecycle hooks, so Codex skips them as untrusted and its variant runs the
+    review skill without them, while Claude Code runs them (see Risks).
 - rreview: the panel roles `intent_contracts`, `reliability` and `security` run on Codex with one
   model for the whole panel; the coordinator runs on Claude Code; the judge runs on Codex, because
   rreview refuses a coordinator and judge of the same family.
@@ -1197,8 +1216,10 @@ when no task changed.
   plugin's install notes have the user trust its hooks in the Codex TUI (`/hooks`). The fresh
   trial's transcript showed no hook output, so the engine ran its skill without them. The hooks did
   run on Claude Code. Headless `exec` has hook-trust handling of its own, so this run leaves open
-  what happens once the pinned plugin's hooks are trusted. Whether the trial home pre-trusts them is
-  open for the engine's adapter.
+  what happens once the pinned plugin's hooks are trusted. The adapter (#77) does not pre-trust
+  them: `ponytail-review` on Codex runs its review skill without the hooks that run on Claude Code,
+  a known difference between its two variants. Deciding and verifying hook trust is left to the
+  smoke stage (#60).
 - **[The judge prefers its own model family.]** → The judge is blind to the engine, and a second
   judge from the other family labels a sample (O1).
 - **[Ground truth for our PRs is incomplete or produced by an engine under test.]** → Augmented
