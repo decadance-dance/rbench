@@ -131,9 +131,13 @@ def launch(settings: Mapping, pr: int) -> Launch:
     return Launch(cli, CODEX_ARGV, stdin, {}, OUTPUT_PATH)
 
 
+def _refuse(constant: str) -> object:
+    raise ValueError(f"{constant} is not JSON")  # NaN and the infinities Python would accept
+
+
 def _json(text: str, where: str, what: str) -> object:
     try:
-        return json.loads(text, object_pairs_hook=no_repeated_keys)
+        return json.loads(text, object_pairs_hook=no_repeated_keys, parse_constant=_refuse)
     except (ValueError, RecursionError):
         raise PluginReviewOutputError(f"{where}: {what} is not JSON") from None
 

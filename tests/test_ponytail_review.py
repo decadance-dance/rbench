@@ -329,6 +329,7 @@ def test_a_session_without_evidence_of_a_review_is_not_scored_as_zero_findings(
     [
         (SECRET, "stdout is not JSON"),
         (json.dumps([SECRET]), "not a result object"),
+        (claude_result(total_cost_usd=float("inf")), "stdout is not JSON"),
         ('{"type": "result", "type": "result"}', "stdout is not JSON"),
         (claude_result(is_error=True, subtype="error_during_execution"), "error_during_execution"),
         (claude_result(subtype=SECRET), "an unknown subtype"),
@@ -349,6 +350,7 @@ def test_claude_output_without_a_review_fails_the_trial_without_quoting_it(stdou
     ("stdout", "answer", "message"),
     [
         (SECRET + "\n", REPORT, "stdout line 1 is not JSON"),
+        ('{"type": "turn.started", "x": NaN}\n', REPORT, "stdout line 1 is not JSON"),
         (CODEX_OK + "[1]\n", REPORT, "stdout line 5 is not an event"),
         (codex_stdout("turn.started", "turn.failed"), REPORT, "reported turn.failed"),
         (codex_stdout(*STARTED, message(REPORT), "turn.failed", COMPLETED), REPORT, "turn.failed"),
