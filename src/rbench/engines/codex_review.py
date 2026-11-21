@@ -15,7 +15,6 @@ and the stdout JSONL are kept for diagnostics only.
 """
 
 import json
-import math
 from collections.abc import Iterator, Mapping
 from pathlib import Path, PurePosixPath
 
@@ -25,7 +24,6 @@ from rbench.engines.plain import Launch
 from rbench.ledger.trials import no_repeated_keys
 from rbench.trial.hermetic import POLICY
 from rbench.trial.repository import REPO_DIR
-from rbench.trial.sessions import _find
 
 NAME = "codex-review"
 ROLE = "reviewer"
@@ -33,8 +31,13 @@ ROLE = "reviewer"
 OUTPUT_PATH = "/home/node/codex-review.md"
 # Codex's built-in review prompt asks for priorities 0 to 3 (P0 most severe).
 PRIORITIES = range(4)
-# The pinned `ReviewLineRange` holds `u32` lines.
+# The pinned `ReviewLineRange` holds `u32` lines, and confidence scores are `f32`.
 U32 = range(2**32)
+F32_MAX = 3.4028234663852886e38
+
+
+class _RepeatedKey(ValueError):
+    pass
 
 
 class ReviewOutputError(ValueError):
@@ -103,18 +106,31 @@ def check_launches(records: list[dict], launch: Launch) -> list[str]:
     return problems
 
 
+def _unique(pairs: list[tuple[str, object]]) -> dict:
+    try:
+        return no_repeated_keys(pairs)
+    except ValueError:
+        raise _RepeatedKey from None
+
+
 def _records(file: Path, where: str) -> Iterator[tuple[int, dict]]:
     """The JSON object lines of a collected rollout, numbered from 1. A line that is not JSON is
-    skipped (a write cut short); one that repeats a key is ambiguous and fails the trial."""
+    skipped (a write cut short); one that repeats a key, or that the decoder refuses (a number
+    too long, nesting too deep), fails the trial."""
     try:
         with file.open(encoding="utf-8") as f:
             for n, line in enumerate(f, 1):
                 try:
-                    record = json.loads(line, object_pairs_hook=no_repeated_keys)
+                    record = json.loads(line, object_pairs_hook=_unique)
                 except json.JSONDecodeError:
                     continue
-                except ValueError:
+                except _RepeatedKey:
                     raise ReviewOutputError(f"{where}, line {n}: a key is repeated") from None
+                except (ValueError, RecursionError):
+                    raise ReviewOutputError(
+                        f"{where}, line {n}: JSON the decoder refuses (a number too long or "
+                        "nesting too deep)"
+                    ) from None
                 if isinstance(record, dict):
                     yield n, record
     except (OSError, UnicodeDecodeError):
@@ -128,6 +144,17 @@ def _collected(transcripts: Path, path: str, where: str) -> Path:
     if not p.is_absolute() or ".." in p.parts or file.is_symlink() or not file.is_file():
         raise ReviewOutputError(f"{where}: the bound rollout was not collected")
     return file
+
+
+def _parent(meta: dict) -> object:
+    """The parent thread a session_meta names, from the 0.171.0 lineage fields only: top level
+    (the review thread) or a spawned thread's `source.subagent.thread_spawn`."""
+    if meta.get("parent_thread_id") is not None:
+        return meta["parent_thread_id"]
+    spawn = meta.get("source")
+    for key in ("subagent", "thread_spawn"):
+        spawn = spawn.get(key) if isinstance(spawn, dict) else None
+    return spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
 
 
 def review_output(records: list[dict], transcripts: Path, where: str) -> dict:
@@ -149,7 +176,7 @@ def review_output(records: list[dict], transcripts: Path, where: str) -> dict:
         meta = first.get("payload") if first.get("type") == "session_meta" else None
         if not isinstance(meta, dict):
             raise ReviewOutputError(f"{at}: no session_meta on its first line")
-        if _find(meta, "parent_thread_id") is None:
+        if _parent(meta) is None:
             roots.setdefault(r["path"], at)
     if len(roots) != 1:
         raise ReviewOutputError(
@@ -191,8 +218,9 @@ def _relative(path: object) -> str | None:
 
 
 def _number(value: object) -> bool:
-    """A finite JSON number, as the pinned `f32` confidence scores are."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    """A JSON number within the pinned `f32` range (no NaN or infinity); a huge integer compares
+    exactly, without converting to float."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and abs(value) <= F32_MAX
 
 
 def findings(output: dict, where: str) -> list[dict]:

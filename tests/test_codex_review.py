@@ -102,10 +102,10 @@ def test_fake_codex_gets_the_launch_unchanged_from_the_checkout(fake_bin, tmp_pa
     assert (call["argv"], call["stdin"], call["cwd"]) == (ARGV, "", str(tmp_path))
 
 
-def launch_record(**change) -> dict:
-    """The launch record the real shim logs for the default launch, run from the checkout."""
-    final, added, rewrites = shim.codex_launch(ARGV, CODEX)
-    record = {"kind": "launch", "cli": "codex", "argv": ARGV, "cwd": REPO_DIR, "added": added}
+def launch_record(argv: list[str] = ARGV, **change) -> dict:
+    """The launch record the real shim logs for a launch with `argv`, run from the checkout."""
+    final, added, rewrites = shim.codex_launch(argv, CODEX)
+    record = {"kind": "launch", "cli": "codex", "argv": argv, "cwd": REPO_DIR, "added": added}
     record |= {"rewrites": rewrites, "final_argv": final}
     record["homes"] = {"CLAUDE_CONFIG_DIR": None, "CODEX_HOME": None}
     return collector.check(record | change, ("launch",))
@@ -176,7 +176,10 @@ def test_findings_come_from_the_parent_rollouts_review_output(tmp_path: Path):
 
 def test_default_launch_carries_from_the_shim_records_to_findings(tmp_path: Path, monkeypatch):
     """The pinned review delegate's rollout, bound by the real shim watcher and accepted by the
-    collector: the review thread still counts as a child, so the root's review is scored."""
+    collector: the review thread still counts as a child, so the root's review is scored. The
+    launch is the declared default configuration's."""
+    default = load_engine(ENGINES / "codex-review.toml").default_configuration()["reviewer"]
+    launch = codex_review.launch(settings(default.model, default.effort))
     container, transcripts = tmp_path / "container", tmp_path / "transcripts"
     root = rollout(
         container, "/home/node/.codex/sessions/2026/11/21/rollout-root.jsonl",
@@ -199,7 +202,7 @@ def test_default_launch_carries_from_the_shim_records_to_findings(tmp_path: Path
         sent = [json.loads(line) for line in theirs.makefile("r", encoding="utf-8")]
     os.close(stop)
     bindings = [collector.check(r, ("binding",)) for r in sent]
-    log = [{"seq": 1, "launch": 1, **launch_record()}]
+    log = [{"seq": 1, "launch": 1, **launch_record(list(launch.argv[1:]))}]
     log += [{"seq": n, "launch": 1, **r} for n, r in enumerate(bindings, 2)]
     exit_ = collector.check({"kind": "exit", "status": 0}, ("exit",))
     log.append({"seq": len(log) + 1, "launch": 1, **exit_})
@@ -212,7 +215,7 @@ def test_default_launch_carries_from_the_shim_records_to_findings(tmp_path: Path
         {"id": "t2", "source": {"subagent": "review"}}
     ]
     assert unbound_sessions(log, transcripts) == []
-    assert codex_review.check_launches(log, codex_review.launch(settings())) == []
+    assert codex_review.check_launches(log, launch) == []
     output = codex_review.review_output(log, transcripts, "trial x")
     assert codex_review.findings(output, "trial x") == TWO_FINDINGS
 
@@ -258,6 +261,36 @@ def test_a_repeated_key_in_the_review_line_fails_the_trial(tmp_path: Path):
         codex_review.review_output(records((ROOT, ROOT_META)), tmp_path, "trial x")
 
 
+def test_a_deeply_nested_extra_field_does_not_hide_the_lineage(tmp_path: Path):
+    deep: object = []
+    for _ in range(5000):
+        deep = [deep]
+    rollout(tmp_path, ROOT, review(finding()), meta=ROOT_META | {"extra": deep})
+    rollout(tmp_path, CHILD, meta=CHILD_META)
+    log = records((ROOT, ROOT_META), (CHILD, {}))
+
+    output = codex_review.review_output(log, tmp_path, "trial x")
+
+    assert len(codex_review.findings(output, "trial x")) == 1
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ('{"type": "event_msg", "n": ' + "9" * 4500 + "}", "a number too long or nesting"),
+        ("[" * 200_000 + "]" * 200_000, "a number too long or nesting"),
+    ],
+)
+def test_a_line_the_decoder_refuses_fails_the_trial_with_its_own_reason(tmp_path, line, message):
+    file = rollout(tmp_path, ROOT, review(finding()))
+    with file.open("a") as f:
+        f.write(line + "\n")
+
+    with pytest.raises(ReviewOutputError, match=f"^trial x: rollout bound by shim log record 2, "
+                       f"line 6: JSON the decoder refuses .*{message}"):  # fmt: skip
+        codex_review.review_output(records((ROOT, ROOT_META)), tmp_path, "trial x")
+
+
 def test_an_uncollected_rollout_fails_without_naming_its_file(tmp_path: Path):
     path = "/home/node/.codex/sessions/rollout-secret-name.jsonl"
 
@@ -289,6 +322,11 @@ def test_an_uncollected_rollout_fails_without_naming_its_file(tmp_path: Path):
         (review(finding(body=None)), "body"),
         (review(finding(confidence_score="high")), "finding 0: expected .*confidence_score"),
         (review(finding(confidence_score=float("nan"))), "confidence_score"),
+        # Beyond the pinned f32: a huge integer must not overflow a float conversion.
+        (review(finding(), finding(confidence_score=10**400)), "finding 1: .*confidence_score"),
+        (review(finding(confidence_score=1e100)), "finding 0: .*confidence_score"),
+        (review() | {"overall_confidence_score": 10**400}, "overall_confidence_score"),
+        (review() | {"overall_confidence_score": -1e39}, "overall_confidence_score"),
         (review("not an object"), "code_location"),
         ({"findings": None}, "review_output: expected findings"),
         ({"findings": []}, "review_output: expected findings"),
