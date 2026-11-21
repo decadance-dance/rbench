@@ -7,9 +7,11 @@ A trial directory holds:
                     "reused_from"?: <source run id>}
     findings.json  the trial's findings:
                    [{"file", "start_line", "end_line", "message", "severity"?}]
-    usage.json     its token usage, the engine's and the normalization step's apart:
+    usage.json     its token usage, the engine's and the normalization step's apart, with the
+                   reasons each figure is incomplete (spec review-scoring, Per-trial metrics):
                    {"engine": {"<model>": {"input", "output", "cache_read", "cache_creation"}},
-                    "normalization": {"<model>": {...}}}
+                    "normalization": {"<model>": {...}},
+                    "incomplete": {"engine": ["<reason>", ...], "normalization": [...]}}
     raw/           engine output, transcripts and logs
     audit.json     the contamination audit (`rbench.trial.audit`): {"contaminated": [<reason>],
                    "refused": [{"method", "target" (destination only), "result",
@@ -106,13 +108,26 @@ def _check_findings(findings: object, where: str) -> None:
 
 
 def _check_usage(usage: object, where: str) -> None:
-    if not (isinstance(usage, dict) and usage.keys() == set(USAGE_KINDS)):
-        raise LedgerError(f"{where}: usage must be an object of exactly {', '.join(USAGE_KINDS)}")
+    fields = (*USAGE_KINDS, "incomplete")
+    if isinstance(usage, dict) and usage.keys() == set(USAGE_KINDS):
+        raise LedgerError(
+            f"{where}: usage.json from an older rbench: no completeness record; re-run the trial"
+        )
+    if not (isinstance(usage, dict) and usage.keys() == set(fields)):
+        raise LedgerError(f"{where}: usage must be an object of exactly {', '.join(fields)}")
+    incomplete = usage["incomplete"]
+    if not (isinstance(incomplete, dict) and incomplete.keys() == set(USAGE_KINDS)):
+        raise LedgerError(
+            f"{where}: usage.incomplete must be an object of exactly {', '.join(USAGE_KINDS)}"
+        )
     for kind in USAGE_KINDS:
         if not isinstance(usage[kind], dict):
             raise LedgerError(f"{where}: usage.{kind} must be an object of models")
         for model, counts in usage[kind].items():
             _check_counts(model, counts, f"{where}: {kind} usage of model {model!r}")
+        reasons = incomplete[kind]
+        if not (isinstance(reasons, list) and all(_text(r) for r in reasons)):
+            raise LedgerError(f"{where}: usage.incomplete.{kind} must be a list of reasons")
 
 
 def _check_counts(model: object, counts: object, at: str) -> None:
@@ -121,8 +136,8 @@ def _check_counts(model: object, counts: object, at: str) -> None:
     if not (isinstance(counts, dict) and counts.keys() == USAGE_KEYS):
         raise LedgerError(f"{at}: expected exactly {', '.join(sorted(USAGE_KEYS))}")
     for key, count in counts.items():
-        if type(count) is not int or count < 0:
-            raise LedgerError(f"{at}: {key}: expected a token count from 0")
+        if type(count) is not int or not 0 <= count < 2**53:
+            raise LedgerError(f"{at}: {key}: expected a token count from 0 below 2**53")
 
 
 def set_state(trial_dir: Path, state: str, reason: str | None = None) -> None:
