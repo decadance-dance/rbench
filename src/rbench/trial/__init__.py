@@ -1,5 +1,5 @@
 """One trial's sandbox (spec trial-isolation, design D3, D5): its images, its compose project, its
-hermetic configuration and the contamination audit."""
+hermetic configuration, the contamination audit and the sessions' token usage."""
 
 from rbench.trial.audit import (
     ALLOWLIST,
@@ -32,6 +32,7 @@ from rbench.trial.repository import (
     prepare_repository,
 )
 from rbench.trial.sessions import SessionError, launch_record, read_shim_log, unbound_sessions
+from rbench.trial.usage import Usage, UsageError, count_usage, usage_record
 
 __all__ = [
     "AGENT_NAME",
@@ -49,6 +50,8 @@ __all__ = [
     "SessionError",
     "TrialError",
     "TrialProject",
+    "Usage",
+    "UsageError",
     "agent_runner",
     "audit_proxy_log",
     "audit_trial",
@@ -61,6 +64,7 @@ __all__ = [
     "compose_spec",
     "copy_comments",
     "count_objects",
+    "count_usage",
     "image_id",
     "inspect_repository",
     "launch_record",
@@ -71,4 +75,5 @@ __all__ = [
     "record_audit",
     "shim_settings",
     "unbound_sessions",
+    "usage_record",
 ]
