@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-55aafde6125a688b85d69a263322371c",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 1207,
+      "file": "src/_pytest/config/__init__.py",
+      "id": "pytest-dev_pytest_14760-36771099#3630035722",
+      "message": "We probably should include a doc/comment here with the rationale of why this is implemented here and not in `warnings`.",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/pytest-dev/pytest/pull/14760#discussion_r3630035722 fixed-by 85a3b012d2b1dc9234fb656d33db792235a8cc78",
+      "start_line": 1207
+    }
+  ]
+}

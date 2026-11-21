@@ -1,0 +1,15 @@
+{
+  "tasks": [
+    "aa-factory_aafactory-prototype_17-a1978cb7",
+    "brexhq_crabtrap_15-5ef0884c",
+    "caddyserver_caddy_7912-9d4bcab0",
+    "expressjs_express_7465-f3a8bca6",
+    "paulstsmith_figlet-comment-generator_32-1d0b6642",
+    "pierrejanineh_techdebtmcp_135-16a54f0f",
+    "pypa_pip_14164-9b8a89c9",
+    "pytest-dev_pytest_14760-36771099",
+    "tokio-rs_axum_3836-64c9fa0c",
+    "vanyastaff_nebula_224-d5ba86dd"
+  ],
+  "version": 1
+}

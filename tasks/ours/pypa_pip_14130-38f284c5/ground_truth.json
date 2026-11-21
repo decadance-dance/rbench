@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-2aa89681d92d684e4e34e849b2da2fde",
+  "items": [
+    {
+      "category": "testing",
+      "end_line": 681,
+      "file": "tests/functional/test_list.py",
+      "id": "pypa_pip_14130-38f284c5#3510893473",
+      "message": "Is `expect_stderr=True` needed here? The test passes without it as well. Unless there is a reason to keep, I think we can drop it. What do you think?",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/pypa/pip/pull/14130#discussion_r3510893473 fixed-by 27343df03ff0a0b05c2156932a6d3d36dd157cd7",
+      "start_line": 681
+    }
+  ]
+}

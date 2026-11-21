@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-f4ccae9fe9a147a575529b1e89fe14f3",
+  "items": [
+    {
+      "category": "documentation",
+      "end_line": 441,
+      "file": "docs/Reference/Errors.md",
+      "id": "fastify_fastify_6909-a6552fe3#3745345487",
+      "message": "```suggestion\n| <a id=\"fst_err_route_method_already_supported\">FST_ERR_ROUTE_METHOD_ALREADY_SUPPORTED</a> | The HTTP method is already supported. | Pass `{ overrideExisting: true }` to explicitly override it. | [#6909](https://github.com/fastify/fastify/pull/6909) |\n```",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/fastify/fastify/pull/6909#discussion_r3745345487 fixed-by 4bb1ad179c41994833af92f4b4699c3599fd7627",
+      "start_line": 441
+    }
+  ]
+}

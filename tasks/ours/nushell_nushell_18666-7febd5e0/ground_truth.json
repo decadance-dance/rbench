@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-a5ebbdcec61a5207959fc5a488dbf9e3",
+  "items": [
+    {
+      "category": "testing",
+      "end_line": 649,
+      "file": "tests/repl/test_parser.rs",
+      "id": "nushell_nushell_18666-7febd5e0#3610562304",
+      "message": "seems like this could be `#[rstest]`",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/nushell/nushell/pull/18666#discussion_r3610562304 fixed-by 2085a277721890fc114281ab35b80083d32a7df0",
+      "start_line": 638
+    }
+  ]
+}

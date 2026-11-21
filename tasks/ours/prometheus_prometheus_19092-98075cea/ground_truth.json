@@ -1,0 +1,27 @@
+{
+  "canary": "rbench-canary-f62517958b2a99aa8eb9611bbe2244f0",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 161,
+      "file": "promql/query_logger.go",
+      "id": "prometheus_prometheus_19092-98075cea#3534967998",
+      "message": "nit: might as well add the error string to the logs as well",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/prometheus/prometheus/pull/19092#discussion_r3534967998 fixed-by 6c25f018fbe746a0620fb49a44251d9cd8f0bfac",
+      "start_line": 161
+    },
+    {
+      "category": "testing",
+      "end_line": 57,
+      "file": "promql/query_logger_test.go",
+      "id": "prometheus_prometheus_19092-98075cea#3534994096",
+      "message": "queryLogWriter already has \"err\" field, so we're masking here, let's reuse the original or rename the masking field.",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/prometheus/prometheus/pull/19092#discussion_r3534994096 fixed-by 6c25f018fbe746a0620fb49a44251d9cd8f0bfac",
+      "start_line": 57
+    }
+  ]
+}

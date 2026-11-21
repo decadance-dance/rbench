@@ -1083,6 +1083,13 @@ Not taken:
 - `fastapi/fastapi`, `aio-libs/aiohttp` and `tox-dev/tox`: no such PR.
 - `cli/cli` and `junegunn/fzf`: their review threads came mostly from bots.
 
+Version 1 of the set (mined on 2026-11-21) has 32 tasks and 49 items from 13 of the 17
+repositories. `pallets/click`, `django/django`, `urfave/cli` and `clap-rs/clap` gave none: their
+candidate PRs were rewritten after the review (the reviewed head is not among the PR's commits),
+changed their title or description inside the review window, or, for one `django/django` PR,
+GitHub did not identify the license at the reviewed head. The changelog names every skipped PR
+and its reason.
+
 **PRs.** In each repository the candidates are the PRs opened and merged inside the window by a
 human author. They are taken in merge order until 3 of them make tasks; `--max-per-repo` may lower
 that cap, and a value above 3 is refused before anything is read. A PR makes a task when all of
@@ -1182,7 +1189,9 @@ severities came from: all from the `rule`, all from the `maintainer`, or both (`
 A run that finds a skip the changelog does not name yet makes a new version that names it, even
 when no task changed.
 
-**Open:** whether the pre-label is final (B) or every item is confirmed by the maintainer (A).
+**Decided (A):** the pre-label is not final. The maintainer confirms every item's severity through
+the label sheet, and the import runs with `--require-labels`, so every imported item's severity
+comes from the `maintainer`.
 
 **Alternatives considered:**
 - *Severity from a model.* It costs model calls and adds another judge whose errors would reach the

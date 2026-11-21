@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "b34910dcb57420f71bfbcc16c4d1fe6e9a95d868a35c197420ebfa572c8fdce0",
+  "base": "8816591844d858f8a2dcb212e47be13ddd1ac8e1",
+  "description": "#### Reference Issues/PRs\r\nMakes #33906 a bit easier.\r\n\r\n#### What does this implement/fix? Explain your changes.\r\nThis PR cleans up the logic of `class_weight` in LogisticRegression and similar functions.\r\n\r\n#### AI usage disclosure\r\nNone\r\n\r\n#### Any other comments?\r\n",
+  "head": "df5055c35626ba0ace2d09327b9cb51f273d3882",
+  "id": "scikit-learn_scikit-learn_34499-df5055c3",
+  "language": "Python",
+  "pr": 34499,
+  "repo": "scikit-learn/scikit-learn",
+  "set": "ours",
+  "title": "MNT clean up class_weight in LogisticRegression"
+}

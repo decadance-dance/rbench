@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-81264024c301eead9303e43a2d63968c",
+  "items": [
+    {
+      "category": "testing",
+      "end_line": 248,
+      "file": "test/validation-error-handling.test.js",
+      "id": "fastify_fastify_6891-e596d601#3695533960",
+      "message": "Could you just extract the result of attached.json() in a const? So that you can reuse it",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/fastify/fastify/pull/6891#discussion_r3695533960 fixed-by 8b404c973b78b993de7507a128fc745f1e6da9bf",
+      "start_line": 248
+    }
+  ]
+}

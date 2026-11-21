@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-79626d032889d8bff3940417190416fc",
+  "items": [
+    {
+      "category": "documentation",
+      "end_line": 139,
+      "file": "docs/types.md",
+      "id": "python-attrs_attrs_1594-ede8e5d5#3628206548",
+      "message": "```suggestion\nSee their [*attrs* documentation](https://pyrefly.org/en/docs/attrs/) for details.\n```",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/python-attrs/attrs/pull/1594#discussion_r3628206548 fixed-by 66a2931c68537f6d913f6e817f3445b10cacd20d",
+      "start_line": 139
+    }
+  ]
+}

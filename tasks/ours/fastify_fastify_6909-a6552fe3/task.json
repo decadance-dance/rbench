@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "606ba5ebf7389d913d9cde204e8080a56643bc0e98b9b5474dceb83105cc232b",
+  "base": "63ef53497c52c3b4fdb8c5e0c1b6b14dd5a424fc",
+  "description": "Remove `FSTDEP025` and throw `FST_ERR_ROUTE_METHOD_ALREADY_SUPPORTED`.\r\n",
+  "head": "a6552fe3406563d6bf7ec16607f5c64e3a549d2f",
+  "id": "fastify_fastify_6909-a6552fe3",
+  "language": "JavaScript",
+  "pr": 6909,
+  "repo": "fastify/fastify",
+  "set": "ours",
+  "title": "refactor!: remove FSTDEP025"
+}

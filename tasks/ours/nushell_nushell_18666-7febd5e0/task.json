@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "cfe2864a14d9b6c340fe4310c1b693bb3f3a7e39e157ce3006f98076b4ea01b0",
+  "base": "4a61309a6d081225af34fdfd312fb547f50be759",
+  "description": "## Description\n\nCloses #18346.\n\nMalformed bare-word interpolations are first attempted as full cell paths. When\nthat speculative parse retained scopes for incomplete-input completion, the\nexpected `Unclosed` error was cleared but the scopes remained. This could keep\na redefined command out of the scope later merged into `EngineState`.\n\nThis captures the scope depth before the speculative parse and restores that\ndepth only when its expected error is intentionally discarded before the\ninterpolation fallback.\n\n## User-Facing Changes\n\nCommand definitions containing these bare-word interpolations now persist\nacross REPL entries. Incomplete-input variable and command completion behavior\nis preserved.\n\n## Tests + Formatting\n\n- [x] Focused multi-entry REPL regression test\n- [x] `cargo +1.95.0 test -p nu-parser` (298 passed, 2 ignored)\n- [x] Targeted local-variable and incomplete-block completion tests\n- [x] Unclosed interpolation REPL test\n- [x] `cargo +1.95.0 fmt --all -- --check`\n- [x] Targeted Clippy checks with warnings and `unwrap_used` denied\n\nThe broader `nu-cli` `completions::` group produced 151 passes, 23 failures,\nand 2 ignored tests on Windows. All 23 failures depend on the repository's\n`test_a_symlink` fixture being checked out as a regular file because\n`core.symlinks=false`; none involve incomplete-input or parser-scope behavior.\n\n## Additional Notes\n\nNo new dependencies or generated-file changes.\n\nAI assistance was used during investigation and drafting. I manually reviewed\nand locally verified the code, tests, and explanation, understand the change,\nand take responsibility for it.\n",
+  "head": "7febd5e07d7b31cc9f508d7d2d1fdb7116fac592",
+  "id": "nushell_nushell_18666-7febd5e0",
+  "language": "Rust",
+  "pr": 18666,
+  "repo": "nushell/nushell",
+  "set": "ours",
+  "title": "fix(parser): restore scopes before interpolation fallback"
+}

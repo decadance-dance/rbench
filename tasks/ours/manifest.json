@@ -1,0 +1,373 @@
+{
+  "changelog": [
+    {
+      "changed": {
+        "caddyserver_caddy_7875-d834319e": null,
+        "caddyserver_caddy_7903-08df973c": null,
+        "caddyserver_caddy_7904-67805e88": null,
+        "caddyserver_caddy_7905-7d3f50e6": null,
+        "caddyserver_caddy_7912-9d4bcab0": "09ecebcb3eb82df915034ed4031a2d5b8f493f9d8541e38484899778c56c2600",
+        "caddyserver_caddy_7916-4a866d9d": "f4b618886e49bc751204bd8666f8168fae43454b26e581e5e7d8ef6c5610c43d",
+        "caddyserver_caddy_7920-4a6dd47e": "5583fb727b52814894ffebafca1624f592918ef6999d5398e238927c99b58c1b",
+        "charmbracelet_bubbletea_1750-c2d0c81a": null,
+        "charmbracelet_bubbletea_1766-40bf5ab1": null,
+        "charmbracelet_bubbletea_1806-c7fad765": null,
+        "charmbracelet_bubbletea_1836-fa87190b": "b8e1e971a5a8cbdb07991778f1292772164a6b1002b28d19197aad355a0610b6",
+        "clap-rs_clap_6454-f538a822": null,
+        "clap-rs_clap_6456-9bdc5d80": null,
+        "clap-rs_clap_6459-38f27d1f": null,
+        "clap-rs_clap_6467-029fd122": null,
+        "clap-rs_clap_6526-6a9f6d1b": null,
+        "django_django_21587-cae59ca8": null,
+        "django_django_21590-1c77696a": null,
+        "django_django_21597-12f38226": null,
+        "django_django_21601-e2db025f": null,
+        "django_django_21606-cb818d53": null,
+        "django_django_21608-89ae1d52": null,
+        "django_django_21610-4b4d1a0a": null,
+        "django_django_21613-571e961d": null,
+        "django_django_21614-0dc539cd": null,
+        "django_django_21623-4306f3bf": null,
+        "django_django_21629-e78be723": null,
+        "django_django_21633-1a95de99": null,
+        "django_django_21635-b280fe90": null,
+        "django_django_21640-84408a68": null,
+        "django_django_21659-461c5e19": null,
+        "django_django_21660-3df84add": null,
+        "django_django_21663-7661983f": null,
+        "django_django_21673-fea35c8e": null,
+        "django_django_21675-698dce81": null,
+        "django_django_21677-f484ac45": null,
+        "django_django_21679-527d8c3f": null,
+        "django_django_21690-44e133b0": null,
+        "django_django_21693-2951eeb0": null,
+        "django_django_21694-27200956": null,
+        "django_django_21695-f4421d11": null,
+        "django_django_21699-1a63f4b3": null,
+        "django_django_21707-0b78cf33": null,
+        "django_django_21714-801a72e4": null,
+        "django_django_21724-cb78e3cb": null,
+        "django_django_21725-ee6223bf": null,
+        "django_django_21736-7127454a": null,
+        "django_django_21745-74b50ec1": null,
+        "django_django_21746-2a804039": null,
+        "django_django_21749-37086bd5": null,
+        "django_django_21752-22004cdd": null,
+        "django_django_21753-2ba34659": null,
+        "django_django_21754-a0be300e": null,
+        "django_django_21759-cf3e1b86": null,
+        "django_django_21760-f2425190": null,
+        "django_django_21764-44d7009a": null,
+        "django_django_21784-165d73b3": null,
+        "django_django_21801-e25c9df2": null,
+        "django_django_21803-77bcae39": null,
+        "django_django_21806-66fe86ac": null,
+        "django_django_21809-2a695622": null,
+        "django_django_21855-4927b60e": null,
+        "django_django_21861-6d2290ca": null,
+        "django_django_21864-8d06a31e": null,
+        "django_django_21867-a0bc2f4e": null,
+        "django_django_21875-baa5d52b": null,
+        "django_django_21881-18fceed0": null,
+        "django_django_21886-00859dd4": null,
+        "django_django_21890-0aacbc22": null,
+        "django_django_21922-aa677edb": null,
+        "django_django_21928-8d8aa801": null,
+        "django_django_21934-09c44279": null,
+        "django_django_21956-0e9abc4f": null,
+        "django_django_21975-5b47408a": null,
+        "django_django_21982-4a4e92ce": null,
+        "django_django_21983-d6cf6099": null,
+        "django_django_22018-0620e2d8": null,
+        "django_django_22030-04e0cbcc": null,
+        "django_django_22039-cad7acb4": null,
+        "django_django_22044-457b99b2": null,
+        "django_django_22046-6ad04a65": null,
+        "django_django_22051-486709c2": null,
+        "django_django_22055-cd498fcd": null,
+        "django_django_22060-9e8b05ef": null,
+        "django_django_22061-38df1cc4": null,
+        "django_django_22072-16ee28f0": null,
+        "django_django_22073-20a39d08": null,
+        "django_django_22087-186d3c4f": null,
+        "django_django_22090-50d708a8": null,
+        "django_django_22093-36d4c92c": null,
+        "django_django_22094-77dd9d2a": null,
+        "django_django_22095-4e14946f": null,
+        "django_django_22096-842cea15": null,
+        "django_django_22107-3059a4d6": null,
+        "django_django_22109-d89cbd83": null,
+        "django_django_22112-132ad954": null,
+        "django_django_22132-e50c401b": null,
+        "django_django_22137-8085ca81": null,
+        "django_django_22141-ccc29d76": null,
+        "django_django_22154-14e26f07": null,
+        "django_django_22155-baeb7e9d": null,
+        "django_django_22158-3da0d708": null,
+        "django_django_22169-762e5aad": null,
+        "django_django_22172-95c748a8": null,
+        "django_django_22176-97dc4db4": null,
+        "django_django_22177-cdafaee1": null,
+        "django_django_22179-53ad867f": null,
+        "django_django_22186-60111ecd": null,
+        "django_django_22189-a9435817": null,
+        "django_django_22208-ccf63f56": null,
+        "django_django_22210-f4e1545d": null,
+        "django_django_22233-6b3a64d3": null,
+        "django_django_22235-bdb64ab1": null,
+        "django_django_22255-1aeed228": null,
+        "django_django_22269-4f6527f0": null,
+        "django_django_22279-4477b75b": null,
+        "etcd-io_bbolt_1241-50070bfe": "4e3e5c250710bd44bfe81a940a57984ca0397586cc305fe646b2823972038cc1",
+        "etcd-io_bbolt_1286-2dc44a4d": null,
+        "etcd-io_bbolt_1298-9bbe0ba3": null,
+        "expressjs_express_7459-d8d266aa": null,
+        "expressjs_express_7464-537ca434": null,
+        "expressjs_express_7465-f3a8bca6": "65f9be15c3eeb0eec16eb1aa9c9bd2cb5346d562e34e5d2f2cdbc37b3071f0a6",
+        "expressjs_express_7468-55a0b328": "5fa8fdb87ab43154ae06984ff1f02d844d46843c34513f5e50895d01367d5290",
+        "fastify_fastify_6845-91674baa": null,
+        "fastify_fastify_6859-06258c07": null,
+        "fastify_fastify_6879-f62276f0": null,
+        "fastify_fastify_6891-e596d601": "6253660eeab8f83281de25f750689855f48f8e3ed55cef3c9969766695e89f2a",
+        "fastify_fastify_6893-e360888d": "71f561f68cb17057ce29e4a92f9d1d58f850e61bcf66a097f01e97b093790919",
+        "fastify_fastify_6894-2e9d586a": null,
+        "fastify_fastify_6899-589e91b9": null,
+        "fastify_fastify_6909-a6552fe3": "20a628d3c914ee84832269cb662da45d7305618c846835e5ee66ce32ff82aa56",
+        "nushell_nushell_18508-311a625b": "ec62d33889d82bb37e7a031aec66d950c669dcfdaa214bdc9170d22888e50dd0",
+        "nushell_nushell_18582-855e1e87": null,
+        "nushell_nushell_18604-1b109330": null,
+        "nushell_nushell_18625-f87e81b6": null,
+        "nushell_nushell_18650-28a54a5e": null,
+        "nushell_nushell_18666-7febd5e0": "4060f514e0d64b2abce87976420e991446f4320d2a8cd38e26340d3aa2785bc0",
+        "nushell_nushell_18683-e1954024": "ad4a9d799514c2c95f3c635c30a5bf4ba0538fd205f2a7df6339bad73f1b8f9d",
+        "pallets_click_3677-d602e9f5": null,
+        "pallets_click_3695-7a0a3447": null,
+        "pallets_click_3778-fc3273af": null,
+        "pallets_click_3780-e03ce61e": null,
+        "pallets_click_3805-83d425ad": null,
+        "pallets_click_3818-de7ad0c7": null,
+        "pallets_click_3820-18924fda": null,
+        "pallets_click_3898-1143d114": null,
+        "pallets_click_3902-7d84462d": null,
+        "prometheus_prometheus_19092-98075cea": "563d9b65777f1b4fa81e18f5dcdf2a4811e679fa95f02b29181996d4a7547416",
+        "prometheus_prometheus_19093-69505044": null,
+        "prometheus_prometheus_19124-76de8a19": "a6effb17b1d9eae44470d400c8fb26e9105acd11801fb3fb0d91a8ab70a476c6",
+        "prometheus_prometheus_19140-e4a2bf94": "36ca3435237056759bf0a52ae3a394fc29a98ff2917df8e2f79b529df9bb3861",
+        "psf_black_5223-d439c60f": "eb477ddc96340986856d25c8e29419d6503f148caaa53d19045a30aa558bbb23",
+        "psf_black_5237-3f873744": "20d54f257808e684461435602d47d0945bb4e46ca5e653fb30796980efd9bdcc",
+        "psf_black_5241-85e38f51": null,
+        "psf_black_5272-7e2e327d": "0234665961aaf4b624f8f1a99376451a4157d6de24677ef2aff24a21bfce10a9",
+        "pypa_pip_14127-d30db8a7": null,
+        "pypa_pip_14130-38f284c5": "1a8da855b5f92709b2c7b2d7460e2881e1f04b83562470182b895ce31fc84460",
+        "pypa_pip_14131-ced85fdf": null,
+        "pypa_pip_14134-1409ae74": "5f277a6cfe45370c66fa7d66e15dbfbe9e55fc71afd0be9d8f17050e6753eecc",
+        "pypa_pip_14164-9b8a89c9": "09499407d148250c1617bee2b8fb3d044b1e9ad6eed7610ee212be1883c3bbb1",
+        "pytest-dev_pytest_14692-007af70c": null,
+        "pytest-dev_pytest_14725-570a5183": null,
+        "pytest-dev_pytest_14742-9be2beb3": null,
+        "pytest-dev_pytest_14751-412e21b3": null,
+        "pytest-dev_pytest_14754-90d679d5": null,
+        "pytest-dev_pytest_14760-36771099": "63936792475bc373e4bf9827cebc5771ce26d02a08da8a011e4c235cdc1c5072",
+        "pytest-dev_pytest_14781-79df156b": null,
+        "pytest-dev_pytest_14790-8310c5bc": null,
+        "pytest-dev_pytest_14791-f6ac9747": null,
+        "pytest-dev_pytest_14813-a3b7edc3": null,
+        "pytest-dev_pytest_14865-e25d981e": null,
+        "pytest-dev_pytest_14875-7d3acf76": null,
+        "pytest-dev_pytest_14913-b277fa42": "158ae10537f4f4f743fd90bef0a1934f814ede15174b7642caa82c8a14bbbf52",
+        "pytest-dev_pytest_14921-be39f2ff": "9c9d18a80355dae36ea8c9a65a491a7cb33e4d43a0dc19d3d4abfb586f65f128",
+        "python-attrs_attrs_1592-b002d610": null,
+        "python-attrs_attrs_1594-ede8e5d5": "d432ea55e994f80208775af5add4d7cfdb730da0f13d6bf5c0a113a91a64c735",
+        "scikit-learn_scikit-learn_34423-fdb46ccc": "86316411ecfd5b32e2634325304e934b892e9481f866c91e5e53b1580c415709",
+        "scikit-learn_scikit-learn_34439-f4d3ecc6": null,
+        "scikit-learn_scikit-learn_34440-1e874984": "950d6a46e61cbee1ffefc26154de2be56c0193196dbd9c389e9011862d2d7e2d",
+        "scikit-learn_scikit-learn_34499-df5055c3": "6f14cfdd18fcd93a5b837f3a3387ff524d020f3b17f32b2702ef0e53c6cf08e4",
+        "tokio-rs_axum_3836-64c9fa0c": "6f321314ac65b91d9db2ce04b5cb6ca49b960ef097bcc94d95c72e93dfedd596",
+        "tokio-rs_axum_3838-95dd2515": null,
+        "tokio-rs_axum_3856-384d7ad6": null,
+        "tokio-rs_axum_3867-f2c32c64": null,
+        "tokio-rs_axum_3870-c89958d3": "5db726132d51663930880aa97cb47269b5cb0c55f8c70daeab52ca327ca707b1",
+        "tokio-rs_axum_3890-6eb9dab7": null,
+        "tokio-rs_axum_3909-c264bd14": "ff46cbb0fc265f50a6e7d853b65dbcbd167fb029acd0ebf967105becf0a8c996",
+        "urfave_cli_2455-9c76dcd1": null,
+        "urfave_cli_2497-029793d0": null,
+        "urfave_cli_2501-21271452": null,
+        "urfave_cli_2502-09ecbce0": null,
+        "urfave_cli_2511-b7c29d5a": null
+      },
+      "note": "Mined from 17 repositories, PRs opened and merged from 2026-07-01 to before 2026-11-20 (design D15); severity by maintainer. Skipped: caddyserver_caddy_7875-d834319e (the reviewed head is not in the PR's commits); caddyserver_caddy_7903-08df973c (description changed inside the review window); caddyserver_caddy_7904-67805e88 (the reviewed head is not in the PR's commits); caddyserver_caddy_7905-7d3f50e6 (the reviewed head is not in the PR's commits); charmbracelet_bubbletea_1750-c2d0c81a (the reviewed head is not in the PR's commits); charmbracelet_bubbletea_1766-40bf5ab1 (the reviewed head is not in the PR's commits); charmbracelet_bubbletea_1806-c7fad765 (the reviewed head is not in the PR's commits); clap-rs_clap_6454-f538a822 (the reviewed head is not in the PR's commits); clap-rs_clap_6456-9bdc5d80 (the reviewed head is not in the PR's commits); clap-rs_clap_6459-38f27d1f (the reviewed head is not in the PR's commits); clap-rs_clap_6467-029fd122 (the reviewed head is not in the PR's commits); clap-rs_clap_6526-6a9f6d1b (the reviewed head is not in the PR's commits); django_django_21587-cae59ca8 (the reviewed head is not in the PR's commits); django_django_21590-1c77696a (the reviewed head is not in the PR's commits); django_django_21597-12f38226 (the reviewed head is not in the PR's commits); django_django_21601-e2db025f (the reviewed head is not in the PR's commits); django_django_21606-cb818d53 (the reviewed head is not in the PR's commits); django_django_21608-89ae1d52 (the reviewed head is not in the PR's commits); django_django_21610-4b4d1a0a (the reviewed head is not in the PR's commits); django_django_21613-571e961d (the reviewed head is not in the PR's commits); django_django_21614-0dc539cd (the reviewed head is not in the PR's commits); django_django_21623-4306f3bf (the reviewed head is not in the PR's commits); django_django_21629-e78be723 (the reviewed head is not in the PR's commits); django_django_21633-1a95de99 (the reviewed head is not in the PR's commits); django_django_21635-b280fe90 (the reviewed head is not in the PR's commits); django_django_21640-84408a68 (the reviewed head is not in the PR's commits); django_django_21659-461c5e19 (the reviewed head is not in the PR's commits); django_django_21660-3df84add (the reviewed head is not in the PR's commits); django_django_21663-7661983f (the reviewed head is not in the PR's commits); django_django_21673-fea35c8e (the reviewed head is not in the PR's commits); django_django_21675-698dce81 (the reviewed head is not in the PR's commits); django_django_21677-f484ac45 (the reviewed head is not in the PR's commits); django_django_21679-527d8c3f (the reviewed head is not in the PR's commits); django_django_21690-44e133b0 (the reviewed head is not in the PR's commits); django_django_21693-2951eeb0 (the reviewed head is not in the PR's commits); django_django_21694-27200956 (the reviewed head is not in the PR's commits); django_django_21695-f4421d11 (the reviewed head is not in the PR's commits); django_django_21699-1a63f4b3 (the reviewed head is not in the PR's commits); django_django_21707-0b78cf33 (the reviewed head is not in the PR's commits); django_django_21714-801a72e4 (the reviewed head is not in the PR's commits); django_django_21724-cb78e3cb (title changed inside the review window); django_django_21725-ee6223bf (the reviewed head is not in the PR's commits); django_django_21736-7127454a (the reviewed head is not in the PR's commits); django_django_21745-74b50ec1 (the reviewed head is not in the PR's commits); django_django_21746-2a804039 (the reviewed head is not in the PR's commits); django_django_21749-37086bd5 (the reviewed head is not in the PR's commits); django_django_21752-22004cdd (the reviewed head is not in the PR's commits); django_django_21753-2ba34659 (the reviewed head is not in the PR's commits); django_django_21754-a0be300e (the reviewed head is not in the PR's commits); django_django_21759-cf3e1b86 (the reviewed head is not in the PR's commits); django_django_21760-f2425190 (the reviewed head is not in the PR's commits); django_django_21764-44d7009a (the reviewed head is not in the PR's commits); django_django_21784-165d73b3 (the reviewed head is not in the PR's commits); django_django_21801-e25c9df2 (the reviewed head is not in the PR's commits); django_django_21803-77bcae39 (the reviewed head is not in the PR's commits); django_django_21806-66fe86ac (the reviewed head is not in the PR's commits); django_django_21809-2a695622 (the reviewed head is not in the PR's commits); django_django_21855-4927b60e (the reviewed head is not in the PR's commits); django_django_21861-6d2290ca (the reviewed head is not in the PR's commits); django_django_21864-8d06a31e (the reviewed head is not in the PR's commits); django_django_21867-a0bc2f4e (the reviewed head is not in the PR's commits); django_django_21875-baa5d52b (the reviewed head is not in the PR's commits); django_django_21881-18fceed0 (the reviewed head is not in the PR's commits); django_django_21886-00859dd4 (the reviewed head is not in the PR's commits); django_django_21890-0aacbc22 (the reviewed head is not in the PR's commits); django_django_21922-aa677edb (the reviewed head is not in the PR's commits); django_django_21928-8d8aa801 (the reviewed head is not in the PR's commits); django_django_21934-09c44279 (the reviewed head is not in the PR's commits); django_django_21956-0e9abc4f (the reviewed head is not in the PR's commits); django_django_21975-5b47408a (the reviewed head is not in the PR's commits); django_django_21982-4a4e92ce (the reviewed head is not in the PR's commits); django_django_21983-d6cf6099 (the reviewed head is not in the PR's commits); django_django_22018-0620e2d8 (the reviewed head is not in the PR's commits); django_django_22030-04e0cbcc (the reviewed head is not in the PR's commits); django_django_22039-cad7acb4 (the reviewed head is not in the PR's commits); django_django_22044-457b99b2 (the reviewed head is not in the PR's commits); django_django_22046-6ad04a65 (the reviewed head is not in the PR's commits); django_django_22051-486709c2 (the reviewed head is not in the PR's commits); django_django_22055-cd498fcd (the reviewed head is not in the PR's commits); django_django_22060-9e8b05ef (the reviewed head is not in the PR's commits); django_django_22061-38df1cc4 (the reviewed head is not in the PR's commits); django_django_22072-16ee28f0 (the reviewed head is not in the PR's commits); django_django_22073-20a39d08 (the reviewed head is not in the PR's commits); django_django_22087-186d3c4f (the reviewed head is not in the PR's commits); django_django_22090-50d708a8 (license refused: django/django: license in LICENSE is not recognized); django_django_22093-36d4c92c (the reviewed head is not in the PR's commits); django_django_22094-77dd9d2a (the reviewed head is not in the PR's commits); django_django_22095-4e14946f (the reviewed head is not in the PR's commits); django_django_22096-842cea15 (the reviewed head is not in the PR's commits); django_django_22107-3059a4d6 (the reviewed head is not in the PR's commits); django_django_22109-d89cbd83 (the reviewed head is not in the PR's commits); django_django_22112-132ad954 (the reviewed head is not in the PR's commits); django_django_22132-e50c401b (the reviewed head is not in the PR's commits); django_django_22137-8085ca81 (the reviewed head is not in the PR's commits); django_django_22141-ccc29d76 (the reviewed head is not in the PR's commits); django_django_22154-14e26f07 (the reviewed head is not in the PR's commits); django_django_22155-baeb7e9d (the reviewed head is not in the PR's commits); django_django_22158-3da0d708 (the reviewed head is not in the PR's commits); django_django_22169-762e5aad (the reviewed head is not in the PR's commits); django_django_22172-95c748a8 (the reviewed head is not in the PR's commits); django_django_22176-97dc4db4 (the reviewed head is not in the PR's commits); django_django_22177-cdafaee1 (the reviewed head is not in the PR's commits); django_django_22179-53ad867f (the reviewed head is not in the PR's commits); django_django_22186-60111ecd (the reviewed head is not in the PR's commits); django_django_22189-a9435817 (the reviewed head is not in the PR's commits); django_django_22208-ccf63f56 (the reviewed head is not in the PR's commits); django_django_22210-f4e1545d (the reviewed head is not in the PR's commits); django_django_22233-6b3a64d3 (the reviewed head is not in the PR's commits); django_django_22235-bdb64ab1 (the reviewed head is not in the PR's commits); django_django_22255-1aeed228 (the reviewed head is not in the PR's commits); django_django_22269-4f6527f0 (the reviewed head is not in the PR's commits); django_django_22279-4477b75b (the reviewed head is not in the PR's commits); etcd-io_bbolt_1286-2dc44a4d (the reviewed head is not in the PR's commits); etcd-io_bbolt_1298-9bbe0ba3 (the reviewed head is not in the PR's commits); expressjs_express_7459-d8d266aa (the reviewed head is not in the PR's commits); expressjs_express_7464-537ca434 (description changed inside the review window); fastify_fastify_6845-91674baa (the reviewed head is not in the PR's commits); fastify_fastify_6859-06258c07 (title changed inside the review window); fastify_fastify_6879-f62276f0 (title changed inside the review window); fastify_fastify_6894-2e9d586a (the reviewed head is not in the PR's commits); fastify_fastify_6899-589e91b9 (title changed inside the review window); nushell_nushell_18582-855e1e87 (the reviewed head is not in the PR's commits); nushell_nushell_18604-1b109330 (the reviewed head is not in the PR's commits); nushell_nushell_18625-f87e81b6 (the reviewed head is not in the PR's commits); nushell_nushell_18650-28a54a5e (title changed inside the review window); pallets_click_3677-d602e9f5 (the reviewed head is not in the PR's commits); pallets_click_3695-7a0a3447 (description changed inside the review window); pallets_click_3778-fc3273af (the reviewed head is not in the PR's commits); pallets_click_3780-e03ce61e (the reviewed head is not in the PR's commits); pallets_click_3805-83d425ad (the reviewed head is not in the PR's commits); pallets_click_3818-de7ad0c7 (the reviewed head is not in the PR's commits); pallets_click_3820-18924fda (the reviewed head is not in the PR's commits); pallets_click_3898-1143d114 (the reviewed head is not in the PR's commits); pallets_click_3902-7d84462d (the reviewed head is not in the PR's commits); prometheus_prometheus_19093-69505044 (the reviewed head is not in the PR's commits); psf_black_5241-85e38f51 (description changed inside the review window); pypa_pip_14127-d30db8a7 (description changed inside the review window); pypa_pip_14131-ced85fdf (title changed inside the review window); pytest-dev_pytest_14692-007af70c (the reviewed head is not in the PR's commits); pytest-dev_pytest_14725-570a5183 (the reviewed head is not in the PR's commits); pytest-dev_pytest_14742-9be2beb3 (the reviewed head is not in the PR's commits); pytest-dev_pytest_14751-412e21b3 (the reviewed head is not in the PR's commits); pytest-dev_pytest_14754-90d679d5 (description changed inside the review window); pytest-dev_pytest_14781-79df156b (the reviewed head is not in the PR's commits); pytest-dev_pytest_14790-8310c5bc (the reviewed head is not in the PR's commits); pytest-dev_pytest_14791-f6ac9747 (the reviewed head is not in the PR's commits); pytest-dev_pytest_14813-a3b7edc3 (the reviewed head is not in the PR's commits); pytest-dev_pytest_14865-e25d981e (the reviewed head is not in the PR's commits); pytest-dev_pytest_14875-7d3acf76 (the reviewed head is not in the PR's commits); python-attrs_attrs_1592-b002d610 (description changed inside the review window); scikit-learn_scikit-learn_34439-f4d3ecc6 (title changed inside the review window); tokio-rs_axum_3838-95dd2515 (the reviewed head is not in the PR's commits); tokio-rs_axum_3856-384d7ad6 (description changed inside the review window); tokio-rs_axum_3867-f2c32c64 (the reviewed head is not in the PR's commits); tokio-rs_axum_3890-6eb9dab7 (description changed inside the review window); urfave_cli_2455-9c76dcd1 (the reviewed head is not in the PR's commits); urfave_cli_2497-029793d0 (the reviewed head is not in the PR's commits); urfave_cli_2501-21271452 (the reviewed head is not in the PR's commits); urfave_cli_2502-09ecbce0 (the reviewed head is not in the PR's commits); urfave_cli_2511-b7c29d5a (the reviewed head is not in the PR's commits).",
+      "version": 1
+    }
+  ],
+  "set": "ours",
+  "source": {
+    "filters": {
+      "max_changed_files": 30,
+      "max_changed_lines": 1500,
+      "max_per_repo": 3
+    },
+    "merged_after": "2026-07-01",
+    "merged_before": "2026-11-20",
+    "repos": [
+      "psf/black",
+      "pytest-dev/pytest",
+      "pypa/pip",
+      "pallets/click",
+      "python-attrs/attrs",
+      "django/django",
+      "scikit-learn/scikit-learn",
+      "caddyserver/caddy",
+      "prometheus/prometheus",
+      "etcd-io/bbolt",
+      "charmbracelet/bubbletea",
+      "urfave/cli",
+      "tokio-rs/axum",
+      "clap-rs/clap",
+      "nushell/nushell",
+      "expressjs/express",
+      "fastify/fastify"
+    ],
+    "severity_labels": "maintainer",
+    "severity_map": {
+      "M": "must",
+      "N": "nit",
+      "S": "should"
+    },
+    "severity_rule": {
+      "must": "not nit, and the comment's first line has a (blocking) decoration or its review requested changes",
+      "nit": "the comment opens with nit, nitpick, minor, optional, style or typo, as a word or a Conventional Comments label",
+      "should": "every other item"
+    }
+  },
+  "tasks": {
+    "caddyserver_caddy_7912-9d4bcab0": {
+      "license": "Apache-2.0",
+      "sha256": "09ecebcb3eb82df915034ed4031a2d5b8f493f9d8541e38484899778c56c2600"
+    },
+    "caddyserver_caddy_7916-4a866d9d": {
+      "license": "Apache-2.0",
+      "sha256": "f4b618886e49bc751204bd8666f8168fae43454b26e581e5e7d8ef6c5610c43d"
+    },
+    "caddyserver_caddy_7920-4a6dd47e": {
+      "license": "Apache-2.0",
+      "sha256": "5583fb727b52814894ffebafca1624f592918ef6999d5398e238927c99b58c1b"
+    },
+    "charmbracelet_bubbletea_1836-fa87190b": {
+      "license": "MIT",
+      "sha256": "b8e1e971a5a8cbdb07991778f1292772164a6b1002b28d19197aad355a0610b6"
+    },
+    "etcd-io_bbolt_1241-50070bfe": {
+      "license": "MIT",
+      "sha256": "4e3e5c250710bd44bfe81a940a57984ca0397586cc305fe646b2823972038cc1"
+    },
+    "expressjs_express_7465-f3a8bca6": {
+      "license": "MIT",
+      "sha256": "65f9be15c3eeb0eec16eb1aa9c9bd2cb5346d562e34e5d2f2cdbc37b3071f0a6"
+    },
+    "expressjs_express_7468-55a0b328": {
+      "license": "MIT",
+      "sha256": "5fa8fdb87ab43154ae06984ff1f02d844d46843c34513f5e50895d01367d5290"
+    },
+    "fastify_fastify_6891-e596d601": {
+      "license": "MIT",
+      "sha256": "6253660eeab8f83281de25f750689855f48f8e3ed55cef3c9969766695e89f2a"
+    },
+    "fastify_fastify_6893-e360888d": {
+      "license": "MIT",
+      "sha256": "71f561f68cb17057ce29e4a92f9d1d58f850e61bcf66a097f01e97b093790919"
+    },
+    "fastify_fastify_6909-a6552fe3": {
+      "license": "MIT",
+      "sha256": "20a628d3c914ee84832269cb662da45d7305618c846835e5ee66ce32ff82aa56"
+    },
+    "nushell_nushell_18508-311a625b": {
+      "license": "MIT",
+      "sha256": "ec62d33889d82bb37e7a031aec66d950c669dcfdaa214bdc9170d22888e50dd0"
+    },
+    "nushell_nushell_18666-7febd5e0": {
+      "license": "MIT",
+      "sha256": "4060f514e0d64b2abce87976420e991446f4320d2a8cd38e26340d3aa2785bc0"
+    },
+    "nushell_nushell_18683-e1954024": {
+      "license": "MIT",
+      "sha256": "ad4a9d799514c2c95f3c635c30a5bf4ba0538fd205f2a7df6339bad73f1b8f9d"
+    },
+    "prometheus_prometheus_19092-98075cea": {
+      "license": "Apache-2.0",
+      "sha256": "563d9b65777f1b4fa81e18f5dcdf2a4811e679fa95f02b29181996d4a7547416"
+    },
+    "prometheus_prometheus_19124-76de8a19": {
+      "license": "Apache-2.0",
+      "sha256": "a6effb17b1d9eae44470d400c8fb26e9105acd11801fb3fb0d91a8ab70a476c6"
+    },
+    "prometheus_prometheus_19140-e4a2bf94": {
+      "license": "Apache-2.0",
+      "sha256": "36ca3435237056759bf0a52ae3a394fc29a98ff2917df8e2f79b529df9bb3861"
+    },
+    "psf_black_5223-d439c60f": {
+      "license": "MIT",
+      "sha256": "eb477ddc96340986856d25c8e29419d6503f148caaa53d19045a30aa558bbb23"
+    },
+    "psf_black_5237-3f873744": {
+      "license": "MIT",
+      "sha256": "20d54f257808e684461435602d47d0945bb4e46ca5e653fb30796980efd9bdcc"
+    },
+    "psf_black_5272-7e2e327d": {
+      "license": "MIT",
+      "sha256": "0234665961aaf4b624f8f1a99376451a4157d6de24677ef2aff24a21bfce10a9"
+    },
+    "pypa_pip_14130-38f284c5": {
+      "license": "MIT",
+      "sha256": "1a8da855b5f92709b2c7b2d7460e2881e1f04b83562470182b895ce31fc84460"
+    },
+    "pypa_pip_14134-1409ae74": {
+      "license": "MIT",
+      "sha256": "5f277a6cfe45370c66fa7d66e15dbfbe9e55fc71afd0be9d8f17050e6753eecc"
+    },
+    "pypa_pip_14164-9b8a89c9": {
+      "license": "MIT",
+      "sha256": "09499407d148250c1617bee2b8fb3d044b1e9ad6eed7610ee212be1883c3bbb1"
+    },
+    "pytest-dev_pytest_14760-36771099": {
+      "license": "MIT",
+      "sha256": "63936792475bc373e4bf9827cebc5771ce26d02a08da8a011e4c235cdc1c5072"
+    },
+    "pytest-dev_pytest_14913-b277fa42": {
+      "license": "MIT",
+      "sha256": "158ae10537f4f4f743fd90bef0a1934f814ede15174b7642caa82c8a14bbbf52"
+    },
+    "pytest-dev_pytest_14921-be39f2ff": {
+      "license": "MIT",
+      "sha256": "9c9d18a80355dae36ea8c9a65a491a7cb33e4d43a0dc19d3d4abfb586f65f128"
+    },
+    "python-attrs_attrs_1594-ede8e5d5": {
+      "license": "MIT",
+      "sha256": "d432ea55e994f80208775af5add4d7cfdb730da0f13d6bf5c0a113a91a64c735"
+    },
+    "scikit-learn_scikit-learn_34423-fdb46ccc": {
+      "license": "BSD-3-Clause",
+      "sha256": "86316411ecfd5b32e2634325304e934b892e9481f866c91e5e53b1580c415709"
+    },
+    "scikit-learn_scikit-learn_34440-1e874984": {
+      "license": "BSD-3-Clause",
+      "sha256": "950d6a46e61cbee1ffefc26154de2be56c0193196dbd9c389e9011862d2d7e2d"
+    },
+    "scikit-learn_scikit-learn_34499-df5055c3": {
+      "license": "BSD-3-Clause",
+      "sha256": "6f14cfdd18fcd93a5b837f3a3387ff524d020f3b17f32b2702ef0e53c6cf08e4"
+    },
+    "tokio-rs_axum_3836-64c9fa0c": {
+      "license": "MIT",
+      "sha256": "6f321314ac65b91d9db2ce04b5cb6ca49b960ef097bcc94d95c72e93dfedd596"
+    },
+    "tokio-rs_axum_3870-c89958d3": {
+      "license": "MIT",
+      "sha256": "5db726132d51663930880aa97cb47269b5cb0c55f8c70daeab52ca327ca707b1"
+    },
+    "tokio-rs_axum_3909-c264bd14": {
+      "license": "MIT",
+      "sha256": "ff46cbb0fc265f50a6e7d853b65dbcbd167fb029acd0ebf967105becf0a8c996"
+    }
+  },
+  "version": 1
+}

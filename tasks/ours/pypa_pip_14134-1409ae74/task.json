@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "f958935e08d6ade9a496aab0ba73fcf67bbc7fe2a4ae7bc0ac8e8d022edb913f",
+  "base": "0ed2d3e775db5c1af01311fbb6c2c6b55b0c4d70",
+  "description": "Fixes #11436\r\n\r\nThe issue thread is long and doesn't have a clean repro, so here's one:\r\n\r\n```bash\r\npython -m venv venv\r\nmkdir -p <site-packages>/foo.dist-info\r\npip install requests\r\n```\r\n\r\nOutput before this fix — same warning printed 4 times in one command:\r\n\r\n```\r\nWARNING: Skipping .../foo.dist-info due to invalid metadata entry 'name'\r\nWARNING: Skipping .../foo.dist-info due to invalid metadata entry 'name'\r\nCollecting requests\r\n...\r\nWARNING: Skipping .../foo.dist-info due to invalid metadata entry 'name'\r\nInstalling collected packages: urllib3, idna, charset_normalizer, certifi, requests\r\nWARNING: Skipping .../foo.dist-info due to invalid metadata entry 'name'\r\nWARNING: Skipping .../foo.dist-info due to invalid metadata entry 'name'\r\nSuccessfully installed certifi-2026.6.17 charset_normalizer-3.4.7 idna-3.18 requests-2.34.2 urllib3-2.7.0\r\n```\r\n\r\n`_DistributionFinder` is recreated on every `_iter_distributions()` call, so per-instance memoization can't prevent repeats across a single pip run. This PR implements `_warned_bad_metadata` to module level and checks it in `_DistributionFinder._find_impl`, so each bad-metadata path only warns once per run.",
+  "head": "1409ae74c01b88f239c3ab2036d5cade4de7a61a",
+  "id": "pypa_pip_14134-1409ae74",
+  "language": "Python",
+  "pr": 14134,
+  "repo": "pypa/pip",
+  "set": "ours",
+  "title": "Only warn once per bad-metadata location per pip run"
+}

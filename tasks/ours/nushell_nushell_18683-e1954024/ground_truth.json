@@ -1,0 +1,38 @@
+{
+  "canary": "rbench-canary-964d7bdc20e5c9d7944f6a7a2315c278",
+  "items": [
+    {
+      "category": "documentation",
+      "end_line": 9,
+      "file": "AGENTS.md",
+      "id": "nushell_nushell_18683-e1954024#3625467593",
+      "message": "I don't think that is that nice. \"When you are complete\" is probably for an LLM after each prompt which is too often for my liking. Since our CI catches them anyway, I would not mention them here. You only really need to run these before you open a PR which I don't want LLMs to do.",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/nushell/nushell/pull/18683#discussion_r3625467593 fixed-by 8c7401808763df3f9347a58526a306c24a93be11",
+      "start_line": 6
+    },
+    {
+      "category": "documentation",
+      "end_line": 17,
+      "file": "AGENTS.md",
+      "id": "nushell_nushell_18683-e1954024#3625478112",
+      "message": "I have a feeling that this is a fallacy. It will probably cause many helper generation which is not inherintly good. I don't know how to state it, but maybe we should \"encourage\" to let the AI search for solution in the existing codebase instead.",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/nushell/nushell/pull/18683#discussion_r3625478112 fixed-by 8c7401808763df3f9347a58526a306c24a93be11",
+      "start_line": 17
+    },
+    {
+      "category": "documentation",
+      "end_line": 26,
+      "file": "AGENTS.md",
+      "id": "nushell_nushell_18683-e1954024#3625489368",
+      "message": "I think, it would be better to disallow agents to open PRs. Humans should do that and if they use AI to help with their description, that is fine. But blindly opening PRs is not something I want. Maybe we could even add an instruction like Mitchells: https://github.com/ghostty-org/ghostty/blob/main/AGENTS.md#issue-and-pr-guidelines",
+      "producer": "human",
+      "severity": "must",
+      "source": "https://github.com/nushell/nushell/pull/18683#discussion_r3625489368 fixed-by 8c7401808763df3f9347a58526a306c24a93be11",
+      "start_line": 24
+    }
+  ]
+}

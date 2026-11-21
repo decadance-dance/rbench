@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "67d919055ea66e29d6e2273e3067f376d611ffdf0ef86b68c4ae6c10514588ba",
+  "base": "41386506a9ca6874a79b304f1baafd50522e6078",
+  "description": "Port: https://github.com/expressjs/body-parser/blob/aa9889bc35ede269cbb8cc271e485cde0847776c/.github/workflows/npm-publish.yml. This was used already in a recent release\r\n\r\ncontext: https://openjs-foundation.slack.com/archives/C02QB1731FH/p1788864136485829\r\n\r\nsibling: https://github.com/expressjs/express/pull/7464\r\n\r\ncc: @krzysdz @sheplu @blakeembrey ",
+  "head": "f3a8bca6c89b4dfec3d638e73c58a2ff781612df",
+  "id": "expressjs_express_7465-f3a8bca6",
+  "language": "JavaScript",
+  "pr": 7465,
+  "repo": "expressjs/express",
+  "set": "ours",
+  "title": "ci: add npm staged publication with dist-tag support"
+}

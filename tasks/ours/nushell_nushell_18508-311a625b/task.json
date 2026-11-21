@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "22f8861377de1e3b1c86cff54d3ef5ab6a72c7b6c2b64ec7c0b4e5c1aa49800d",
+  "base": "0c00ab8970a11cc22b63be5792fe1dad1fc07fae",
+  "description": "## Description\r\n\r\nPrepare the literal/regex matcher during `str replace` argument setup so list and table inputs reuse the compiled pattern.\r\n\r\nAvoids rebuilding flags and recompiling the same regex for every input value.\r\n\r\nAlso adds Tango benchmark coverage for regex replacement over list, table cell-path, and multiline inputs.\r\n\r\n## User-facing changes (Release notes)\r\n\r\nImproved performance of `str replace --regex` and `str replace --multiline` when working with lists, tables, and records with many string values, roughly a 10x speed boost.\r\n\r\n## Additional notes\r\n\r\nTango comparison results:\r\n\r\n| Benchmark | Reference | Patched | Change |\r\n|---|---:|---:|---:|\r\n| `str_replace_regex_list_1000` | 103.5 ms | 7.4 ms | -92.86%, 14.0x faster |\r\n| `str_replace_regex_table_500_2cols` | 102.1 ms | 8.3 ms | -91.90%, 12.3x faster |\r\n| `str_replace_multiline_list_1000` | 49.8 ms | 6.3 ms | -87.37%, 7.9x faster |",
+  "head": "311a625bf44dd02c8588fd86a49c624d4acbd67d",
+  "id": "nushell_nushell_18508-311a625b",
+  "language": "Rust",
+  "pr": 18508,
+  "repo": "nushell/nushell",
+  "set": "ours",
+  "title": "perf(str): prepare replace matcher once"
+}

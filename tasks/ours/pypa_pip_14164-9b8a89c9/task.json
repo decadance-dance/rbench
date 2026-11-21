@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "f4978a0d6bda89b08c915e75ee41fa5b712ca74e1366e3ac054b0defec3e4633",
+  "base": "d20e033cfb6fae6e0ca7bbb49c21fe2cae726c13",
+  "description": "## What does this PR do?\r\n\r\nSmall tweak to the security policy.\r\n\r\n## PR Checklist:\r\n<!--- Go over all the following points, and put an `x` in all the boxes that apply. -->\r\n- [x] I agree to follow the [PSF Code of Conduct](https://www.python.org/psf/conduct/).\r\n- [x] I have read and have followed the [CONTRIBUTING.md](https://github.com/pypa/pip/blob/main/.github/CONTRIBUTING.md) file.\r\n- [x] I have added a news file fragment (or this PR does not need one).\r\n- [x] I have read and followed the [AI_POLICY.md](https://github.com/pypa/pip/blob/main/AI_POLICY.md) file, and if any AI tools were used, I have disclosed it below.\r\n<!-- If checked and you have used AI tools, add a line below: Assisted-by: <tool name, e.g. Claude> -->\r\n",
+  "head": "9b8a89c97fabad9b9f8810a9a8aeaa242c95993f",
+  "id": "pypa_pip_14164-9b8a89c9",
+  "language": "Python",
+  "pr": 14164,
+  "repo": "pypa/pip",
+  "set": "ours",
+  "title": "Update security policy"
+}

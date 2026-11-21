@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-5e846cec10dddb29ba39424ff7f51aa7",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 476,
+      "file": "axum/src/response/sse.rs",
+      "id": "tokio-rs_axum_3870-c89958d3#3879383279",
+      "message": "Using `memchr2_iter` was perfectly reasonable here and did exactly what you're doing with the while let, and we couldn't break the code by forgetting to update `last_split`. So why the change?",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/tokio-rs/axum/pull/3870#discussion_r3879383279 fixed-by 3636113ff2fbb148f9bf421efb6539df54793dcb",
+      "start_line": 474
+    }
+  ]
+}

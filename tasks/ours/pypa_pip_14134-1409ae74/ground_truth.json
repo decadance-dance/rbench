@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-463551097ac36ca11f56afc30a12fdee",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 29,
+      "file": "src/pip/_internal/metadata/importlib/_envs.py",
+      "id": "pypa_pip_14134-1409ae74#3515392913",
+      "message": "```suggestion\n# Used to avoid emitting duplicate invalid distribution metadata warnings for\n# the same dist-info directory.\n```\n\nThis is excessively verbose and is liable to easily become out of sync with the code.",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/pypa/pip/pull/14134#discussion_r3515392913 fixed-by 8ed00a254864a354a9099975d2430dbc8879277e",
+      "start_line": 26
+    }
+  ]
+}

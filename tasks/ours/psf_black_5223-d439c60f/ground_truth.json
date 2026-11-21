@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-078a92bd0a1d3832c3d08a5da2e7fbff",
+  "items": [
+    {
+      "category": "documentation",
+      "end_line": 72,
+      "file": "CHANGES.md",
+      "id": "psf_black_5223-d439c60f#3567494160",
+      "message": "```suggestion\n  PyInstaller release build (#5223)\n```\ncorrected PR number",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/psf/black/pull/5223#discussion_r3567494160 fixed-by 47869c6305fb5c6993f749f56dbba2fa87bf6e54",
+      "start_line": 72
+    }
+  ]
+}

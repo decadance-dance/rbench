@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-e4c278f63ca05fe77af33e0f013f7987",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 91,
+      "file": "modules/caddyhttp/reverseproxy/admin.go",
+      "id": "caddyserver_caddy_7916-4a866d9d#3746795928",
+      "message": "Existing consumers that index by address will silently discard all but one. This needs defined aggregation semantics or a public discriminator.",
+      "producer": "human",
+      "severity": "must",
+      "source": "https://github.com/caddyserver/caddy/pull/7916#discussion_r3746795928 fixed-by 67cb187cf1563ddb5ceafcd450731bddfc57e3e2",
+      "start_line": 91
+    }
+  ]
+}

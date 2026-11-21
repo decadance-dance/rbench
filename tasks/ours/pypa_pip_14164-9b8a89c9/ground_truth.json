@@ -1,0 +1,27 @@
+{
+  "canary": "rbench-canary-e1498a7a2832e5a85c9da1c0ca3f6a2d",
+  "items": [
+    {
+      "category": "documentation",
+      "end_line": 26,
+      "file": "SECURITY.md",
+      "id": "pypa_pip_14164-9b8a89c9#3564396635",
+      "message": "Minor nit: I think it would be good to be explicit about the target here. I wasn't sure whether this should be \"target directory\" or \"target environment\", but I wondered if this is what you meant?\n```suggestion\ncode from a wheel while downloading or installing it, or writes\nfiles outside the target directory, that should be reported.\n```",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/pypa/pip/pull/14164#discussion_r3564396635 fixed-by 57f1e19c353e7bcfc9132f56fefb6eb7e35df2c5",
+      "start_line": 25
+    },
+    {
+      "category": "documentation",
+      "end_line": 19,
+      "file": "SECURITY.md",
+      "id": "pypa_pip_14164-9b8a89c9#3564676811",
+      "message": "```suggestion\n## What pip is expected to do with wheels\n```\n\nsince this section is specifically about wheels and nothing else?",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/pypa/pip/pull/14164#discussion_r3564676811 fixed-by 1e44c4f78be3ae9f29b5ec7cb4c0ddf03078e658",
+      "start_line": 19
+    }
+  ]
+}

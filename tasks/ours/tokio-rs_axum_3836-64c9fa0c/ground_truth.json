@@ -1,0 +1,49 @@
+{
+  "canary": "rbench-canary-09df1aff8838ac9acce0e12b54f61851",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 1567,
+      "file": "axum/src/routing/method_routing.rs",
+      "id": "tokio-rs_axum_3836-64c9fa0c#3589360502",
+      "message": "Remove the comment",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/tokio-rs/axum/pull/3836#discussion_r3589360502 fixed-by 2bad5ce73906c5d3ab4e4c94364651705ecd37ae",
+      "start_line": 1565
+    },
+    {
+      "category": "other",
+      "end_line": 588,
+      "file": "axum/src/routing/method_routing.rs",
+      "id": "tokio-rs_axum_3836-64c9fa0c#3589430944",
+      "message": "Instead of duplicating the block gate just the panic",
+      "producer": "human",
+      "severity": "must",
+      "source": "https://github.com/tokio-rs/axum/pull/3836#discussion_r3589430944 fixed-by 2bad5ce73906c5d3ab4e4c94364651705ecd37ae",
+      "start_line": 588
+    },
+    {
+      "category": "other",
+      "end_line": 581,
+      "file": "axum/src/routing/method_routing.rs",
+      "id": "tokio-rs_axum_3836-64c9fa0c#3589564024",
+      "message": "Remove",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/tokio-rs/axum/pull/3836#discussion_r3589564024 fixed-by 2bad5ce73906c5d3ab4e4c94364651705ecd37ae",
+      "start_line": 578
+    },
+    {
+      "category": "documentation",
+      "end_line": 30,
+      "file": "axum/CHANGELOG.md",
+      "id": "tokio-rs_axum_3836-64c9fa0c#3589613741",
+      "message": "```suggestion\n  header after merging `get` and `head` ([#3836])\n```\n\nIt's not really an example when it's the only scenario. And this change wouldn't fix anything else.",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/tokio-rs/axum/pull/3836#discussion_r3589613741 fixed-by 2bad5ce73906c5d3ab4e4c94364651705ecd37ae",
+      "start_line": 30
+    }
+  ]
+}

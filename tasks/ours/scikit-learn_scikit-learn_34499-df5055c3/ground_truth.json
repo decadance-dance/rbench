@@ -1,0 +1,27 @@
+{
+  "canary": "rbench-canary-783ed1996df3fb683f5c13a2e1e0ef59",
+  "items": [
+    {
+      "category": "testing",
+      "end_line": 316,
+      "file": "sklearn/linear_model/tests/test_logistic.py",
+      "id": "scikit-learn_scikit-learn_34499-df5055c3#3602283509",
+      "message": "```suggestion\n    y = np.array([1] * 100 + [0] * 100, dtype=X.dtype)  # needs label encoding\n```",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/scikit-learn/scikit-learn/pull/34499#discussion_r3602283509 fixed-by be527bbf346b8b066f1c5edcd85cbda4f1ee9929",
+      "start_line": 316
+    },
+    {
+      "category": "testing",
+      "end_line": 379,
+      "file": "sklearn/linear_model/tests/test_logistic.py",
+      "id": "scikit-learn_scikit-learn_34499-df5055c3#3602286938",
+      "message": "```suggestion\n    y = np.array([1] * 100 + [0] * 100, dtype=X.dtype)  # needs label encoding\n```",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/scikit-learn/scikit-learn/pull/34499#discussion_r3602286938 fixed-by be527bbf346b8b066f1c5edcd85cbda4f1ee9929",
+      "start_line": 379
+    }
+  ]
+}
