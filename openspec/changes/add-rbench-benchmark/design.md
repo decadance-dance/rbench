@@ -680,10 +680,13 @@ anywhere.
 ### D12. `plain` through each CLI's own options
 **Choice.**
 - The prompt and schema live in `engines/plain/` (`prompt.md`, `findings.schema.json`).
-- Claude: `claude -p --tools Read,Grep,Glob,Bash --permission-mode bypassPermissions
-  --output-format json --json-schema <schema>`. `-p` denies a tool that asks for permission, and
-  Bash asks, so the session bypasses permissions; the container is the sandbox (as in D6). The
-  findings are the result's `structured_output`.
+- Claude: `claude -p --tools Read,Grep,Glob,Bash --permission-mode dontAsk --allowedTools Bash
+  --output-format json --json-schema <schema>`. `--tools` limits the built-in tools; `-p` denies
+  a call that asks for permission, and Bash asks, so `--allowedTools Bash` approves the shell
+  and `dontAsk` keeps denying every other call that would ask, instead of approving all of them
+  as `bypassPermissions` would. The container is the sandbox (as in D6). `dontAsk` is a mode of
+  the pinned Claude Code 2.1.316 (`claude --help`). The findings are the result's
+  `structured_output`.
 - Codex: `codex exec --output-schema <schema> -c web_search=disabled -c features.goals=false
   -c features.view_image=false -c features.image_generation=false -c features.apps=false
   -c agents.enabled=false -c tools.experimental_request_user_input.enabled=false
@@ -756,8 +759,11 @@ anywhere.
   Codex model, the catalog's. The prompt goes on stdin. Before a launch the adapter rehashes the
   three files and refuses any that differ from the frozen plan, so a run never mixes trials of two
   prompts, schemas or catalogs. The answer is validated against the schema by rbench itself; an
-  answer off the schema makes the trial `failed`, and the error names the place and the rule,
-  never the answer's text.
+  answer off the schema, or one whose objects repeat a key, makes the trial `failed`, and the
+  error names the place and the rule, never the answer's text. A reviewer runs one model:
+  planning refuses a `models` set for `plain` (`model = [...]` plans one configuration per
+  model), and the plan reader accepts `inputs` only on `plain`, with exactly its provider's keys.
+  The argv log check requires the schema, the catalog and every switch in the argv the CLI got.
 
 **Alternative considered:** give `plain` only the diff, with no tools. It is cheaper, but it would
 measure a different task from the engines, which all read the repository.

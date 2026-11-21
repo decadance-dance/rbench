@@ -41,6 +41,7 @@ from pathlib import Path
 
 from rbench.engines.declaration import CLIS, Engine, Setting
 from rbench.engines.pins import MODELS
+from rbench.engines.plain import NAME as PLAIN
 
 ALL_ENGINES = "*"
 # A budget the maintainer has not approved yet; decision O6 (issue #16) sets each from the
@@ -236,6 +237,11 @@ def _expand(entry: object, where: str, engines: Mapping[str, Engine]) -> list[Co
             raise MatrixError(f"{at}: give model or models, not both")
         if "models" in raw:
             model_sets = [tuple(sorted(_strings(raw["models"], f"{at}: models", listed=True)))]
+            if engine.name == PLAIN and len(model_sets[0]) > 1:
+                raise MatrixError(
+                    f"{at}: plain runs one model per trial, not a set; give model = [...] to plan"
+                    " one configuration per model"
+                )
         else:
             model_sets = [(m,) for m in _strings(raw.get("model", d.model), f"{at}: model")]
         efforts = _strings(raw.get("effort", d.effort), f"{at}: effort")

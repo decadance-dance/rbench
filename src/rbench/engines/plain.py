@@ -19,7 +19,7 @@ import dataclasses
 import hashlib
 import itertools
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,8 +34,16 @@ SCHEMA_FILE = "findings.schema.json"
 SCHEMA_INPUT = "findings_schema_sha256"
 CATALOG_INPUT = "codex_model_catalog_sha256"
 # File reading and the shell, nothing else (spec Plain baseline tools). Claude Code in `-p` denies
-# a tool that asks for permission, so Bash needs the bypass; the container is the sandbox (D6).
+# a tool that asks for permission; `dontAsk` keeps denying every such call except the pre-approved
+# Bash (the container is the sandbox, D6), rather than approving everything that asks.
 CLAUDE_TOOLS = "Read,Grep,Glob,Bash"
+CLAUDE_PERMISSIONS = ("--permission-mode", "dontAsk", "--allowedTools", "Bash")
+# The result subtypes Claude Code 2.1.316 reports; another is named only as unknown, because the
+# value is engine output.
+CLAUDE_SUBTYPES = frozenset({
+    "success", "error_max_turns", "error_during_execution", "error_max_budget_usd",
+    "error_max_structured_output_retries",
+})  # fmt: skip
 # Design D12: no web search, goal, image or apps tools, no subagents, no `request_user_input`.
 CODEX_SWITCHES = (
     'web_search="disabled"',
@@ -50,6 +58,7 @@ CODEX_SWITCHES = (
 FILES_DIR = "/home/node/plain"
 SCHEMA_PATH = f"{FILES_DIR}/{SCHEMA_FILE}"
 CATALOG_PATH = f"{FILES_DIR}/model-catalog.json"
+CATALOG_SWITCH = f"model_catalog_json={json.dumps(CATALOG_PATH)}"
 OUTPUT_PATH = f"{FILES_DIR}/answer.json"
 SEVERITIES = ("must_fix", "should_fix", "nit")
 # The JSON Schema keywords `validate` implements; a schema using any other is refused on load.
@@ -203,15 +212,31 @@ def launch(engines_dir: Path, settings: Mapping, clis: Mapping[str, str]) -> Lau
     prompt, schema = data[PROMPT_FILE].decode(), data[SCHEMA_FILE]
     if cli == "claude":
         compact = json.dumps(json.loads(schema), separators=(",", ":"))
-        argv = ("claude", "-p", "--tools", CLAUDE_TOOLS, "--permission-mode", "bypassPermissions")
+        argv = ("claude", "-p", "--tools", CLAUDE_TOOLS, *CLAUDE_PERMISSIONS)
         argv += ("--output-format", "json", "--json-schema", compact)
         return Launch(cli, argv, prompt, {}, None)
     argv = ("codex", "exec", "--sandbox", "danger-full-access", "--output-schema", SCHEMA_PATH)
     argv += ("--output-last-message", OUTPUT_PATH)
-    for switch in (*CODEX_SWITCHES, f"model_catalog_json={json.dumps(CATALOG_PATH)}"):
+    for switch in (*CODEX_SWITCHES, CATALOG_SWITCH):
         argv += ("-c", switch)
     files_out = {SCHEMA_PATH: schema, CATALOG_PATH: data["catalog"]}
     return Launch(cli, (*argv, "-"), prompt, files_out, OUTPUT_PATH)
+
+
+class _RepeatedKey(ValueError):
+    pass
+
+
+def _unique(pairs: list[tuple[str, object]]) -> dict:
+    """A JSON object, refused when it repeats a key: `json.loads` would keep only the last."""
+    if len({k for k, _ in pairs}) != len(pairs):
+        raise _RepeatedKey
+    return dict(pairs)
+
+
+def expected_inputs(clis: Iterable[str]) -> set[str]:
+    """The names in `inputs` of a plain configuration whose model runs on `clis`."""
+    return {SCHEMA_INPUT} | ({CATALOG_INPUT} if "codex" in clis else set())
 
 
 def findings(launch: Launch, answer: str, schema: dict) -> list[dict]:
@@ -219,14 +244,21 @@ def findings(launch: Launch, answer: str, schema: dict) -> list[dict]:
     stdout, or the file Codex wrote with `--output-last-message`. Raises `PlainOutputError`
     when the answer does not follow `schema` (the parsed `findings.schema.json`)."""
     try:
-        value = json.loads(answer)
+        value = json.loads(answer, object_pairs_hook=_unique)
+    except _RepeatedKey:
+        raise PlainOutputError(
+            f"{launch.cli}: an object in the final answer repeats a key"
+        ) from None
     except (ValueError, RecursionError):
         raise PlainOutputError(f"{launch.cli}: the final answer is not JSON") from None
     if launch.cli == "claude":
         if not (isinstance(value, dict) and value.get("type") == "result"):
             raise PlainOutputError("claude: stdout is not a result object")
-        if value.get("is_error") is not False or value.get("subtype") != "success":
-            raise PlainOutputError(f"claude: the session ended with {value.get('subtype')!r}")
+        subtype = value.get("subtype")
+        if value.get("is_error") is not False or subtype != "success":
+            known = isinstance(subtype, str) and subtype in CLAUDE_SUBTYPES
+            ended = f"subtype {subtype}" if known else "an unknown subtype"
+            raise PlainOutputError(f"claude: the session did not succeed; it ended with {ended}")
         if "structured_output" not in value:
             raise PlainOutputError("claude: the result has no structured_output")
         value = value["structured_output"]
@@ -259,8 +291,10 @@ def check_launches(records: list[dict], launch: Launch) -> list[str]:
     final = record.get("final_argv") or []
     if launch.cli == "claude":
         pairs = [("--tools", CLAUDE_TOOLS), ("--json-schema", launch.argv[-1])]
+        pairs += [("--permission-mode", "dontAsk"), ("--allowedTools", "Bash")]
     else:
-        pairs = [("--output-schema", SCHEMA_PATH), *(("-c", s) for s in CODEX_SWITCHES)]
+        pairs = [("--output-schema", SCHEMA_PATH), ("-c", CATALOG_SWITCH)]
+        pairs += [("-c", s) for s in CODEX_SWITCHES]
     present = set(itertools.pairwise(final))
     problems += [f"the CLI did not get {a} {b}" for a, b in pairs if (a, b) not in present]
     return problems

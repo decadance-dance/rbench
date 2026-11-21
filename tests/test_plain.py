@@ -1,5 +1,6 @@
 """The `plain` baseline engine (spec engine-configurations, Plain baseline; design D12)."""
 
+import dataclasses
 import hashlib
 import json
 import shutil
@@ -7,6 +8,8 @@ from pathlib import Path
 
 import pytest
 from conftest import REPO, FakeBin
+from test_ledger import BUDGET, PLAIN_TWO_MODELS, freeze, plan_json
+from test_matrix import engines, matrix
 
 from rbench.engines import catalog as catalog_module
 from rbench.engines.catalog import CODEX_MODELS, OVERRIDES, CatalogError, generate, transform
@@ -14,7 +17,6 @@ from rbench.engines.declaration import DeclarationError, load_engine
 from rbench.engines.plain import (
     CATALOG_INPUT,
     CATALOG_PATH,
-    CODEX_SWITCHES,
     OUTPUT_PATH,
     SCHEMA_INPUT,
     SCHEMA_PATH,
@@ -23,11 +25,27 @@ from rbench.engines.plain import (
     findings,
     launch,
 )
-from rbench.matrix.expansion import parse_matrix
+from rbench.ledger import PLAN_FILE, LedgerError, load_plan
+from rbench.matrix.expansion import MatrixError, parse_matrix
 
 ENGINES = REPO / "engines"
 BUNDLED = Path(__file__).parent / "fixtures" / "codex-bundled-0.171.0.json"
 CLAUDE, GPT = "claude-sonnet-5-5", "gpt-6.2-sol"
+# Design D12, written out here so that the tests do not take them from the adapter.
+D12_OVERRIDES = {
+    "apply_patch_tool_type": None,
+    "tool_mode": "direct",
+    "experimental_supported_tools": [],
+}
+D12_SWITCHES = [
+    'web_search="disabled"',
+    "features.goals=false",
+    "features.view_image=false",
+    "features.image_generation=false",
+    "features.apps=false",
+    "agents.enabled=false",
+    "tools.experimental_request_user_input.enabled=false",
+]
 FINDING = {
     "file": "src/app.py",
     "start_line": 3,
@@ -72,8 +90,9 @@ def test_committed_catalog_overrides_the_benchmark_models_only():
     engine = load_engine(ENGINES / "plain.toml")
     path = ENGINES / "plain" / f"codex-catalog-{engine.clis['codex']}.json"
     models = {m["slug"]: m for m in json.loads(path.read_text())["models"]}
-    for slug in CODEX_MODELS:
-        assert {k: models[slug][k] for k in OVERRIDES} == OVERRIDES
+    assert OVERRIDES == D12_OVERRIDES
+    for slug in ("gpt-6.2-sol", "gpt-6.2-astra"):
+        assert {k: models[slug][k] for k in D12_OVERRIDES} == D12_OVERRIDES
     assert any(m.get("apply_patch_tool_type") is not None for m in models.values())
 
 
@@ -97,6 +116,8 @@ def test_claude_argv_has_only_the_reading_and_shell_tools_and_the_schema(engines
     assert run.cli == "claude" and run.argv[:2] == ("claude", "-p")
     i = run.argv.index("--tools")
     assert run.argv[i + 1] == "Read,Grep,Glob,Bash"
+    assert run.argv[i + 2 : i + 6] == ("--permission-mode", "dontAsk", "--allowedTools", "Bash")
+    assert "bypassPermissions" not in run.argv
     assert "--json-schema" in run.argv and run.output is None and run.files == {}
     # The model and effort come from the shim (delivery by flag), never from the adapter.
     assert "--model" not in run.argv and "--effort" not in run.argv
@@ -111,9 +132,7 @@ def test_codex_argv_has_the_schema_the_catalog_and_the_switches(engines_dir: Pat
     assert argv[argv.index("--output-schema") + 1] == SCHEMA_PATH
     assert argv[argv.index("--output-last-message") + 1] == run.output == OUTPUT_PATH
     configs = [argv[i + 1] for i, a in enumerate(argv) if a == "-c"]
-    assert configs == [*CODEX_SWITCHES, f'model_catalog_json="{CATALOG_PATH}"']
-    for switch in ("web_search", "features.goals", "features.view_image", "features.apps"):
-        assert any(c.startswith(switch + "=") for c in configs)
+    assert configs == [*D12_SWITCHES, f'model_catalog_json="{CATALOG_PATH}"']
     catalog = engines_dir / "plain" / f"codex-catalog-{engine.clis['codex']}.json"
     assert run.files[CATALOG_PATH] == catalog.read_bytes()
     assert "-m" not in argv and "--model" not in argv
@@ -250,6 +269,33 @@ def test_claude_result_without_valid_structured_output_fails(engines_dir, stdout
         findings(run_of(engines_dir, CLAUDE), stdout, schema())
 
 
+def test_repeated_key_anywhere_fails_the_answer(engines_dir: Path):
+    codex, claude = run_of(engines_dir, GPT), run_of(engines_dir, CLAUDE)
+    with pytest.raises(PlainOutputError, match="repeats a key"):
+        findings(codex, '{"findings": null, "findings": []}', schema())
+    nested = claude_result({"findings": []})[:-1] + ', "structured_output": {"findings": []}}'
+    with pytest.raises(PlainOutputError, match="repeats a key"):
+        findings(claude, nested, schema())
+    inner = json.dumps(FINDING)[:-1] + ', "message": "again"}'
+    with pytest.raises(PlainOutputError, match="repeats a key"):
+        findings(codex, '{"findings": [' + inner + "]}", schema())
+
+
+@pytest.mark.parametrize(
+    ("subtype", "message"),
+    [
+        (SECRET, "ended with an unknown subtype$"),
+        (["error_max_turns"], "ended with an unknown subtype$"),
+        ("error_max_structured_output_retries", "subtype error_max_structured_output_retries$"),
+    ],
+)
+def test_failed_claude_session_names_only_a_known_subtype(engines_dir, subtype, message):
+    stdout = claude_result(None, subtype=subtype, is_error=True)
+    with pytest.raises(PlainOutputError, match=message) as error:
+        findings(run_of(engines_dir, CLAUDE), stdout, schema())
+    assert SECRET not in str(error.value)
+
+
 def log_of(run, **changes: object) -> list[dict]:
     """A shim log with one launch of `run`, as the shim records it."""
     final = ["--strict-config", *run.argv[1:]] if run.cli == "codex" else list(run.argv[1:])
@@ -267,6 +313,92 @@ def test_argv_log_check(engines_dir: Path, model: str):
     problems = check_launches(log_of(run, final_argv=dropped), run)
     assert problems and all("did not get" in p for p in problems)
     assert "not the" in check_launches(log_of(run, argv=dropped), run)[0]
+
+
+@pytest.mark.parametrize(
+    ("model", "pair"),
+    [
+        (GPT, ["-c", 'model_catalog_json="/home/node/plain/model-catalog.json"']),
+        (GPT, ["--output-schema", "/home/node/plain/findings.schema.json"]),
+        (GPT, ["-c", 'web_search="disabled"']),
+        (CLAUDE, ["--permission-mode", "dontAsk"]),
+        (CLAUDE, ["--allowedTools", "Bash"]),
+    ],
+)
+def test_argv_log_check_needs_each_pair_in_the_argv_the_cli_got(engines_dir, model, pair):
+    run = run_of(engines_dir, model)
+    final = list(run.argv[1:])
+    i = next(i for i in range(len(final)) if final[i : i + 2] == pair)
+    del final[i : i + 2]
+    assert check_launches(log_of(run, final_argv=final), run) == [
+        f"the CLI did not get {' '.join(pair)}"
+    ]
+
+
+def test_plain_refuses_a_model_set_for_its_reviewer(engines_dir: Path):
+    plain = load_engine(engines_dir / "plain.toml")
+    entry = {"engine": "plain", "roles": {"reviewer": {"models": [CLAUDE, "claude-opus-5-5"]}}}
+    data = {"stage": "screening", "tasks": "core", "attempts": 1}
+    data["rounds"] = [{"name": "r1", "budget": {"claude": 1}, "entries": [entry]}]
+    with pytest.raises(MatrixError, match=r"one model per trial.*model = \[\.\.\.\]"):
+        parse_matrix(data, "m.toml", {"plain": plain})
+    entry["roles"]["reviewer"]["models"] = [CLAUDE]
+    (r,) = parse_matrix(data, "m.toml", {"plain": plain}).rounds
+    assert len(r.configurations) == 1
+
+
+def bound(name: str, inputs: dict) -> dict:
+    """The synthetic engines of test_matrix, with `inputs` on engine `name`."""
+    engines_ = engines()
+    engines_[name] = dataclasses.replace(engines_[name], inputs=inputs)
+    return engines_
+
+
+SCHEMA_HASH, CATALOG_HASH = "1" * 64, "2" * 64
+PLAIN_INPUTS = {
+    "claude": {SCHEMA_INPUT: SCHEMA_HASH},
+    "codex": {SCHEMA_INPUT: SCHEMA_HASH, CATALOG_INPUT: CATALOG_HASH},
+}
+
+
+def test_plan_holds_plain_inputs_per_provider(tmp_path: Path):
+    engines_ = bound("plain", PLAIN_INPUTS)
+    m = matrix(PLAIN_TWO_MODELS, budget=BUDGET, engines_=engines_)
+    plan = freeze(tmp_path, m, engines_=engines_)  # freeze_plan reads its plan back
+    assert [c.settings["inputs"] for c in plan.configurations] == [
+        {SCHEMA_INPUT: SCHEMA_HASH},
+        {SCHEMA_INPUT: SCHEMA_HASH, CATALOG_INPUT: CATALOG_HASH},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "inputs"),
+    [
+        ("panel", {"claude": {"arbitrary": SCHEMA_HASH}, "codex": {"arbitrary": SCHEMA_HASH}}),
+        ("plain", {"claude": {SCHEMA_INPUT: SCHEMA_HASH, CATALOG_INPUT: CATALOG_HASH}}),
+        ("plain", {"claude": {SCHEMA_INPUT: SCHEMA_HASH}, "codex": {SCHEMA_INPUT: SCHEMA_HASH}}),
+        ("plain", {"claude": {"arbitrary": SCHEMA_HASH}, "codex": PLAIN_INPUTS["codex"]}),
+    ],
+)
+def test_plan_refuses_inputs_that_are_not_plains(tmp_path: Path, name: str, inputs: dict):
+    engines_ = bound(name, inputs)
+    m = matrix({"engine": name, "default": True}, budget=BUDGET, engines_=engines_)
+    if name == "plain":
+        m = matrix(
+            {"engine": "plain", "roles": {"reviewer": {"model": ["claude-opus-5-5", GPT]}}},
+            budget=BUDGET,
+            engines_=engines_,
+        )
+    with pytest.raises(LedgerError, match="settings.inputs: not the input files"):
+        freeze(tmp_path, m, engines_=engines_)
+
+
+def test_plan_refuses_a_plain_model_set(tmp_path: Path):
+    run_dir, plan = plan_json(tmp_path)
+    plan["configurations"][0]["settings"]["roles"]["reviewer"]["models"] = [CLAUDE, GPT]
+    (run_dir / PLAN_FILE).write_text(json.dumps(plan))
+    with pytest.raises(LedgerError, match="plain runs one model per configuration"):
+        load_plan(run_dir)
 
 
 # The catalog generator, on a recorded `codex debug models --bundled` (0.171.0, trimmed).
@@ -288,7 +420,7 @@ def test_generate_overrides_exactly_the_d12_fields(fake_bin: FakeBin):
     assert list(after) == list(before)
     for slug, model in after.items():
         if slug in CODEX_MODELS:
-            assert model == before[slug] | OVERRIDES
+            assert model == before[slug] | D12_OVERRIDES
             assert before[slug]["tool_mode"] == "code_mode_only"
         else:
             assert model == before[slug]
