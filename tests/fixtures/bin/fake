@@ -7,6 +7,8 @@ Environment:
                         prints nothing and exits 0. Scenario keys, all optional:
                           delay   seconds to sleep before answering
                           stdout  text to print to stdout
+                          stdout_for  object mapping an argument to the stdout of a call that
+                                  has it, in place of `stdout` (one asset per download)
                           stderr  text to print to stderr (a rate-limit message goes here or in
                                   stdout, as the real CLI prints it)
                           exit    exit code, default 0
@@ -31,7 +33,8 @@ if log:
 
 scenario = json.loads(os.environ.get("RBENCH_FAKE_SCENARIO") or "{}").get(tool, {})
 time.sleep(scenario.get("delay", 0))
-sys.stdout.write(scenario.get("stdout", ""))
+by_arg = scenario.get("stdout_for", {})
+sys.stdout.write(next((by_arg[a] for a in sys.argv[1:] if a in by_arg), scenario.get("stdout", "")))
 sys.stderr.write(scenario.get("stderr", ""))
 sys.stdout.flush()
 sys.stderr.flush()
