@@ -543,7 +543,7 @@ def test_label_sheet_escapes_formulas_and_refuses_tracked_paths(w: World, tmp_pa
 
     write_label_sheet(sheet, Window(repos=(NWO,)))
 
-    row = list(csv.DictReader(sheet.open()))[0]
+    (row,) = csv.DictReader(sheet.open())
     assert row["excerpt"] == "'=HYPERLINK(1)" and row["location"] == "'@x.py:5-5"
     assert read_labels(sheet) == {f"{w.pr.task_id}#1": ""}
 
