@@ -15,6 +15,11 @@ Raw files SHALL stay in the source run. Reuse SHALL leave the source run unchang
 require its lock. Trials that are not reused SHALL start pending. The run creation summary SHALL
 report the number of pending trials.
 
+The runner SHALL skip a source trial whose status is missing, unreadable or anything other than
+`done`. If a matching source trial has a valid `done` status but its findings or usage fail
+validation, the runner SHALL refuse the new run and identify the source trial. For runs with hidden
+tasks, the diagnostic SHALL use the trial's position in the source plan.
+
 The runner SHALL refuse `--reuse` for the full stage and name the stage in the error.
 
 #### Scenario: Engine version differs
@@ -29,3 +34,12 @@ The runner SHALL refuse `--reuse` for the full stage and name the stage in the e
 - **WHEN** an eligible done trial is reused from the named earlier run
 - **THEN** the new trial has its own findings and usage, and its done status records the source
   run id in `reused_from`
+
+#### Scenario: Source trial status unavailable or unfinished
+- **WHEN** a matching source trial has a missing or unreadable status, or its status is not `done`
+- **THEN** the new trial starts pending and other eligible source trials are still reused
+
+#### Scenario: Invalid results for a done source trial
+- **WHEN** a matching source trial has a valid `done` status but its findings or usage fail validation
+- **THEN** the new run is refused and the error identifies the source trial by its position in the
+  source plan if the run includes hidden tasks

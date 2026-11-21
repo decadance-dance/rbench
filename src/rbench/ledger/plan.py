@@ -555,7 +555,6 @@ def _reuse_trials(staging: Path, plan: Plan, source_dir: Path) -> None:
         name
         for name, new in plan.engines.items()
         if (old := source.engines.get(name)) is not None
-        and old.version == new.version
         and old.clis == new.clis
         and old.image.rsplit("@", 1)[1] == new.image.rsplit("@", 1)[1]
     }
@@ -565,8 +564,9 @@ def _reuse_trials(staging: Path, plan: Plan, source_dir: Path) -> None:
         if config.settings["engine"] in unchanged_engines
     }
 
-    for index, trial in enumerate(plan.trials, start=1):
+    for trial in plan.trials:
         # The full configuration id and attempt must match, even though the path uses a prefix.
+        # The configuration hash includes the engine version, which parse_plan checks against its pin.
         if not (
             source_trials.get(trial.id) == trial
             and trial.task in unchanged_tasks
@@ -575,15 +575,21 @@ def _reuse_trials(staging: Path, plan: Plan, source_dir: Path) -> None:
             continue
         previous = source_dir / TRIALS_DIR / trial.id
         try:
-            if read_status(previous).state == "done":
-                findings, usage = read_results(previous)
-                store_results(
-                    staging / TRIALS_DIR / trial.id, findings, usage, reused_from=source_dir.name
-                )
+            status = read_status(previous)
+        except LedgerError:
+            continue
+        if status.state != "done":
+            continue
+        try:
+            findings, usage = read_results(previous)
+            store_results(
+                staging / TRIALS_DIR / trial.id, findings, usage, reused_from=source_dir.name
+            )
         except (OSError, ValueError):
             if hidden:
+                index = source.trials.index(trial) + 1
                 raise LedgerError(
-                    f"cannot reuse trial {index} in a run with hidden tasks"
+                    f"cannot reuse source trial {index} in a run with hidden tasks"
                 ) from None
             raise
 

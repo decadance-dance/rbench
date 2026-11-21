@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import shutil
 import stat
 from pathlib import Path
 
@@ -151,6 +152,8 @@ def test_reuse_requires_all_frozen_execution_inputs_to_match(tmp_path: Path, cha
     new_plan = freeze(
         tmp_path, matrix(entry, budget=BUDGET, engines_=engines_), images=images, engines_=engines_
     )
+    if change == "engine version":
+        assert new_plan.configurations[0].id != old_plan.configurations[0].id
     target = create_run(runs, "later", new_plan, reuse=source)
     for trial in new_plan.trials:
         assert read_status(target / TRIALS_DIR / trial.id) == TrialStatus("pending")
@@ -167,6 +170,46 @@ def test_reuse_compares_image_digest_across_repository_names(tmp_path: Path) -> 
     target = create_run(runs, "later", freeze(tmp_path, images=images), reuse=source)
 
     assert read_status(target / trial_dir).reused_from == "earlier"
+
+
+@pytest.mark.parametrize("state", ["missing", "unreadable", "running"])
+def test_reuse_skips_source_without_readable_done_status(tmp_path: Path, state: str) -> None:
+    plan = freeze(tmp_path)
+    runs = tmp_path / "runs"
+    source = create_run(runs, "earlier", plan)
+    first, second = (Path(TRIALS_DIR) / trial.id for trial in plan.trials[:2])
+    store_results(source / first, [FINDING], USAGE)
+    store_results(source / second, [FINDING], USAGE)
+    if state == "missing":
+        shutil.rmtree(source / first)
+    elif state == "unreadable":
+        (source / first / STATUS_FILE).write_text("{")
+    else:
+        set_state(source / first, state)
+
+    target = create_run(runs, "later", plan, reuse=source)
+
+    assert read_status(target / first) == TrialStatus("pending")
+    assert read_status(target / second).reused_from == "earlier"
+
+
+@pytest.mark.parametrize("name", [FINDINGS_FILE, USAGE_FILE])
+def test_reuse_refuses_invalid_done_results_and_names_public_source_trial(
+    tmp_path: Path, name: str
+) -> None:
+    plan = freeze(tmp_path)
+    runs = tmp_path / "runs"
+    source = create_run(runs, "earlier", plan)
+    first, second = (source / TRIALS_DIR / trial.id for trial in plan.trials[:2])
+    store_results(first, [FINDING], USAGE)
+    store_results(second, [FINDING], USAGE)
+    (second / name).write_text("{}")
+
+    with pytest.raises(LedgerError, match="does not match the hash") as error:
+        create_run(runs, "later", plan, reuse=source)
+
+    assert str(second / name) in str(error.value)
+    assert list(runs.iterdir()) == [source]
 
 
 def test_reuse_is_refused_for_full_stage(full_inputs, monkeypatch, capsys) -> None:
@@ -191,7 +234,8 @@ def test_reuse_refuses_corrupt_source_without_leaking_hidden_details(
     main(argv)
     capsys.readouterr()
     source = checkout / "runs" / "fixture"
-    trial = next(t for t in load_plan(source).trials if t.task == "o-1")
+    source_plan = load_plan(source)
+    trial = next(t for t in source_plan.trials if t.task == "o-1")
     trial_dir = source / TRIALS_DIR / trial.id
     store_results(trial_dir, [FINDING], USAGE)
     if corrupt == "plan":
@@ -199,7 +243,8 @@ def test_reuse_refuses_corrupt_source_without_leaking_hidden_details(
         message = "cannot read or validate the earlier run's frozen plan.json"
     else:
         (trial_dir / FINDINGS_FILE).write_text(str(task))
-        message = "cannot reuse trial 1 in a run with hidden tasks"
+        index = source_plan.trials.index(trial) + 1
+        message = f"cannot reuse source trial {index} in a run with hidden tasks"
     private_parent = source.parent / task.name
     private_parent.mkdir()
     source = source.rename(private_parent / source.name)
