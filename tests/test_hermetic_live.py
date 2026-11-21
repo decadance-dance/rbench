@@ -8,6 +8,7 @@ tag it created, also when a step fails.
 """
 
 import json
+import re
 import subprocess
 import uuid
 from pathlib import Path
@@ -181,6 +182,39 @@ def test_policy_holds_with_and_without_the_shims_and_every_session_is_bound(tria
     assert all(bypass_claude in p for p in problems[:2])
     assert "Codex thread" in problems[2] and "no origin launch" in problems[2]
     assert codex_sessions[0]["meta"]["id"] not in problems[2]
+
+
+def test_codex_prompt_stays_literal_and_a_resume_supplies_no_origin(trial):
+    """The round 1 review's repros: a prompt that reads like the sandbox option, and a shim
+    resume of a session the real binary started."""
+    project, agent = trial
+    literal = run(project, "env", *CODEX_ENV, "codex", "exec", "--skip-git-repo-check", "--",
+                  "--sandbox=read-only")  # fmt: skip
+    assert literal.returncode == 0
+    body = [r["body"] for r in requests(project) if r["path"] == "/v1/responses"][-1]
+    said = [
+        part.get("text")
+        for item in body["input"]
+        if item.get("role") == "user"
+        for part in item.get("content", [])
+    ]
+    print("user messages:", said)
+    assert "--sandbox=read-only" in said and "--sandbox=danger-full-access" not in said
+
+    prompt = "Reply with OK."
+    by_path = run(project, "env", *CODEX_ENV, "/usr/local/bin/codex", "exec",
+                  "--skip-git-repo-check", prompt)  # fmt: skip
+    thread = re.search(r"session id: (\S+)", by_path.stderr).group(1)
+    resumed = run(project, "env", *CODEX_ENV, "codex", "exec", "--skip-git-repo-check",
+                  "resume", thread, prompt)  # fmt: skip
+    assert by_path.returncode == resumed.returncode == 0
+
+    dest = project.directory / "raw-resume"
+    collect(project, agent, dest)
+    problems = unbound_sessions(read_shim_log(dest / "shim.jsonl"), dest / "transcripts")
+    print("unbound:", problems)
+    (problem,) = [p for p in problems if thread in p]
+    assert "no origin launch, only resumes" in problem
 
 
 def test_without_the_managed_files_the_same_calls_get_web_tools(images, request):
