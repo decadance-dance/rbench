@@ -83,7 +83,11 @@ def build_agent_image(
     ref = _build(AGENT_NAME, tag, images_dir / "agent", build_args)
     for cli, version in sorted(clis.items()):
         what = f"reading the {cli} version in {ref}"
-        out = docker("run", "--rm", "--network", "none", image_id(ref), cli, "--version", what=what)
+        # The real binary: the shim on PATH runs only inside a prepared trial (design D5).
+        real = f"/usr/local/bin/{cli}"
+        out = docker(
+            "run", "--rm", "--network", "none", image_id(ref), real, "--version", what=what
+        )
         if out.strip() != _VERSION_OUTPUT[cli].format(version):
             raise TrialError(f"{ref}: expected {cli} {version}, the image reports {out.strip()!r}")
     return Image(ref, dict(clis))

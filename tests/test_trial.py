@@ -55,8 +55,8 @@ def test_agent_image_pins_versions_and_reads_them_back(fake_bin):
         "/images/agent",
     ]
     assert runs == [
-        ["run", "--rm", "--network", "none", AGENT_ID, "claude", "--version"],
-        ["run", "--rm", "--network", "none", AGENT_ID, "codex", "--version"],
+        ["run", "--rm", "--network", "none", AGENT_ID, "/usr/local/bin/claude", "--version"],
+        ["run", "--rm", "--network", "none", AGENT_ID, "/usr/local/bin/codex", "--version"],
     ]
 
 
@@ -67,7 +67,7 @@ def test_agent_image_installs_only_declared_clis(fake_bin):
 
     build = fake_bin.calls()[0]["argv"]
     assert "CODEX_VERSION=" in build and "CLAUDE_VERSION=2.1.316" in build
-    assert [c["argv"][-2] for c in fake_bin.calls()[1:]] == ["claude"]
+    assert [c["argv"][-2] for c in fake_bin.calls()[1:]] == ["/usr/local/bin/claude"]
 
 
 def test_agent_image_rejects_another_version_inside(fake_bin):
@@ -300,6 +300,21 @@ def test_base_images_are_pinned_by_digest(image):
     assert len(froms) == 1 and re.fullmatch(r"FROM \S+@sha256:[0-9a-f]{64}", froms[0])
 
 
-def test_agent_build_context_is_the_dockerfile_alone():
-    assert sorted(p.name for p in (ROOT / "images/agent").iterdir()) == ["Dockerfile"]
-    assert "COPY" not in (ROOT / "images/agent/Dockerfile").read_text()
+def test_agent_build_context_holds_only_the_image_and_its_policy():
+    context = ROOT / "images/agent"
+    files = sorted(
+        p.relative_to(context).as_posix()
+        for p in context.rglob("*")
+        if p.is_file() and "__pycache__" not in p.parts  # excluded by .dockerignore
+    )
+    assert files == [
+        ".dockerignore",
+        "Dockerfile",
+        "lib/collector.py",
+        "lib/session_hook.py",
+        "lib/shim.py",
+        "managed-settings.json",
+        "requirements.toml",
+    ]
+    copies = re.findall(r"^COPY .*? (\S+) \S+$", (context / "Dockerfile").read_text(), re.MULTILINE)
+    assert copies == ["managed-settings.json", "requirements.toml", "lib/"]
