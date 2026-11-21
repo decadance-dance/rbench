@@ -811,6 +811,25 @@ not judge them. It runs hermetic, like the judge: the same container setup and s
   from `engine`. The fields of the result (`structured_output`, `modelUsage` and its
   `inputTokens`, `outputTokens`, `cacheReadInputTokens` and `cacheCreationInputTokens`) are those
   of Claude Code 2.1.316. The smoke stage checks them against a live call.
+- As implemented in the executor (#127, `rbench.run.trial`): the step runs once the engine's
+  trial is audited and its launch checked. Its input is the report the adapter's `report` gives,
+  which must be valid UTF-8 (no lone surrogate from a JSON escape), or the trial is `failed` with
+  invalid output. Its project is named from the run identity and the trial like the trial's own,
+  so startup removes it as a leftover too. The model call has its own time limit. Its shim log,
+  transcripts and proxy log, and the findings it gave, land in `raw/normalizer/`, and the record in
+  `raw/normalization.json`. The trial is then audited again, before it can be `done`: the step's
+  proxy log against the allowlist, its sessions against its shim log, and the canary scan over the
+  whole trial directory, the step's findings included. A contaminated result is excluded from
+  scores like any other. A normalization error, a step past its limit or a Docker failure in the
+  step makes the trial `failed` with reason `normalization failed: ...`, naming no report text.
+  That state is recorded once the step's evidence is copied as far as it can be (a failure there
+  is not an error of its own) and before its project is removed, so a failed teardown keeps it;
+  it is never retried, since a retry would rerun the engine. A token count of
+  the step at or above 2**53 is a normalization error, naming the `modelUsage` entry by position.
+  The step's own sessions, as its shim log binds them, go through D8's limit detection like the
+  engine's: a usage or terminal rate limit there sets the run's latch and makes the trial
+  `interrupted`, with the engine's and the step's tokens (the step's counted from its transcripts)
+  in `wasted.json`, and the run stops with exit 75; a rate limit the CLI retried past does not.
 
 **Alternative considered:** ask each engine for JSON. That changes the engines being measured.
 
@@ -1038,7 +1057,12 @@ measure a different task from the engines, which all read the repository.
     before writing any of `Launch.files`, the second after writing them and before the engine
     starts. Each returns the reasons that make the trial `misconfigured`; on any, the executor
     writes nothing more and does not start the engine. They must be idempotent and touch nothing
-    but the adapter's own paths.
+    but the adapter's own paths. An adapter without them gets neither call (#127).
+  - Adapter setup: an adapter may also give setup commands, which the executor runs in the agent
+    after the checkout hooks and before the launch (#127; `ponytail-review` on Codex installs its
+    plugin so). They install what the image holds, offline, so one that exits non-zero is an
+    image failure: an infrastructure error, retried, whose message names the command's position
+    and program but never its output.
   - `misconfigured`: the shim log shows a Codex session launch with its own model, effort or
     profile, or `--ignore-user-config` (config.toml then did not apply), a rewrite other than the
     sandbox, or a Claude session without the Claude side's `--model` and `--effort`; and a
