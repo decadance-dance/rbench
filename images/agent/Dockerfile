@@ -23,6 +23,9 @@ RUN set -eu; pkgs=""; \
     npm install -g --no-fund --no-audit $pkgs; \
     npm cache clean --force
 
+# The gh stub (design D4): answers PR lookups from the trial's frozen PR, sends nothing anywhere.
+COPY --chmod=755 gh /usr/local/bin/gh
+
 # The managed configuration: the policy for every CLI process, a shim's child or not (design D5).
 # The directories exist first: COPY --chmod would give the ones it creates the files' mode, and
 # Claude Code then runs without its managed settings (EACCES), only warning on stderr.

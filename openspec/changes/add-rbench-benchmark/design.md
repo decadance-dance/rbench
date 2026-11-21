@@ -228,8 +228,8 @@ server or build step, and opens from disk as the spec requires.
   created, never mounted.
   - The agent image (`images/agent`) installs exactly the CLI versions an engine declares, and
     rbench reads them back from the built image. Its base images are pinned by digest, and its
-    build context is `images/agent/` alone: the Dockerfile, the managed configuration and the
-    shim scripts (D5).
+    build context is `images/agent/` alone: the Dockerfile, the managed configuration, the
+    shim scripts (D5) and the `gh` stub (D4).
   - Images are referenced as `<name>@sha256:<hex>`. A local build in Docker's classic image store
     has no registry digest, so the digest is the image ID: the content digest of the image's
     configuration, which names its layers. Trials run an image by that ID, never by a tag or a pull.
@@ -260,10 +260,34 @@ server or build step, and opens from disk as the spec requires.
 - The repository is built once, at import, from the source repository: `base` is the PR's base
   tree, and `reviewed` is the head tree squashed onto it. It is stored as a git bundle (D11).
 - A fresh `git init` has no remotes, reflog, tags or packed objects.
-- A `gh` stub on `PATH` answers `pr view` and `pr diff` from `pr.json` and the repository. It
-  reports the PR as `OPEN` with no comments or reviews, so engines that skip closed or reviewed PRs
-  still run. `gh pr comment` writes its body to the trial's raw output, which normalization reads
-  like any other engine output. Anything else fails.
+- A trial copies the archive, which must be a regular file, to a private file under a byte
+  limit, and reads only those bytes: their SHA-256 must match, and they must start with a git
+  bundle header. A path git would also fetch from, such as
+  a repository or a `.git` pointer file, could change after the check. The bundle is unpacked on
+  the host into a fresh object store (`git init --template=`, every ref of the bundle, no reflog,
+  no `FETCH_HEAD`, no work tree) with a fixed `config` and `HEAD`. Each host git step has a time
+  limit, and a `reviewed` tree over a size limit is refused. The store is copied with the PR into
+  the started agent with `docker compose cp --archive`, which makes the agent's user own it:
+  `/rbench/repo`, `/rbench/pr.json` (number, title, description) and an empty `/rbench/output/`.
+- The same inspection runs on the host copy and in the agent, before the engine starts. It reads
+  the metadata as files before git interprets it: nothing in `.git` but `HEAD`, `config`, `index`,
+  `objects` and `refs`, the fixed `config` (no remote, include or other setting) and `HEAD` (on
+  `reviewed`), nothing in `objects/info` (no alternates). Then it requires exactly the branches
+  `base` and `reviewed`, `reviewed`'s only parent `base`, and every stored object reachable from
+  the two commits, counted by object id. Both copies must agree.
+- The work tree is checked out in the agent (`git read-tree --reset -u`), not on the host: a
+  case-insensitive host file system keeps one of `Foo` and `foo`, Linux keeps both. `git status`
+  there must then report nothing. Any failure is an infrastructure error. The object count and
+  both commit ids go to the trial's `repository.json`; the audit recounts with `count_objects`
+  after the engine.
+- A `gh` stub (`images/agent/gh`, Node, on `PATH`) answers `pr view` and `pr diff` from
+  `pr.json` and the repository. `pr diff` is `git diff refs/heads/base refs/heads/reviewed --`,
+  passed on as bytes, so a file named `base` or a non-UTF-8 line changes nothing. It reports the
+  PR as `OPEN` with no comments or reviews, so engines that skip closed or reviewed PRs still run.
+  `gh pr comment` writes its body to `/rbench/output/comment-<n>.md`. After the engine, the trial
+  copies the regular files named so into `raw/pr-comments/`, which normalization reads like any
+  other engine output. The stub opens no connection. Anything else fails with exit 1: another
+  command, another PR, `-R`, `--jq`, an invalid `--color`, a repeated option and fields it does not have.
 
 ### D5. Managed configuration enforces the hermetic policy; shims log
 **Choice.**

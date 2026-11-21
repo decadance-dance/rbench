@@ -12,6 +12,17 @@ from rbench.trial.images import (
     build_proxy_image,
     image_id,
 )
+from rbench.trial.repository import (
+    REPO_DIR,
+    REPOSITORY_FILE,
+    RepositoryError,
+    RepositoryState,
+    agent_runner,
+    copy_comments,
+    count_objects,
+    inspect_repository,
+    prepare_repository,
+)
 from rbench.trial.sessions import SessionError, launch_record, read_shim_log, unbound_sessions
 
 __all__ = [
@@ -21,9 +32,14 @@ __all__ = [
     "PROXY_LOG",
     "PROXY_NAME",
     "PROXY_URL",
+    "REPOSITORY_FILE",
+    "REPO_DIR",
+    "RepositoryError",
+    "RepositoryState",
     "SessionError",
     "TrialError",
     "TrialProject",
+    "agent_runner",
     "build_agent_image",
     "build_proxy_image",
     "check_login_home",
@@ -31,9 +47,13 @@ __all__ = [
     "codex_config",
     "collect",
     "compose_spec",
+    "copy_comments",
+    "count_objects",
     "image_id",
+    "inspect_repository",
     "launch_record",
     "prepare",
+    "prepare_repository",
     "read_shim_log",
     "shim_settings",
     "unbound_sessions",

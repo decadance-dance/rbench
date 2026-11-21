@@ -10,13 +10,19 @@ import subprocess
 import uuid
 
 import pytest
+from test_repository import git_bytes, plumbed_archive
 
 from rbench.trial import (
+    RepositoryError,
     TrialError,
     TrialProject,
+    agent_runner,
     build_agent_image,
     build_proxy_image,
+    copy_comments,
     image_id,
+    inspect_repository,
+    prepare_repository,
 )
 
 pytestmark = pytest.mark.live
@@ -185,3 +191,57 @@ def test_failed_start_leaves_nothing_behind(request, tmp_path_factory, images):
 
     print(e.value)
     assert leftovers(project.name) == ("", "")
+
+
+def test_scrubbed_repository_and_gh_stub(request, tmp_path_factory, images):
+    # A synthetic tree no case-insensitive host could check out (`Foo` and `foo`), with a root file
+    # named `base` like the diff's base ref.
+    tmp = tmp_path_factory.mktemp("task")
+    head_files = {b"app.py": b"x = 2\n", b"Foo": b"upper\n", b"foo": b"lower\n", b"base": b"b\n"}
+    task, archive = plumbed_archive(tmp, {b"app.py": b"x = 1\n"}, head_files)
+    project = new_project(request, tmp_path_factory, images, "repo")
+    project.up()
+    trial_dir = project.directory
+
+    state = prepare_repository(project, task, archive, trial_dir)
+    print(f"repository: {state}")
+    print(f"repository.json: {(trial_dir / 'repository.json').read_text().strip()}")
+
+    # Copied, not mounted, and owned by the agent's user.
+    owners = run(
+        project, "stat", "-c", "%U %n", "/rbench", "/rbench/repo/.git/HEAD", "/rbench/output"
+    )
+    assert {line.split()[0] for line in owners.stdout.splitlines()} == {"node"}
+    assert (
+        run(project, "git", "-C", "/rbench/repo", "log", "--format=%s").stdout == "reviewed\nbase\n"
+    )
+
+    # The Linux agent keeps both paths the host could not hold.
+    assert run(project, "cat", "/rbench/repo/Foo", "/rbench/repo/foo").stdout == "upper\nlower\n"
+    diff = run(project, "gh", "pr", "diff", "7")
+    expected = git_bytes(tmp / "plumbed", "diff", task.base, task.head, "--").decode()
+    assert diff.returncode == 0 and diff.stdout == expected
+    view = run(project, "gh", "pr", "view", "--json", "state,comments,reviews,title")
+    assert json.loads(view.stdout) == {
+        "comments": [], "reviews": [], "state": "OPEN", "title": "Make x three",
+    }  # fmt: skip
+    posted = project.exec_agent(["gh", "pr", "comment", "7", "--body-file", "-"], stdin="LGTM\n")
+    assert posted.returncode == 0, posted.stderr
+    for argv in (["api", "repos/acme/widget"], ["auth", "status"], ["pr", "view", "8"]):
+        refused = run(project, "gh", *argv)
+        assert refused.returncode == 1 and "gh (rbench trial)" in refused.stderr
+
+    [comment] = copy_comments(project, trial_dir)
+    print(f"{comment.relative_to(trial_dir)}: {comment.read_text()!r}")
+    assert comment.read_text() == "LGTM\n"
+    # Nothing left the trial: the proxy, the agent's only route out, saw no request.
+    assert proxy_log(project) == []
+    # The gh calls added no object; the audit's recount matches.
+    inside = agent_runner(project, "the live trial")
+    assert inspect_repository(inside, "/rbench/repo", "the live trial") == state
+
+    # The check runs inside the trial: a remote added there changes the config and is refused.
+    run(project, "git", "-C", "/rbench/repo", "remote", "add", "origin", "https://example.com/r")
+    with pytest.raises(RepositoryError, match="unexpected git config") as e:
+        inspect_repository(inside, "/rbench/repo", "the live trial")
+    print(e.value)
