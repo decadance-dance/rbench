@@ -737,8 +737,9 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
   engine's score as minimal tools against that engine's harness. The report states this next to
   the `plain` results on the leaderboard and the quality-against-cost plot (#66).
 - **[Codex engines other than `plain` keep the apps connectors under a ChatGPT login.]** →
-  `features.apps` is on by default and is turned off only for `plain` (D12). Whether every Codex
-  engine needs it off for the hermetic policy (D5) is tracked in #104.
+  `features.apps` is on by default and is turned off only for `plain` (D12). Turning it off for
+  every Codex engine (D5) is #104, a prerequisite for scoring Codex trials (see "Codex loads the
+  account's ChatGPT apps" below).
 - **[ReviewBench tasks are public and likely memorized.]** → The report shows task sets apart; `ours`
   and `hidden` carry the weight of the engine decision.
 - **[Transcript usage counts differ from CLI-reported usage.]** → The spike (#24) found the on-disk
