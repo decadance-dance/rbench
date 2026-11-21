@@ -672,6 +672,45 @@ copies and inspection trivial.
 converted to findings by a pinned model with a versioned prompt. The step copies findings and does
 not judge them. It runs hermetic, like the judge: the same container setup and shims, no tools.
 
+- An engine declaration says `output = "markdown"` or `"structured"` (the default). Only a
+  Markdown engine's report goes through this step.
+- The normalizer runs in the engine's own image, so a Markdown engine must pin `cli.claude`, and
+  its declaration is rejected without one.
+- A Markdown configuration's trials also spend on Claude, the normalizer's provider. The round's
+  frozen budget therefore covers Claude even when every role runs on Codex, and loading the plan
+  checks that. Engine estimates still use only the roles' providers. The default normalization
+  estimate applies to Markdown configurations only.
+- The pin is `claude-sonnet-5-5` at effort `medium`, with prompt version 1
+  (`src/rbench/engines/normalization-prompt-v1.md`). Medium, not low: the copy must be complete,
+  and the step's tokens are counted apart from the engine's anyway. A Markdown configuration's
+  settings hold `normalization: {model, effort, prompt_version, prompt_sha256}`, where the hash
+  covers the prompt and its output schema. Changing any of them gives new configuration ids, so
+  earlier trials are not reused. A structured engine's settings and ids do not change.
+  - A run frozen with another normalizer pin refuses to resume and names the field.
+  - A plan written before the output kind existed loads with every engine structured.
+- The launch is `claude -p --model <model> --effort <effort> --tools "" --output-format json
+  --json-schema <schema>`. It runs through the shim in a fresh compose project of the agent image,
+  prepared with D5's homes and shim settings, with no repository copied in. The prompt and the
+  report go by stdin, never on the command line. The report sits between two marker lines that
+  name its hash, as data that gives no instructions. A blank report has no findings and runs no
+  model. The caller owns the project, as for a trial: it starts the project, collects its shim log
+  and transcripts, and removes it.
+- The answer is `{findings: [{file, start_line, end_line, message, severity}], unlocated:
+  [{text}]}`. `severity` is the engine's own label, or null when the engine gives none. One bad
+  item rejects the whole result, and the error names the trial and the item. Structured output
+  goes through the same validation, with no model step.
+- Items the report gives without a file or a line are not findings: spec `engine-configurations`
+  (Findings normalization) requires both. Their count and text stay in the normalization record
+  under `raw/`, next to the pin, so the loss is visible. The smoke stage (#60) compares the number
+  of copied items with the report.
+- Tokens come from the `modelUsage` of the result. That differs from D7's transcripts, because
+  rbench owns this process's stdout, and its single result covers the whole session. The
+  pinned model must appear in `modelUsage`: a session that ran another model is rejected. Side calls
+  on other models are counted too. They go to the trial's `usage.json` under `normalization`, apart
+  from `engine`. The fields of the result (`structured_output`, `modelUsage` and its
+  `inputTokens`, `outputTokens`, `cacheReadInputTokens` and `cacheCreationInputTokens`) are those
+  of Claude Code 2.1.316. The smoke stage checks them against a live call.
+
 **Alternative considered:** ask each engine for JSON. That changes the engines being measured.
 
 `plain` is the exception: it is our own baseline, not an engine under test, so it asks for JSON
@@ -701,11 +740,19 @@ anywhere.
 ### D12. `plain` through each CLI's own options
 **Choice.**
 - The prompt and schema live in `engines/plain/` (`prompt.md`, `findings.schema.json`).
-- Claude: `claude -p --tools Read,Grep,Glob,Bash --json-schema <schema>`.
+- Claude: `claude -p --tools Read,Grep,Glob,Bash --permission-mode dontAsk --allowedTools Bash
+  --output-format json --json-schema <schema>`. `--tools` limits the built-in tools; `-p` denies
+  a call that asks for permission, and Bash asks, so `--allowedTools Bash` approves the shell
+  and `dontAsk` keeps denying every other call that would ask, instead of approving all of them
+  as `bypassPermissions` would. The container is the sandbox (as in D6). `dontAsk` is a mode of
+  the pinned Claude Code 2.1.316 (`claude --help`). The findings are the result's
+  `structured_output`.
 - Codex: `codex exec --output-schema <schema> -c web_search=disabled -c features.goals=false
   -c features.view_image=false -c features.image_generation=false -c features.apps=false
   -c agents.enabled=false -c tools.experimental_request_user_input.enabled=false
-  -c model_catalog_json=<catalog>`; the container is the sandbox (as in D6).
+  -c model_catalog_json=<catalog>`, with `--sandbox danger-full-access` and
+  `--output-last-message <file>`, whose content is the findings; the container is the sandbox
+  (as in D6).
   - `agents.enabled=false` turns off the subagent tools. That holds because the trial's config
     is clean: an explicit `features.multi_agent_v2=true` would take precedence over it.
   - `features.apps=false` turns off the apps connectors and the plugin-install suggestion, which
@@ -725,8 +772,12 @@ anywhere.
     `code_mode` features;
   - `experimental_supported_tools = []`: no clock, sleep or asynchronous messaging tools.
 
-  The catalog is generated per CLI version. The hash of the transformed file that the trial opens
-  is part of the configuration's settings.
+  The catalog is generated per CLI version and committed as
+  `engines/plain/codex-catalog-<version>.json`, so planning hashes it without Docker and
+  `rbench plan` gives the same ids as the run. `python -m rbench.engines.catalog --image <agent
+  image>` writes it from the real CLI in the agent image, with no network and no login (#47 did
+  so for 0.171.0). The hash of the transformed file that the trial opens is part of the
+  configuration's settings.
 - Checked with Codex CLI 0.167.0 and Claude Code against a local endpoint that records requests:
   - Codex by default sends `apply_patch`, `exec_command`, `write_stdin`, `view_image`,
     `web_search`, the goal tools, `tool_search` and `request_user_input`. With the 0.167.0
@@ -763,6 +814,16 @@ anywhere.
     proxy. The smoke stage reads the request-body tool list for both Codex matrix models through
     the proxy (Risks).
 - Model and effort come from the matrix, and the hermetic shims (D5) apply as for every engine.
+- Settings (#47): the engine's version is the prompt's SHA-256 (`engines/plain.toml` pins it, so
+  editing the prompt needs a new pin), and `inputs` holds the findings schema's hash and, for a
+  Codex model, the catalog's. The prompt goes on stdin. Before a launch the adapter rehashes the
+  three files and refuses any that differ from the frozen plan, so a run never mixes trials of two
+  prompts, schemas or catalogs. The answer is validated against the schema by rbench itself; an
+  answer off the schema, or one whose objects repeat a key, makes the trial `failed`, and the
+  error names the place and the rule, never the answer's text. A reviewer runs one model:
+  planning refuses a `models` set for `plain` (`model = [...]` plans one configuration per
+  model), and the plan reader accepts `inputs` only on `plain`, with exactly its provider's keys.
+  The argv log check requires the schema, the catalog and every switch in the argv the CLI got.
 
 **Alternative considered:** give `plain` only the diff, with no tools. It is cheaper, but it would
 measure a different task from the engines, which all read the repository.

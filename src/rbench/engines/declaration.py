@@ -4,6 +4,7 @@ A declaration is a TOML file:
 
     name = "example"
     pin = { kind = "git", ref = "refs/tags/v1.2.3" }
+    output = "markdown"  # or "structured" (the default): how its findings come out
 
     [cli]  # exact versions of the CLIs installed in the engine's image
     claude = "2.1.316"
@@ -15,6 +16,10 @@ A declaration is a TOML file:
                        # config: the adapter writes them into the trial's config.toml
     default = { model = "claude-opus-5-5", effort = "high" }
 
+A `markdown` engine's report goes through the pinned normalization step
+(`rbench.engines.normalization`), whose pin joins its configurations' settings; `structured`
+findings are converted without a model step (spec engine-configurations, Findings normalization).
+
 The roles' defaults together are the engine's default configuration.
 
 Pin kinds: `git` (a commit, or a tag that planning resolves to its commit), `version`, `sha256`
@@ -25,13 +30,16 @@ rreview by commit or tag, code-review by the Claude Code version, ...) is checke
 
 import re
 import tomllib
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from rbench.engines.pins import check_ref, model_cli
+from rbench.engines import normalization
+from rbench.engines.pins import MODELS, check_ref, model_cli
 
 CLIS = ("claude", "codex")
 DELIVERIES = ("flag", "config")
+OUTPUTS = ("structured", "markdown")
 # The effort values each CLI accepts, checked against:
 # - Claude Code 2.1.316: `claude --help`, `--effort <level>`;
 # - Codex CLI 0.167.0: the union of the `supported_reasoning_levels` its bundled catalog
@@ -79,11 +87,22 @@ class Engine:
     pin_ref: str
     clis: dict[str, str]  # CLI name -> exact version
     roles: dict[str, Role]
+    output: str = "structured"
+    # CLI -> {input name -> SHA-256}: content hashes of files a session on that CLI reads, which
+    # join the settings of every configuration on it (`plain`: its schema and Codex catalog).
+    inputs: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @property
     def version(self) -> str:
         """The engine's exact version; for kind `cli`, the version of that CLI."""
         return self.clis[self.pin_ref] if self.pin_kind == "cli" else self.pin_ref
+
+    def inputs_for(self, clis: Iterable[str]) -> tuple[tuple[str, str], ...]:
+        """The input hashes of a configuration whose models run on `clis`, sorted."""
+        merged: dict[str, str] = {}
+        for cli in clis:
+            merged |= self.inputs.get(cli, {})
+        return tuple(sorted(merged.items()))
 
     def default_configuration(self) -> dict[str, Setting]:
         """The declared default of every role (a matrix entry with `default: true`)."""
@@ -127,7 +146,7 @@ def _table(
 
 def parse_engine(data: object, source: str) -> Engine:
     """Validate a parsed declaration; `source` (its file) prefixes every error."""
-    data = _table(data, source, {"name", "pin", "cli", "roles"})
+    data = _table(data, source, {"name", "pin", "cli", "roles"}, frozenset({"output"}))
     name = data["name"]
     if not (isinstance(name, str) and _NAME.fullmatch(name)):
         raise DeclarationError(f"{source}: name: bad engine name {name!r}")
@@ -147,10 +166,21 @@ def parse_engine(data: object, source: str) -> Engine:
     else:
         raise DeclarationError(f"{where}: pin.kind: unknown pin kind {kind!r}")
 
+    output = data.get("output", "structured")
+    if output not in OUTPUTS:
+        raise DeclarationError(f"{where}: output must be structured or markdown, got {output!r}")
+    # The normalizer runs in the engine's own image (design D9), so that image needs its CLI.
+    normalizer_cli = MODELS[normalization.MODEL]
+    if output == "markdown" and normalizer_cli not in clis:
+        raise DeclarationError(
+            f"{where}: output = 'markdown' needs a pinned {normalizer_cli} CLI for the"
+            f" normalization step ({normalization.MODEL}); add cli.{normalizer_cli}"
+        )
+
     roles = data["roles"]
     if not (isinstance(roles, dict) and roles):
         raise DeclarationError(f"{where}: roles must be a table of at least one role")
-    engine = Engine(name, kind, ref, dict(clis), {})
+    engine = Engine(name, kind, ref, dict(clis), {}, output)
     for role_name, raw in roles.items():
         at = f"{where}: role {role_name!r}"
         if not _ROLE.fullmatch(role_name):
@@ -176,4 +206,9 @@ def load_engine(path: Path) -> Engine:
         data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise DeclarationError(f"{path}: not a valid UTF-8 TOML file: {e}") from e
-    return parse_engine(data, str(path))
+    engine = parse_engine(data, str(path))
+    if engine.name == "plain":
+        from rbench.engines.plain import bind  # plain imports this module
+
+        engine = bind(engine, Path(path).parent)
+    return engine

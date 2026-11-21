@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import shutil
@@ -8,6 +9,23 @@ import pytest
 
 FAKE_BIN = Path(__file__).parent / "fixtures" / "bin"
 FAKE_TOOLS = ("claude", "codex", "docker", "gh", "security")
+REPO = Path(__file__).parents[1]
+# A synthetic `plain` prompt for engine directories built in tmp_path; its hash is the pin.
+PLAIN_PROMPT = b"Review the change and report its defects.\n"
+PLAIN_PROMPT_SHA256 = hashlib.sha256(PLAIN_PROMPT).hexdigest()
+
+
+def write_plain_files(engines_dir: Path, codex_version: str | None = None) -> Path:
+    """The files a `plain.toml` in `engines_dir` needs: the synthetic prompt, the repository's
+    findings schema and, for `codex_version`, a synthetic model catalog. Returns `plain/`."""
+    directory = engines_dir / "plain"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "prompt.md").write_bytes(PLAIN_PROMPT)
+    schema = REPO / "engines" / "plain" / "findings.schema.json"
+    (directory / "findings.schema.json").write_bytes(schema.read_bytes())
+    if codex_version is not None:
+        (directory / f"codex-catalog-{codex_version}.json").write_text('{"models": []}\n')
+    return directory
 
 
 def require_fakes(bin_dir: Path, path: str) -> None:

@@ -35,6 +35,9 @@ nothing.
 
 A round's providers are those its configurations run on plus those with a non-zero normalization
 or judge estimate; each needs a budget in the round, or planning refuses the round.
+
+A structured configuration has no normalization estimate, whatever the smoke run measured: only a
+Markdown engine's trials run the normalizer (design D9).
 """
 
 import json
@@ -43,9 +46,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from rbench.engines import normalization
 from rbench.engines.declaration import CLIS, EFFORTS, DeclarationError, Engine, Setting
 from rbench.engines.pins import MODELS
-from rbench.matrix.expansion import UNDECIDED, Configuration, Matrix, RoleSetting, Round
+from rbench.matrix.expansion import (
+    UNDECIDED,
+    Configuration,
+    Matrix,
+    RoleSetting,
+    Round,
+    configuration,
+)
 
 KINDS = ("engine", "normalization", "judge")
 SMOKE_VERSION = 1
@@ -53,10 +64,9 @@ SMOKE_VERSION = 1
 # Default estimate per trial, used where no smoke median exists. A guess, not a measurement, so
 # the output labels it DEFAULT; the smoke stage replaces it before any budget is approved (O6).
 DEFAULT_ENGINE_TOKENS = 300_000  # on each provider the configuration uses
-# limit: the normalization model is not pinned yet (issue #45); the default assumes Claude.
-DEFAULT_NORMALIZATION_TOKENS = {"claude": 30_000}
+# Only a Markdown engine's trials run the normalizer (design D9), on its pinned model's CLI.
+DEFAULT_NORMALIZATION_TOKENS = {MODELS[normalization.MODEL]: 30_000}
 DEFAULT_JUDGE_TOKENS = {"claude": 60_000}  # the judge is claude-opus-5-5 (design O1)
-NO_NORMALIZATION = frozenset({"plain"})  # structured output, no model step (spec Plain output)
 
 # Decision O6: a round's budget per provider is its plan estimate x 1.2.
 BUDGET_MARGIN = (6, 5)
@@ -104,7 +114,7 @@ def configuration_of(config_id: str, engine: Engine) -> Configuration | None:
         except DeclarationError:
             return None
         settings.append((role, RoleSetting(tuple(sorted(models)), effort)))
-    config = Configuration(engine.name, engine.version, tuple(settings))
+    config = configuration(engine, settings)
     return config if config_id == f"{config.name}-{config_id[-64:]}" else None
 
 
@@ -200,16 +210,26 @@ def load_smoke(path: Path, declared: Mapping[str, Engine]) -> SmokeMedians:
 
 
 def default_estimate(config: Configuration) -> Tokens:
-    normalization = {} if config.engine in NO_NORMALIZATION else DEFAULT_NORMALIZATION_TOKENS
     return {
         "engine": {p: DEFAULT_ENGINE_TOKENS for p in sorted(config.providers)},
-        "normalization": dict(normalization),
+        "normalization": dict(DEFAULT_NORMALIZATION_TOKENS) if config.markdown else {},
         "judge": dict(DEFAULT_JUDGE_TOKENS),
     }
 
 
 def trial_estimate(config: Configuration, smoke: SmokeMedians | None) -> tuple[Tokens, str]:
-    """The per-trial estimate of `config` and its source: `smoke`, `smoke: <id>` or `DEFAULT`."""
+    """The per-trial estimate of `config` and its source: `smoke`, `smoke: <id>` or `DEFAULT`.
+
+    A structured configuration runs no normalization step, so a measured normalization median,
+    from a smoke run made while its engine was Markdown, does not apply to it.
+    """
+    tokens, source = _measured_estimate(config, smoke)
+    if not config.markdown:
+        tokens = tokens | {"normalization": {}}
+    return tokens, source
+
+
+def _measured_estimate(config: Configuration, smoke: SmokeMedians | None) -> tuple[Tokens, str]:
     if smoke is not None and config.id in smoke.configurations:
         return smoke.configurations[config.id][1], "smoke"
     measured = smoke.for_engine(config.engine) if smoke is not None else None
@@ -315,12 +335,12 @@ def render(
                 " measured"
             )
     if defaults:
-        normalization = ", ".join(f"{t} on {p}" for p, t in DEFAULT_NORMALIZATION_TOKENS.items())
+        normalizer = ", ".join(f"{t} on {p}" for p, t in DEFAULT_NORMALIZATION_TOKENS.items())
         judge = ", ".join(f"{t} on {p}" for p, t in DEFAULT_JUDGE_TOKENS.items())
         lines.append(
             f"  DEFAULT per trial: engine {DEFAULT_ENGINE_TOKENS} on each provider the"
-            f" configuration uses; normalization {normalization} (none for"
-            f" {', '.join(sorted(NO_NORMALIZATION))}); judge {judge}"
+            f" configuration uses; normalization {normalizer} (Markdown engines"
+            f" only); judge {judge}"
         )
 
     for plan in plans:
