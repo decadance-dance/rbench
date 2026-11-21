@@ -12,6 +12,9 @@ A trial directory holds:
                    {"engine": {"<model>": {"input", "output", "cache_read", "cache_creation"}},
                     "normalization": {"<model>": {...}},
                     "incomplete": {"engine": ["<reason>", ...], "normalization": [...]}}
+    wasted.json    the usage of every attempt a limit interrupted, oldest first, each in the form of
+                   usage.json (spec run-ledger, Limit detection and stop); outside raw/, so it
+                   outlives the reruns
     raw/           engine output, transcripts and logs of the latest attempt
     project/       the trial's compose file (`rbench.run.trial`), kept to remove leftovers
     audit.json     the contamination audit (`rbench.trial.audit`): {"contaminated": [<reason>],
@@ -50,6 +53,7 @@ NEEDS_REASON = frozenset({"failed", "interrupted", "contaminated", "misconfigure
 STATUS_FILE = "status.json"
 FINDINGS_FILE = "findings.json"
 USAGE_FILE = "usage.json"
+WASTED_FILE = "wasted.json"
 AUDIT_FILE = "audit.json"
 SESSIONS_FILE = "sessions.json"
 RAW_DIR = "raw"
@@ -309,3 +313,27 @@ def read_results(trial_dir: Path) -> tuple[list, dict]:
     _check_findings(findings, str(trial_dir))
     _check_usage(usage, str(trial_dir))
     return findings, usage
+
+
+def add_wasted(trial_dir: Path, usage: dict) -> None:
+    """Append the usage of an attempt a limit interrupted to the trial's wasted tokens."""
+    trial_dir = Path(trial_dir)
+    _check_usage(usage, str(trial_dir))
+    atomic_write(trial_dir / WASTED_FILE, dump_json([*read_wasted(trial_dir), usage]))
+
+
+def read_wasted(trial_dir: Path) -> list[dict]:
+    """The usage of every attempt of the trial a limit interrupted, oldest first; none when the
+    trial has no `wasted.json`."""
+    path = Path(trial_dir) / WASTED_FILE
+    try:
+        data = json.loads(path.read_bytes(), object_pairs_hook=no_repeated_keys)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, RecursionError) as e:
+        raise LedgerError(f"{path}: cannot read the wasted tokens: {e}") from e
+    if not isinstance(data, list):
+        raise LedgerError(f"{path}: expected a list of usage records")
+    for i, usage in enumerate(data):
+        _check_usage(usage, f"{path}: attempt {i}")
+    return data
