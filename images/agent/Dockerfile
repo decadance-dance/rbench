@@ -4,6 +4,18 @@
 # configuration, the shims first on PATH, their collector and Claude's SessionStart hook.
 # Credentials (#40) and the scrubbed repository (#39) are added per trial; neither belongs here.
 # limit: Debian packages are not version-pinned; the ledger pins the built image by its digest.
+
+# rreview at the commit its declaration pins (engines/rreview.toml), built from source with its
+# lock file; only the binary reaches the agent image. An empty commit builds nothing.
+# limit: the Rust base is pulled for every agent image, also when rreview is not installed.
+FROM rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd AS rreview
+ARG RREVIEW_COMMIT=
+RUN set -eu; mkdir -p /out/bin; \
+    if [ -n "$RREVIEW_COMMIT" ]; then \
+        cargo install --locked --root /out \
+            --git https://github.com/decadance-dance/rreview --rev "$RREVIEW_COMMIT" rreview; \
+    fi
+
 FROM node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee
 
 # ca-certificates: the slim base has no CA bundle and both CLIs fail TLS without one (#20).
@@ -22,6 +34,18 @@ RUN set -eu; pkgs=""; \
     test -n "$pkgs"; \
     npm install -g --no-fund --no-audit $pkgs; \
     npm cache clean --force
+
+# rreview, when the engine is rreview. It refuses a Claude reviewer without zsh, the shell it runs
+# Claude's commands in so that no bash login reads startup files. The zsh version apt picked is
+# recorded in /opt/rbench/zsh.version, so two builds of the same pins can be told apart.
+ARG RREVIEW_COMMIT=
+COPY --from=rreview /out/bin/ /usr/local/bin/
+RUN set -eu; if [ -n "$RREVIEW_COMMIT" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends zsh \
+        && rm -rf /var/lib/apt/lists/* \
+        && install -d -m 0755 /opt/rbench \
+        && dpkg-query -W -f '${Version}\n' zsh > /opt/rbench/zsh.version; \
+    fi
 
 # The gh stub (design D4): answers PR lookups from the trial's frozen PR, sends nothing anywhere.
 COPY --chmod=755 gh /usr/local/bin/gh

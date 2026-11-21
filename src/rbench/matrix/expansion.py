@@ -39,7 +39,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from rbench.engines import normalization
+from rbench.engines import normalization, rreview
 from rbench.engines.declaration import CLIS, Engine, Setting
 from rbench.engines.pins import MODELS
 from rbench.engines.plain import NAME as PLAIN
@@ -271,10 +271,18 @@ def _expand(entry: object, where: str, engines: Mapping[str, Engine]) -> list[Co
                 engine.delivery(role, Setting(model, s.effort), at)
         choices.append(settings)
     names = sorted(engine.roles)
-    return [
+    configurations = [
         configuration(engine, tuple(zip(names, combo, strict=True)))
         for combo in itertools.product(*choices)
     ]
+    if engine.name == rreview.NAME:
+        # Planned only if the adapter can launch it: one model per role, efforts rreview takes.
+        for c in configurations:
+            try:
+                rreview.launch(c.settings)
+            except ValueError as e:
+                raise MatrixError(f"{where}: {e}") from None
+    return configurations
 
 
 def _budget(value: object, where: str, used: frozenset[str]) -> dict[str, int | None]:

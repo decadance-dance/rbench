@@ -52,6 +52,8 @@ def test_agent_image_pins_versions_and_reads_them_back(fake_bin):
         "CLAUDE_VERSION=2.1.316",
         "--build-arg",
         "CODEX_VERSION=0.171.0",
+        "--build-arg",
+        "RREVIEW_COMMIT=",
         "/images/agent",
     ]
     assert runs == [
@@ -68,6 +70,56 @@ def test_agent_image_installs_only_declared_clis(fake_bin):
     build = fake_bin.calls()[0]["argv"]
     assert "CODEX_VERSION=" in build and "CLAUDE_VERSION=2.1.316" in build
     assert [c["argv"][-2] for c in fake_bin.calls()[1:]] == ["/usr/local/bin/claude"]
+
+
+def test_agent_image_builds_rreview_at_its_commit_and_reads_its_release_back(fake_bin):
+    commit = "f71d6e171bf47312fd6e564b6cc6a3dcc2d1fe94"
+    fake_bin.scenario(
+        "docker",
+        replies=[
+            {"match": "build ", "stdout": AGENT_ID + "\n"},
+            {"match": "claude --version", "stdout": "2.1.316 (Claude Code)\n"},
+            {"match": "codex --version", "stdout": "codex-cli 0.171.0\n"},
+            {"match": "rreview --version", "stdout": "rreview 0.1.1\n"},
+        ],
+    )
+
+    image = build_agent_image(CLIS, rreview=(commit, "0.1.1"))
+
+    assert image == Image(AGENT, CLIS)  # rreview is the engine's pin, not one of its CLIs
+    build, *runs = [call["argv"] for call in fake_bin.calls()]
+    assert f"RREVIEW_COMMIT={commit}" in build
+    assert "rbench-agent:claude-2.1.316-codex-0.171.0-rreview-0.1.1" in build
+    assert runs[-1] == [
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        AGENT_ID,
+        "/usr/local/bin/rreview",
+        "--version",
+    ]
+
+
+def test_agent_image_rejects_another_rreview_inside(fake_bin):
+    fake_bin.scenario(
+        "docker",
+        replies=[
+            {"match": "build ", "stdout": AGENT_ID + "\n"},
+            {"match": "claude --version", "stdout": "2.1.316 (Claude Code)\n"},
+            {"match": "rreview --version", "stdout": "rreview 0.1.0\n"},
+        ],
+    )
+
+    with pytest.raises(TrialError, match=r"expected rreview 0\.1\.1.*0\.1\.0"):
+        build_agent_image({"claude": "2.1.316"}, rreview=("a" * 40, "0.1.1"))
+
+
+@pytest.mark.parametrize("rreview", [("main", "0.1.1"), ("A" * 40, "0.1.1"), ("a" * 40, "latest")])
+def test_agent_image_checks_the_rreview_pin_before_docker(fake_bin, rreview):
+    with pytest.raises((TrialError, FloatingRefError)):
+        build_agent_image({"claude": "2.1.316"}, rreview=rreview)
+    assert fake_bin.calls() == []
 
 
 def test_agent_image_rejects_another_version_inside(fake_bin):
@@ -301,7 +353,7 @@ def test_base_images_are_pinned_by_digest(image):
     dockerfile = (ROOT / "images" / image / "Dockerfile").read_text()
 
     froms = [line for line in dockerfile.splitlines() if line.startswith("FROM ")]
-    assert len(froms) == 1 and re.fullmatch(r"FROM \S+@sha256:[0-9a-f]{64}", froms[0])
+    assert froms and all(re.fullmatch(r"FROM \S+@sha256:[0-9a-f]{64}( AS \w+)?", f) for f in froms)
 
 
 def test_agent_build_context_holds_only_the_image_and_its_policy():
@@ -321,5 +373,7 @@ def test_agent_build_context_holds_only_the_image_and_its_policy():
         "managed-settings.json",
         "requirements.toml",
     ]
-    copies = re.findall(r"^COPY .*? (\S+) \S+$", (context / "Dockerfile").read_text(), re.MULTILINE)
+    dockerfile = (context / "Dockerfile").read_text()
+    # A COPY --from takes from a build stage, not from the context.
+    copies = re.findall(r"^COPY (?!--from).*? (\S+) \S+$", dockerfile, re.MULTILINE)
     assert copies == ["gh", "managed-settings.json", "requirements.toml", "lib/"]
