@@ -294,6 +294,7 @@ def test_an_uncollected_rollout_fails_without_naming_its_file(tmp_path: Path):
         ({"findings": []}, "review_output: expected findings"),
         (review() | {"overall_confidence_score": None}, "overall_confidence_score"),
         (review() | {"overall_explanation": 1}, "overall_explanation"),
+        ({k: v for k, v in review().items() if k != "overall_correctness"}, "correctness"),
     ],
 )
 def test_malformed_review_output_is_rejected_whole(output: dict, message: str):
