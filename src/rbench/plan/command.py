@@ -7,7 +7,14 @@ from pathlib import Path
 from rbench.engines.declaration import Engine, load_engine
 from rbench.matrix.expansion import Matrix, load_matrix
 from rbench.plan.estimate import load_smoke, plan_round, render
-from rbench.tasks import CORE_LIST_FILE, MANIFEST_FILE, load_core_list, load_manifest
+from rbench.tasks import (
+    CORE_LIST_FILE,
+    MANIFEST_FILE,
+    hidden_config,
+    load_core_list,
+    load_hidden_tasks,
+    load_manifest,
+)
 
 PUBLIC_SETS = ("reviewbench", "ours")
 
@@ -30,12 +37,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help=f"holds {CORE_LIST_FILE} and one directory per public set (default: tasks)",
     )
     parser.add_argument(
-        "--hidden",
-        type=Path,
-        metavar="DIR",
-        help="the hidden task set, counted when the stage plans all tasks",
-    )
-    parser.add_argument(
         "--smoke", type=Path, metavar="FILE", help="smoke medians (default: the DEFAULT estimate)"
     )
 
@@ -52,14 +53,19 @@ def load_engines(directory: Path) -> dict[str, Engine]:
     return engines
 
 
-def select_tasks(matrix: Matrix, root: Path, hidden: Path | None) -> tuple[int, str]:
-    """How many tasks the stage plans, and where they come from; only ids are read."""
+def select_tasks(matrix: Matrix, root: Path) -> tuple[int, str]:
+    """How many tasks the stage plans, and where they come from.
+
+    All tasks include the hidden set, so planning them refuses, saying how to configure it, until
+    RBENCH_HIDDEN_DIR names the hidden directory (spec review-tasks); hidden tasks are only
+    counted, never named.
+    """
     if matrix.tasks == "core":
         core = load_core_list(root / CORE_LIST_FILE)
         return len(matrix.select_tasks(core.task_ids, ())), f"core list v{core.version}"
-    sets = [(s, root / s) for s in PUBLIC_SETS] + ([("hidden", hidden)] if hidden else [])
-    ids = [i for s, d in sets for i in load_manifest(d / MANIFEST_FILE, s).tasks]
-    return len(matrix.select_tasks((), ids)), f"sets {', '.join(s for s, _ in sets)}"
+    ids = [i for s in PUBLIC_SETS for i in load_manifest(root / s / MANIFEST_FILE, s).tasks]
+    ids += [t.id for t in load_hidden_tasks(hidden_config())]
+    return len(matrix.select_tasks((), ids)), f"sets {', '.join(PUBLIC_SETS)}, hidden"
 
 
 def run(args: argparse.Namespace) -> int:
@@ -71,18 +77,14 @@ def run(args: argparse.Namespace) -> int:
             names = ", ".join(r.name for r in matrix.rounds) or "none"
             what = f"no round {args.round!r}" if args.round else "no rounds"
             raise ValueError(f"{args.matrix}: {what}; rounds: {names}")
-        tasks, origin = select_tasks(matrix, args.tasks_root, args.hidden)
+        tasks, origin = select_tasks(matrix, args.tasks_root)
         smoke = load_smoke(args.smoke) if args.smoke else None
     except (ValueError, OSError) as e:
         print(f"rbench plan: {e}", file=sys.stderr)
         return 1
     plans = [plan_round(r, tasks, matrix.attempts, smoke) for r in rounds]
     sys.stdout.write(render(str(args.matrix), matrix, tasks, origin, plans, smoke))
-    refused = [(p.round.name, provider, p) for p in plans for provider in p.over_budget()]
-    for name, provider, plan in refused:
-        print(
-            f"rbench plan: refusing round {name!r}: the {provider} estimate"
-            f" {plan.total(provider)} exceeds its budget {plan.round.budget[provider]}",
-            file=sys.stderr,
-        )
+    refused = [(p.round.name, reason) for p in plans for reason in p.refusals()]
+    for name, reason in refused:
+        print(f"rbench plan: refusing round {name!r}: {reason}", file=sys.stderr)
     return 1 if refused else 0

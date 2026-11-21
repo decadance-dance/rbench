@@ -3,6 +3,7 @@ import random
 from pathlib import Path
 
 import pytest
+from test_tasks import HIDDEN, write_task
 
 from rbench.cli import main
 from rbench.engines.declaration import load_engine
@@ -17,7 +18,7 @@ from rbench.plan.estimate import (
     suggested_budget,
     trial_estimate,
 )
-from rbench.tasks import HIDDEN_ID_PREFIX
+from rbench.tasks import HIDDEN_CONFIG_FILE, HIDDEN_DIR_ENV, HIDDEN_ID_PREFIX
 
 PROMPT = "ab" * 32
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -162,7 +163,7 @@ def test_unmeasured_configuration_takes_its_engines_median_on_its_own_provider(b
 
     tokens, source = trial_estimate(gpt, smoke)
 
-    assert source == f"smoke: {default_config(bench, 'plain').id}"
+    assert source == f"smoke: {default_config(bench, 'plain').id}, split inferred"
     assert tokens == {"engine": {"codex": 1000}, "normalization": {}, "judge": {"claude": 100}}
 
 
@@ -174,7 +175,10 @@ def test_engine_tokens_split_evenly_when_providers_differ(bench):
         "plain", "x", (("reviewer", RoleSetting(("claude-opus-5-5", "gpt-6.2-sol"), "high")),)
     )
 
-    assert trial_estimate(two, smoke)[0]["engine"] == {"claude": 501, "codex": 501}
+    tokens, source = trial_estimate(two, smoke)
+
+    assert tokens["engine"] == {"claude": 501, "codex": 501}
+    assert source == f"smoke: {default_config(bench, 'plain').id}, split inferred"
 
 
 def test_no_smoke_run_uses_the_labelled_default(bench, capsys):
@@ -190,7 +194,7 @@ def test_no_smoke_run_uses_the_labelled_default(bench, capsys):
     claude_judge = DEFAULT_JUDGE_TOKENS["claude"] * trials
     assert row(out, "r1", "claude")[:6] == [
         "claude",
-        "20",
+        str(trials),  # every trial is judged on claude
         str(claude_engine),
         str(claude_norm),
         str(claude_judge),
@@ -273,6 +277,52 @@ def test_whole_plan_refuses_any_round_over_budget(bench, capsys):
     assert "all rounds: 40 trials" in out
 
 
+CODEX_ONLY = """
+stage = "screening"
+tasks = "core"
+attempts = 1
+[[rounds]]
+name = "r1"
+budget = BUDGET
+[[rounds.entries]]
+engine = "plain"
+roles.reviewer = { model = "gpt-6.2-sol", effort = "high" }
+"""
+
+
+def test_judge_provider_is_budgeted_and_thresholded(bench, capsys):
+    # Review repro: a Codex-only round still spends Claude judge tokens.
+    budget = "{ claude = 1, codex = 4000000 }"
+    matrix = write(bench / "codex.toml", CODEX_ONLY.replace("BUDGET", budget))
+
+    assert main(plan(bench, matrix)) == 1
+
+    captured = capsys.readouterr()
+    judge = DEFAULT_JUDGE_TOKENS["claude"] * 10
+    assert row(captured.out, "r1", "claude")[:6] == [
+        "claude",
+        "10",
+        "0",
+        "0",
+        str(judge),
+        str(judge),
+    ]
+    assert row(captured.out, "r1", "claude")[-2:] == ["OVER", "BUDGET"]
+    assert "  claude: not enforced; its CLI reports no used share" in captured.out
+    assert f"the claude estimate {judge} exceeds its budget 1" in captured.err
+
+
+def test_provider_without_a_budget_refuses_the_round(bench, capsys):
+    matrix = write(bench / "codex.toml", CODEX_ONLY.replace("BUDGET", "{ codex = 4000000 }"))
+
+    assert main(plan(bench, matrix)) == 1
+
+    captured = capsys.readouterr()
+    assert row(captured.out, "r1", "claude")[-4:] == ["none", "720000", "NO", "BUDGET"]
+    assert "the claude estimate 600000 has no claude budget in the round" in captured.err
+    assert "codex" not in captured.err
+
+
 def test_budget_margin_rounds_up():
     assert suggested_budget(100) == 120
     assert suggested_budget(101) == 122  # 121.2 rounded up
@@ -333,22 +383,36 @@ def test_task_count_from_core_list_and_stage(bench, capsys):
     assert "round defaults: 2 trials (2 configurations x 1 tasks x 1 attempt)" in out
 
 
-def test_full_stage_counts_every_set_including_hidden(bench, capsys):
-    hidden = [f"{HIDDEN_ID_PREFIX}{i}" for i in range(4)]
-    write(bench / "private" / "manifest.json", manifest("hidden", hidden))
-    full = write(
-        bench / "full.toml",
-        'stage = "full"\ntasks = "all"\nattempts = 3\n'
-        '[[rounds]]\nname = "f1"\nbudget = { claude = "undecided" }\n'
-        '[[rounds.entries]]\nengine = "plain"\ndefault = true\n',
-    )
+FULL = (
+    'stage = "full"\ntasks = "all"\nattempts = 3\n'
+    '[[rounds]]\nname = "f1"\nbudget = { claude = "undecided" }\n'
+    '[[rounds.entries]]\nengine = "plain"\ndefault = true\n'
+)
 
-    assert main(plan(bench, full, "--hidden", str(bench / "private"))) == 0
+
+def test_full_stage_counts_every_set_including_hidden(bench, capsys, monkeypatch):
+    private = bench / "private"
+    write(private / HIDDEN_CONFIG_FILE, f'canary_prefix = "{HIDDEN}"\n')
+    for i in range(4):
+        write_task(private, f"{HIDDEN_ID_PREFIX}{i}", "hidden")
+    monkeypatch.setenv(HIDDEN_DIR_ENV, str(private))
+
+    assert main(plan(bench, write(bench / "full.toml", FULL))) == 0
 
     out = capsys.readouterr().out
     assert "7 tasks (sets reviewbench, ours, hidden), 3 attempts per task" in out
     assert "round f1: 21 trials" in out
-    assert HIDDEN_ID_PREFIX + "0" not in out
+    assert HIDDEN_ID_PREFIX + "0" not in out and str(private) not in out
+
+
+def test_full_stage_without_hidden_set_refuses_and_says_how(bench, capsys, monkeypatch):
+    monkeypatch.delenv(HIDDEN_DIR_ENV, raising=False)
+
+    assert main(plan(bench, write(bench / "full.toml", FULL))) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"set {HIDDEN_DIR_ENV} to the hidden task directory" in captured.err
 
 
 @pytest.mark.parametrize(
@@ -395,7 +459,7 @@ ID = "plain-claude-opus-5-5-high-" + "0" * 64
         ({"version": 1, "configurations": {ID: GOOD}, "extra": 1}, "unknown extra"),
         (
             {"version": 1, "configurations": {ID: GOOD | {"engine": "panel"}}},
-            "engine the id starts",
+            "of engine 'panel'",
         ),
         ({"version": 1, "configurations": {ID: {"engine": "plain"}}}, "missing tokens"),
         (
@@ -451,6 +515,50 @@ def test_malformed_smoke_medians_are_rejected(data, message):
     with pytest.raises(SmokeError, match="^smoke.json") as error:
         parse_smoke(data, "smoke.json")
     assert message in str(error.value)
+
+
+def bad(config_id: str = ID, **record) -> dict:
+    tokens = {"engine": {"claude": 1}, "normalization": {}, "judge": {}} | record.pop("tokens", {})
+    return {
+        "version": 1,
+        "configurations": {config_id: {"engine": "plain", "tokens": tokens} | record},
+    }
+
+
+@pytest.mark.parametrize(
+    ("data", "config_id", "message"),
+    [
+        (bad("plain-"), "plain-", "not a configuration id of engine 'plain'"),
+        (bad("plain-claude-opus-5-5-high"), "plain-claude-opus-5-5-high", "64 lowercase hex"),
+        (bad(ID[:-1]), ID[:-1], "64 lowercase hex"),
+        (bad(ID[:-1] + "A"), ID[:-1] + "A", "64 lowercase hex"),
+        (bad(ID.replace("plain", "panel")), ID.replace("plain", "panel"), "of engine 'plain'"),
+        (bad(engine=7), ID, "engine: expected an engine name"),
+        (bad(engine="Plain"), ID, "engine: expected an engine name"),
+        (bad(tokens={"engine": {}}), ID, "no engine usage measured"),
+        (bad(tokens={"engine": {"claude": 0, "codex": 0}}), ID, "no engine usage measured"),
+    ],
+)
+def test_each_malformed_smoke_field_rejects_the_file_naming_the_configuration(
+    data, config_id, message
+):
+    data["configurations"]["plain-claude-sonnet-5-5-high-" + "1" * 64] = GOOD
+    with pytest.raises(SmokeError, match=f"^smoke.json: configuration {config_id!r}") as error:
+        parse_smoke(data, "smoke.json")
+    assert message in str(error.value)
+
+
+def test_malformed_smoke_record_cannot_zero_a_round(bench, capsys):
+    # Review repro: an id without a hash and an empty engine map once estimated zero tokens.
+    matrix = write(bench / "codex.toml", CODEX_ONLY.replace("BUDGET", "{ claude = 1, codex = 1 }"))
+    empty = {"engine": "plain", "tokens": {"engine": {}, "normalization": {}, "judge": {}}}
+    smoke = smoke_file(bench, {"plain-": empty})
+
+    assert main(plan(bench, matrix, "--smoke", str(smoke))) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "configuration 'plain-'" in captured.err
 
 
 def test_smoke_file_with_repeated_key_is_rejected(tmp_path):

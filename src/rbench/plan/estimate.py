@@ -9,7 +9,8 @@ provider (the CLI a model runs on), and comes from one of:
 - the smoke run's median for the same engine's default configuration (`smoke: <id>`). Normalization
   and judge tokens are kept as measured, since their models are pinned apart from the
   configuration. Engine tokens keep their per-provider split when the configuration uses the same
-  providers; otherwise their total goes to the configuration's providers in equal shares;
+  providers; otherwise their total goes to the configuration's providers in equal shares, and the
+  source says `split inferred`;
 - the documented default below, when the smoke run did not measure the engine or no smoke run is
   given (`DEFAULT`).
 
@@ -26,15 +27,20 @@ stores its medians in this form:
 
 Each number is the median, over the smoke run's done trials of that configuration, of one trial's
 tokens of that kind on that provider. The smoke stage runs one configuration per engine, so the
-file lists at most one per engine.
+file lists at most one per engine. Engine tokens may not be empty or zero: a trial always spends
+some, and an empty record would estimate every configuration of its engine at nothing.
+
+A round's providers are those its configurations run on plus those its normalization and judge
+estimates use; each needs a budget in the round, or planning refuses the round.
 """
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from rbench.engines.declaration import CLIS
-from rbench.matrix.expansion import Configuration, Matrix, Round
+from rbench.matrix.expansion import UNDECIDED, Configuration, Matrix, Round
 
 KINDS = ("engine", "normalization", "judge")
 SMOKE_VERSION = 1
@@ -56,6 +62,9 @@ SOFT_THRESHOLD_PERCENT = 80
 REPORTED_WINDOWS = {"codex": ("5-hour", "weekly")}
 
 Tokens = dict[str, dict[str, int]]  # kind -> provider -> tokens per trial
+# The form of `Configuration.id`: `<engine>-<readable name of models, roles and efforts>-<sha256>`.
+_CONFIG_ID = r"{engine}-[a-z0-9._+-]+-[0-9a-f]{{64}}"
+_ENGINE = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 
 class SmokeError(ValueError):
@@ -108,8 +117,13 @@ def parse_smoke(data: object, source: str) -> SmokeMedians:
         where = f"{source}: configuration {config_id!r}"
         raw = _object(raw, where, {"engine", "tokens"})
         engine = raw["engine"]
-        if not isinstance(engine, str) or not config_id.startswith(f"{engine}-"):
-            raise SmokeError(f"{where}: engine: expected the engine the id starts with")
+        if not (isinstance(engine, str) and _ENGINE.fullmatch(engine)):
+            raise SmokeError(f"{where}: engine: expected an engine name, got {engine!r}")
+        if not re.fullmatch(_CONFIG_ID.format(engine=re.escape(engine)), config_id):
+            raise SmokeError(
+                f"{where}: not a configuration id of engine {engine!r}:"
+                f" expected {engine}-<name>-<64 lowercase hex>"
+            )
         if engine in engines:
             raise SmokeError(f"{where}: engine {engine!r} is already measured by {engines[engine]}")
         engines[engine] = config_id
@@ -124,6 +138,8 @@ def parse_smoke(data: object, source: str) -> SmokeMedians:
                     raise SmokeError(f"{at}: unknown provider {provider!r}")
                 if type(count) is not int or count < 0:
                     raise SmokeError(f"{at}: {provider}: expected a token count, got {count!r}")
+        if not sum(tokens["engine"].values()):
+            raise SmokeError(f"{where}: tokens: engine: no engine usage measured")
         parsed[config_id] = (engine, {k: dict(sorted(tokens[k].items())) for k in KINDS})
     return SmokeMedians(source, parsed)
 
@@ -155,10 +171,12 @@ def trial_estimate(config: Configuration, smoke: SmokeMedians | None) -> tuple[T
         return default_estimate(config), "DEFAULT"
     measured_id, tokens = measured
     engine = tokens["engine"]
+    source = f"smoke: {measured_id}"
     if engine.keys() != config.providers:
         share = -(-sum(engine.values()) // len(config.providers))  # rounded up
         engine = {p: share for p in sorted(config.providers)}
-    return tokens | {"engine": engine}, f"smoke: {measured_id}"
+        source += ", split inferred"
+    return tokens | {"engine": engine}, source
 
 
 @dataclass(frozen=True)
@@ -167,12 +185,17 @@ class RoundPlan:
     trials_per_configuration: int  # tasks x attempts
     estimates: tuple[tuple[Configuration, Tokens, str], ...]  # in the round's order
 
+    @staticmethod
+    def _uses(config: Configuration, tokens: Tokens) -> set[str]:
+        return set(config.providers).union(*tokens.values())
+
     @property
     def providers(self) -> list[str]:
-        return sorted(set().union(*(c.providers for c in self.round.configurations)))
+        """Every provider a trial of the round spends on: engine, normalization or judge."""
+        return sorted(set().union(*(self._uses(c, t) for c, t, _ in self.estimates)))
 
     def trials(self, provider: str | None = None) -> int:
-        used = [c for c in self.round.configurations if provider is None or provider in c.providers]
+        used = [c for c, t, _ in self.estimates if provider is None or provider in self._uses(c, t)]
         return len(used) * self.trials_per_configuration
 
     def tokens(self, provider: str, kind: str) -> int:
@@ -182,13 +205,18 @@ class RoundPlan:
     def total(self, provider: str) -> int:
         return sum(self.tokens(provider, k) for k in KINDS)
 
-    def over_budget(self) -> list[str]:
-        """Providers whose estimate exceeds the round's decided budget; planning refuses them."""
-        return [
-            p
-            for p in self.providers
-            if (budget := self.round.budget.get(p)) is not None and self.total(p) > budget
-        ]
+    def refusals(self) -> list[str]:
+        """Why planning refuses the round: per provider, no budget, or an estimate over it."""
+        reasons = []
+        for p in self.providers:
+            if p not in self.round.budget:
+                reasons.append(
+                    f"the {p} estimate {self.total(p)} has no {p} budget in the round;"
+                    f' add {p} = "{UNDECIDED}" or a token count to its budget'
+                )
+            elif (budget := self.round.budget[p]) is not None and self.total(p) > budget:
+                reasons.append(f"the {p} estimate {self.total(p)} exceeds its budget {budget}")
+        return reasons
 
 
 def plan_round(round_: Round, tasks: int, attempts: int, smoke: SmokeMedians | None) -> RoundPlan:
@@ -258,7 +286,9 @@ def render(
         rows = [["provider", "trials", *KINDS, "estimate", "budget", "estimate x 1.2", "status"]]
         for p in plan.providers:
             total, budget = plan.total(p), r.budget.get(p)
-            if budget is None:
+            if p not in r.budget:
+                status = "NO BUDGET"
+            elif budget is None:
                 status = "budget undecided"
             elif total > budget:
                 status = "OVER BUDGET"
@@ -270,7 +300,7 @@ def render(
                     str(plan.trials(p)),
                     *(str(plan.tokens(p, k)) for k in KINDS),
                     str(total),
-                    "undecided" if budget is None else str(budget),
+                    "none" if p not in r.budget else UNDECIDED if budget is None else str(budget),
                     str(suggested_budget(total)),
                     status,
                 ]
