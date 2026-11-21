@@ -71,14 +71,15 @@ def select_tasks(matrix: Matrix, root: Path) -> tuple[int, str]:
 def run(args: argparse.Namespace) -> int:
     """Print the plan; 0 when it fits, 1 on bad input or a round over its budget."""
     try:
-        matrix = load_matrix(args.matrix, load_engines(args.engines))
+        engines = load_engines(args.engines)
+        matrix = load_matrix(args.matrix, engines)
         rounds = [r for r in matrix.rounds if args.round in (None, r.name)]
         if not rounds:
             names = ", ".join(r.name for r in matrix.rounds) or "none"
             what = f"no round {args.round!r}" if args.round else "no rounds"
             raise ValueError(f"{args.matrix}: {what}; rounds: {names}")
         tasks, origin = select_tasks(matrix, args.tasks_root)
-        smoke = load_smoke(args.smoke) if args.smoke else None
+        smoke = load_smoke(args.smoke, engines) if args.smoke else None
     except (ValueError, OSError) as e:
         print(f"rbench plan: {e}", file=sys.stderr)
         return 1

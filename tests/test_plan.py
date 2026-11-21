@@ -1,12 +1,14 @@
 import json
 import random
+import re
+import tomllib
 from pathlib import Path
 
 import pytest
 from test_tasks import HIDDEN, write_task
 
 from rbench.cli import main
-from rbench.engines.declaration import load_engine
+from rbench.engines.declaration import load_engine, parse_engine
 from rbench.matrix.expansion import Configuration, RoleSetting
 from rbench.plan.estimate import (
     DEFAULT_ENGINE_TOKENS,
@@ -67,6 +69,8 @@ budget = { claude = "undecided" }
 engine = "plain"
 roles.reviewer = { model = "claude-sonnet-5-5", effort = "medium" }
 """
+
+DECLARED = {name: parse_engine(tomllib.loads(text), name) for name, text in ENGINES.items()}
 
 
 def write(path: Path, text: str) -> Path:
@@ -148,7 +152,9 @@ def row(out: str, round_: str, provider: str) -> list[str]:
 
 
 def test_smoke_median_of_the_same_configuration(bench):
-    smoke = parse_smoke(json.loads(smoke_file(bench, measured(bench)).read_text()), "smoke.json")
+    smoke = parse_smoke(
+        json.loads(smoke_file(bench, measured(bench)).read_text()), "smoke.json", DECLARED
+    )
     config = default_config(bench, "panel")
 
     tokens, source = trial_estimate(config, smoke)
@@ -158,7 +164,9 @@ def test_smoke_median_of_the_same_configuration(bench):
 
 
 def test_unmeasured_configuration_takes_its_engines_median_on_its_own_provider(bench):
-    smoke = parse_smoke(json.loads(smoke_file(bench, measured(bench)).read_text()), "smoke.json")
+    smoke = parse_smoke(
+        json.loads(smoke_file(bench, measured(bench)).read_text()), "smoke.json", DECLARED
+    )
     gpt = plain(bench, "gpt-6.2-sol", "high")
 
     tokens, source = trial_estimate(gpt, smoke)
@@ -170,7 +178,7 @@ def test_unmeasured_configuration_takes_its_engines_median_on_its_own_provider(b
 def test_engine_tokens_split_evenly_when_providers_differ(bench):
     data = measured(bench)
     data[default_config(bench, "plain").id]["tokens"]["engine"] = {"claude": 1001}
-    smoke = parse_smoke({"version": 1, "configurations": data}, "smoke.json")
+    smoke = parse_smoke({"version": 1, "configurations": data}, "smoke.json", DECLARED)
     two = Configuration(
         "plain", "x", (("reviewer", RoleSetting(("claude-opus-5-5", "gpt-6.2-sol"), "high")),)
     )
@@ -513,8 +521,15 @@ ID = "plain-claude-opus-5-5-high-" + "0" * 64
 )
 def test_malformed_smoke_medians_are_rejected(data, message):
     with pytest.raises(SmokeError, match="^smoke.json") as error:
-        parse_smoke(data, "smoke.json")
+        parse_smoke(data, "smoke.json", DECLARED)
     assert message in str(error.value)
+
+
+H = "0" * 64
+PLUS = f"plain-+-{H}"
+GPT = f"plain-gpt-6.2-sol-high-{H}"
+PAIR = ("claude-opus-5-5", "gpt-6.2-sol")
+TWO = f"plain-{'+'.join(PAIR)}-high-{H}"
 
 
 def bad(config_id: str = ID, **record) -> dict:
@@ -537,14 +552,28 @@ def bad(config_id: str = ID, **record) -> dict:
         (bad(engine="Plain"), ID, "engine: expected an engine name"),
         (bad(tokens={"engine": {}}), ID, "no engine usage measured"),
         (bad(tokens={"engine": {"claude": 0, "codex": 0}}), ID, "no engine usage measured"),
+        # Readable names no configuration of the engine has (review round 2, finding 1).
+        (bad(PLUS), PLUS, "of engine 'plain'"),
+        (bad(f"plain-claude-opus-5-5-{H}"), f"plain-claude-opus-5-5-{H}", "of engine 'plain'"),
+        (bad(f"plain-opus-high-{H}"), f"plain-opus-high-{H}", "of engine 'plain'"),
+        (bad(f"plain-claude-opus-5-5-ultra-{H}"), "plain-claude-opus-5-5-ultra-", "of engine"),
+        (bad(TWO.replace("opus", "fable")), "plain-claude-fable", "of engine"),
+        (bad(f"plain-{'+'.join(reversed(PAIR))}-high-{H}"), "plain-gpt", "of engine"),
+        (bad(f"plain-claude-opus-5-5+claude-opus-5-5-high-{H}"), "plain-claude", "of engine"),
+        (bad(f"panel-claude-opus-5-5-high-{H}", engine="panel"), "panel-claude", "of engine"),
+        (bad(engine="other"), ID, "engine 'other' is not declared"),
+        # Engine usage on a provider the id's roles do not run on (finding 2).
+        (bad(GPT), GPT, "usage on claude, which the configuration's roles do not run on (codex)"),
     ],
 )
 def test_each_malformed_smoke_field_rejects_the_file_naming_the_configuration(
     data, config_id, message
 ):
     data["configurations"]["plain-claude-sonnet-5-5-high-" + "1" * 64] = GOOD
-    with pytest.raises(SmokeError, match=f"^smoke.json: configuration {config_id!r}") as error:
-        parse_smoke(data, "smoke.json")
+    with pytest.raises(
+        SmokeError, match=f"^smoke.json: configuration '{re.escape(config_id)}"
+    ) as error:
+        parse_smoke(data, "smoke.json", DECLARED)
     assert message in str(error.value)
 
 
@@ -561,8 +590,74 @@ def test_malformed_smoke_record_cannot_zero_a_round(bench, capsys):
     assert "configuration 'plain-'" in captured.err
 
 
+def test_smoke_ids_of_every_engine_form_are_accepted(bench):
+    panel = default_config(bench, "panel")
+    records = {
+        TWO: {
+            "engine": "plain",
+            "tokens": {"engine": {"codex": 5}, "normalization": {}, "judge": {}},
+        },
+        panel.id: {
+            "engine": "panel",
+            "tokens": {"engine": {"codex": 5}, "normalization": {}, "judge": {}},
+        },
+    }
+
+    smoke = parse_smoke({"version": 1, "configurations": records}, "smoke.json", DECLARED)
+
+    assert set(smoke.configurations) == {TWO, panel.id}
+
+
+def round_two(bench: Path, budget: str, model: str = "gpt-6.2-sol") -> Path:
+    text = CODEX_ONLY.replace("BUDGET", budget).replace("gpt-6.2-sol", model)
+    return write(bench / "round2.toml", text)
+
+
+def smoke_record(bench: Path, config_id: str, engine: dict, normalization: dict) -> Path:
+    tokens = {"engine": engine, "normalization": normalization, "judge": {"claude": 100}}
+    return smoke_file(bench, {config_id: {"engine": "plain", "tokens": tokens}})
+
+
+def test_impossible_smoke_id_is_refused(bench, capsys):
+    # Review round 2 repro 1: `plain-+-<hex>` once stood in for every plain configuration.
+    smoke = smoke_record(bench, PLUS, {"claude": 1}, {})
+
+    matrix = round_two(bench, "{ claude = 1000000, codex = 10 }")
+    assert main(plan(bench, matrix, "--smoke", str(smoke))) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"configuration {PLUS!r}: not a configuration id of engine 'plain'" in captured.err
+
+
+def test_exact_smoke_record_on_the_wrong_provider_is_refused(bench, capsys):
+    # Review round 2 repro 2: a Codex plain configuration's engine tokens recorded on Claude.
+    config_id = plain(bench, "gpt-6.2-sol", "high").id
+    smoke = smoke_record(bench, config_id, {"claude": 1000}, {})
+
+    matrix = round_two(bench, "{ claude = 1000000, codex = 10 }")
+    assert main(plan(bench, matrix, "--smoke", str(smoke))) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"configuration {config_id!r}: tokens: engine: usage on claude" in captured.err
+
+
+def test_zero_estimate_asks_for_no_budget(bench, capsys):
+    # Review round 2 repro 3: a zero normalization entry on Codex once demanded a Codex budget.
+    config_id = plain(bench, "claude-opus-5-5", "high").id
+    smoke = smoke_record(bench, config_id, {"claude": 1000}, {"codex": 0})
+
+    matrix = round_two(bench, "{ claude = 1000000 }", model="claude-opus-5-5")
+    assert main(plan(bench, matrix, "--smoke", str(smoke))) == 0
+
+    out = capsys.readouterr().out
+    assert row(out, "r1", "claude")[:3] == ["claude", "10", "10000"]
+    assert "codex" not in out
+
+
 def test_smoke_file_with_repeated_key_is_rejected(tmp_path):
     path = write(tmp_path / "smoke.json", '{"version": 1, "version": 1, "configurations": {}}')
 
     with pytest.raises(SmokeError, match="repeated key 'version'"):
-        load_smoke(path)
+        load_smoke(path, DECLARED)

@@ -27,20 +27,25 @@ stores its medians in this form:
 
 Each number is the median, over the smoke run's done trials of that configuration, of one trial's
 tokens of that kind on that provider. The smoke stage runs one configuration per engine, so the
-file lists at most one per engine. Engine tokens may not be empty or zero: a trial always spends
-some, and an empty record would estimate every configuration of its engine at nothing.
+file lists at most one per engine, of an engine `--engines` declares. Its id must be one the
+expansion (`Configuration.id`) gives for some setting of that engine's roles; the settings it
+names fix the providers its engine tokens may be on. Engine tokens may not be empty or zero: a
+trial always spends some, and an empty record would estimate every configuration of its engine at
+nothing.
 
-A round's providers are those its configurations run on plus those its normalization and judge
-estimates use; each needs a budget in the round, or planning refuses the round.
+A round's providers are those its configurations run on plus those with a non-zero normalization
+or judge estimate; each needs a budget in the round, or planning refuses the round.
 """
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from rbench.engines.declaration import CLIS
-from rbench.matrix.expansion import UNDECIDED, Configuration, Matrix, Round
+from rbench.engines.declaration import CLIS, EFFORTS, DeclarationError, Engine, Setting
+from rbench.engines.pins import MODELS
+from rbench.matrix.expansion import UNDECIDED, Configuration, Matrix, RoleSetting, Round
 
 KINDS = ("engine", "normalization", "judge")
 SMOKE_VERSION = 1
@@ -62,13 +67,45 @@ SOFT_THRESHOLD_PERCENT = 80
 REPORTED_WINDOWS = {"codex": ("5-hour", "weekly")}
 
 Tokens = dict[str, dict[str, int]]  # kind -> provider -> tokens per trial
-# The form of `Configuration.id`: `<engine>-<readable name of models, roles and efforts>-<sha256>`.
-_CONFIG_ID = r"{engine}-[a-z0-9._+-]+-[0-9a-f]{{64}}"
 _ENGINE = re.compile(r"[a-z0-9][a-z0-9-]*")
+_MODEL = "|".join(sorted(map(re.escape, MODELS), key=len, reverse=True))
+_EFFORT = "|".join(sorted({e for efforts in EFFORTS.values() for e in efforts}))
+_ROLE_PART = rf"((?:{_MODEL})(?:\+(?:{_MODEL}))*)-({_EFFORT})"
 
 
 class SmokeError(ValueError):
     """A malformed smoke medians file."""
+
+
+def configuration_of(config_id: str, engine: Engine) -> Configuration | None:
+    """The configuration of `engine` whose id has `config_id`'s readable name, or None.
+
+    It parses the name `Configuration.name` gives, checks every role's setting as the expansion
+    does, and rebuilds the name; the hash is not checked, since the smoke run may predate the
+    engine's current version.
+    """
+    roles = sorted(engine.roles)
+    if len(roles) == 1:
+        pattern = f"{re.escape(engine.name)}-{_ROLE_PART}"
+    else:
+        pattern = re.escape(engine.name) + "".join(f"-{re.escape(r)}-{_ROLE_PART}" for r in roles)
+    match = re.fullmatch(rf"{pattern}-[0-9a-f]{{64}}", config_id)
+    if match is None:
+        return None
+    groups = match.groups()
+    settings = []
+    for i, role in enumerate(roles):
+        models, effort = groups[2 * i].split("+"), groups[2 * i + 1]
+        if len(set(models)) != len(models):
+            return None
+        try:
+            for model in models:
+                engine.delivery(role, Setting(model, effort))
+        except DeclarationError:
+            return None
+        settings.append((role, RoleSetting(tuple(sorted(models)), effort)))
+    config = Configuration(engine.name, engine.version, tuple(settings))
+    return config if config_id == f"{config.name}-{config_id[-64:]}" else None
 
 
 @dataclass(frozen=True)
@@ -103,8 +140,9 @@ def _object(value: object, where: str, keys: set[str]) -> dict:
     return value
 
 
-def parse_smoke(data: object, source: str) -> SmokeMedians:
-    """Validate parsed smoke medians; `source` (the file) prefixes every error."""
+def parse_smoke(data: object, source: str, declared: Mapping[str, Engine]) -> SmokeMedians:
+    """Validate parsed smoke medians against the `declared` engines (name -> engine); `source`
+    (the file) prefixes every error."""
     data = _object(data, source, {"version", "configurations"})
     if type(data["version"]) is not int or data["version"] != SMOKE_VERSION:
         raise SmokeError(f"{source}: version: expected {SMOKE_VERSION}, got {data['version']!r}")
@@ -119,10 +157,13 @@ def parse_smoke(data: object, source: str) -> SmokeMedians:
         engine = raw["engine"]
         if not (isinstance(engine, str) and _ENGINE.fullmatch(engine)):
             raise SmokeError(f"{where}: engine: expected an engine name, got {engine!r}")
-        if not re.fullmatch(_CONFIG_ID.format(engine=re.escape(engine)), config_id):
+        if engine not in declared:
+            raise SmokeError(f"{where}: engine {engine!r} is not declared")
+        config = configuration_of(config_id, declared[engine])
+        if config is None:
             raise SmokeError(
-                f"{where}: not a configuration id of engine {engine!r}:"
-                f" expected {engine}-<name>-<64 lowercase hex>"
+                f"{where}: not a configuration id of engine {engine!r}: expected"
+                f" {engine}-<the name its role settings give>-<64 lowercase hex>"
             )
         if engine in engines:
             raise SmokeError(f"{where}: engine {engine!r} is already measured by {engines[engine]}")
@@ -140,17 +181,22 @@ def parse_smoke(data: object, source: str) -> SmokeMedians:
                     raise SmokeError(f"{at}: {provider}: expected a token count, got {count!r}")
         if not sum(tokens["engine"].values()):
             raise SmokeError(f"{where}: tokens: engine: no engine usage measured")
+        if stray := sorted(tokens["engine"].keys() - config.providers):
+            raise SmokeError(
+                f"{where}: tokens: engine: usage on {', '.join(stray)}, which the configuration's"
+                f" roles do not run on ({', '.join(sorted(config.providers))})"
+            )
         parsed[config_id] = (engine, {k: dict(sorted(tokens[k].items())) for k in KINDS})
     return SmokeMedians(source, parsed)
 
 
-def load_smoke(path: Path) -> SmokeMedians:
-    """Read and validate the smoke medians file at `path`."""
+def load_smoke(path: Path, declared: Mapping[str, Engine]) -> SmokeMedians:
+    """Read and validate the smoke medians file at `path` against the `declared` engines."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=_unique)
     except (UnicodeDecodeError, json.JSONDecodeError, SmokeError) as e:
         raise SmokeError(f"{path}: not a valid smoke medians file: {e}") from e
-    return parse_smoke(data, str(path))
+    return parse_smoke(data, str(path), declared)
 
 
 def default_estimate(config: Configuration) -> Tokens:
@@ -187,7 +233,8 @@ class RoundPlan:
 
     @staticmethod
     def _uses(config: Configuration, tokens: Tokens) -> set[str]:
-        return set(config.providers).union(*tokens.values())
+        # A zero estimate spends nothing, so it asks for no budget.
+        return set(config.providers) | {p for t in tokens.values() for p, n in t.items() if n}
 
     @property
     def providers(self) -> list[str]:
