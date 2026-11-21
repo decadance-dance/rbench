@@ -259,8 +259,9 @@ server or build step, and opens from disk as the spec requires.
 - The repository is built once, at import, from the source repository: `base` is the PR's base
   tree, and `reviewed` is the head tree squashed onto it. It is stored as a git bundle (D11).
 - A fresh `git init` has no remotes, reflog, tags or packed objects.
-- A trial copies the archive to a private file and reads only those bytes: their SHA-256 must
-  match, and they must start with a git bundle header. A path git would also fetch from, such as
+- A trial copies the archive, which must be a regular file, to a private file under a byte
+  limit, and reads only those bytes: their SHA-256 must match, and they must start with a git
+  bundle header. A path git would also fetch from, such as
   a repository or a `.git` pointer file, could change after the check. The bundle is unpacked on
   the host into a fresh object store (`git init --template=`, every ref of the bundle, no reflog,
   no `FETCH_HEAD`, no work tree) with a fixed `config` and `HEAD`. Each host git step has a time
@@ -285,7 +286,7 @@ server or build step, and opens from disk as the spec requires.
   `gh pr comment` writes its body to `/rbench/output/comment-<n>.md`. After the engine, the trial
   copies the regular files named so into `raw/pr-comments/`, which normalization reads like any
   other engine output. The stub opens no connection. Anything else fails with exit 1: another
-  command, another PR, `-R`, `--jq`, an invalid `--color` and fields it does not have.
+  command, another PR, `-R`, `--jq`, an invalid `--color`, a repeated option and fields it does not have.
 
 ### D5. Managed configuration enforces the hermetic policy; shims log
 **Choice.**

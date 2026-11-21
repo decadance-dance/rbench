@@ -365,10 +365,33 @@ def test_archive_must_be_the_verified_bundle_bytes(fake_bin, archived, tmp_path,
 
     with pytest.raises(ArchiveError, match="^task t-1: its source archive is not a git bundle"):
         prepare_repository(project, as_pointer, pointer, tmp_path / "trial")
-    with pytest.raises(ArchiveError, match="^task t-1: cannot read its source archive"):
+    with pytest.raises(ArchiveError, match="^task t-1: its source archive is not a regular file"):
         prepare_repository(project, task, tmp_path / "source", tmp_path / "trial")
 
     assert not local_agent.exists() and fake_bin.calls() == []
+
+
+def test_archive_source_is_a_regular_file_within_the_limit(
+    fake_bin, archived, tmp_path, local_agent, monkeypatch
+):
+    # Final review S2: the private copy is bounded and comes only from a regular file.
+    task, archive = archived
+    project = TrialProject.create(tmp_path / "trial", "rbench-t1", AGENT, PROXY)
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+
+    # A FIFO with no writer would block a plain open; it is refused at once.
+    with pytest.raises(ArchiveError, match="^task t-1: its source archive is not a regular file"):
+        prepare_repository(project, task, fifo, tmp_path / "trial")
+    monkeypatch.setattr(repository, "MAX_ARCHIVE_BYTES", archive.stat().st_size - 1)
+    with pytest.raises(
+        RepositoryError, match=r"^task t-1: its source archive is over the \d+-byte"
+    ):
+        prepare_repository(project, task, archive, tmp_path / "trial")
+
+    assert not local_agent.exists() and fake_bin.calls() == []
+    monkeypatch.setattr(repository, "MAX_ARCHIVE_BYTES", archive.stat().st_size)
+    prepare_repository(project, task, archive, tmp_path / "trial")
 
 
 def test_work_tree_holds_every_path_of_reviewed(fake_bin, tmp_path, local_agent):
@@ -577,6 +600,10 @@ def test_gh_pr_comment_is_stored_and_sent_nowhere(trial_root, tmp_path):
         ["pr", "diff", "--patch"],
         ["pr", "diff", "--color", "--patch"],
         ["pr", "diff", "--color=invalid"],
+        # Final review S1: a later valid value must not hide an earlier invalid one.
+        ["pr", "diff", "--color", "--patch", "--color=never"],
+        ["pr", "diff", "--color=invalid", "--color=never"],
+        ["pr", "comment", "-b", "x", "--body", "y"],
         ["pr", "comment", "--edit-last", "-b", "x"],
         ["pr", "comment"],
         ["pr", "comment", "-b", "x", "-F", "-"],

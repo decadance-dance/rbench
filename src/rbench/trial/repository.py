@@ -22,7 +22,7 @@ fails with an infrastructure error before the engine starts. The object count go
 import json
 import os
 import re
-import shutil
+import stat
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -54,6 +54,7 @@ HEAD = "ref: refs/heads/reviewed\n"
 # make them settings, when a real task needs more.
 UNPACK_TIMEOUT = 600  # seconds, per host git step
 MAX_CHECKOUT_BYTES = 4 << 30
+MAX_ARCHIVE_BYTES = 4 << 30
 
 # `run(argv)` runs a command where the repository is and returns its stdout; it raises
 # `RepositoryError` when the command fails.
@@ -258,12 +259,25 @@ def _private_bundle(task: Task, archive: Path, dest: Path, where: str) -> Path:
     """Copy `archive` to `dest`, then check the copy's SHA-256 and that it is a git bundle.
 
     Only these bytes are read afterwards. A path git would also accept, such as a `.git` pointer
-    file or a repository, could change after the check.
+    file or a repository, could change after the check. The source must be a regular file (opened
+    without blocking, so a FIFO cannot hang the trial), and the copy stops at `MAX_ARCHIVE_BYTES`.
     """
     try:
-        shutil.copyfile(archive, dest)
+        fd = os.open(archive, os.O_RDONLY | os.O_NONBLOCK)
     except OSError as e:
         raise ArchiveError(f"{where}: cannot read its source archive: {e.strerror}") from None
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise ArchiveError(f"{where}: its source archive is not a regular file")
+    with os.fdopen(fd, "rb") as src, dest.open("wb") as out:
+        copied = 0
+        while chunk := src.read(1 << 20):
+            copied += len(chunk)
+            if copied > MAX_ARCHIVE_BYTES:
+                raise RepositoryError(
+                    f"{where}: its source archive is over the {MAX_ARCHIVE_BYTES}-byte limit"
+                )
+            out.write(chunk)
     verify_archive(task, dest)
     with dest.open("rb") as f:
         if f.read(len(BUNDLE_HEADERS[0])) not in BUNDLE_HEADERS:

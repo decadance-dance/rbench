@@ -49,6 +49,8 @@ function parse(rest, valued, flags) {
     }
     const eq = arg.indexOf("=");
     const name = eq > 0 && arg.startsWith("--") ? arg.slice(0, eq) : arg;
+    // A repeated option is refused: only one value would be checked and used.
+    if (Object.hasOwn(opts, valued[name] ?? flags[name] ?? "")) fail(`${name} given more than once`);
     if (valued[name]) {
       const value = eq > 0 && arg.startsWith("--") ? arg.slice(eq + 1) : rest[++i];
       if (value === undefined) fail(`${name} needs a value`);
