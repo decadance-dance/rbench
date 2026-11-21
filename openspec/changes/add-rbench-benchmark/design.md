@@ -867,7 +867,10 @@ measure a different task from the engines, which all read the repository.
   Checked offline with Claude Code 2.1.316, against a local recording endpoint with every other
   connection denied and no model call:
   - From stdin in `-p`, the command expands inline in the root session (no fork) to a prompt with
-    "Review target: `<n>`". That makes the review read the PR through the D4 `gh` stub.
+    "Review target: `<n>`". That fixes the target only: no model ran, so which tools the review
+    then calls was not observed. If it reads the PR with `gh`, it gets the D4 stub, which answers
+    the local `gh pr view` and `gh pr diff` forms, rejects other options and fields, and has no
+    network path (its own tests, not this check, establish that).
   - The request carries the session's `--model` and `--effort`. With no level typed after the
     command, the review runs at the session's effort, so the adapter types none. A typed level
     would also be saved in the home and reused by later reviews.

@@ -29,10 +29,39 @@ COMMAND = "/code-review"
 # The spike #25 launch, with the command on stdin. The container is the sandbox (design D6), so no
 # tool call waits for a permission `-p` cannot give; with JSON output the review reports in prose.
 ARGV = ("claude", "-p", "--permission-mode", "bypassPermissions", "--output-format", "json")
+# Claude Code 2.1.316's `modelUsage` token counts, as the normalizer reads them (design D9).
+TOKENS = ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens")
 
 
 class CodeReviewOutputError(ValueError):
     """The session's output holds no review: the trial is `failed`."""
+
+
+def _not_json(constant: str) -> object:
+    raise ValueError("NaN and Infinity are not JSON")
+
+
+def _utf8(text: str) -> bool:
+    """JSON may carry lone surrogates; UTF-8, the normalizer's stdin and the ledger cannot."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _made_a_model_call(usage: object) -> bool:
+    """Every `modelUsage` entry is a model id with its token counts, and one model answered."""
+    if not (isinstance(usage, dict) and usage):
+        return False
+    for model, counts in usage.items():
+        if not (isinstance(model, str) and model.strip() and _utf8(model)):
+            return False
+        if not isinstance(counts, dict):
+            return False
+        if not all(type(counts.get(k)) is int and counts[k] >= 0 for k in TOKENS):
+            return False
+    return any(counts["outputTokens"] > 0 for counts in usage.values())
 
 
 def bind(engine: Engine, source: str) -> Engine:
@@ -78,7 +107,7 @@ def report(stdout: str, where: str) -> str:
     """The Markdown report in the session's `--output-format json` result. Errors name `where`
     (the trial) and never quote the output: it is engine output, and may quote a hidden task."""
     try:
-        result = json.loads(stdout, object_pairs_hook=no_repeated_keys)
+        result = json.loads(stdout, object_pairs_hook=no_repeated_keys, parse_constant=_not_json)
     except (ValueError, RecursionError):
         raise CodeReviewOutputError(f"{where}: stdout is not one JSON object") from None
     if not (isinstance(result, dict) and result.get("type") == "result"):
@@ -89,12 +118,16 @@ def report(stdout: str, where: str) -> str:
         ended = f"subtype {subtype}" if known else "an unknown subtype"
         raise CodeReviewOutputError(f"{where}: the session did not succeed; it ended with {ended}")
     # An API error that ends the session still reports `success`, with no model usage (checked
-    # offline with Claude Code 2.1.316): no review ran.
-    if not (isinstance(result.get("modelUsage"), dict) and result["modelUsage"]):
-        raise CodeReviewOutputError(f"{where}: the session made no model call")
+    # offline with Claude Code 2.1.316): no review ran, and a blank result is no clean review.
+    if not _made_a_model_call(result.get("modelUsage")):
+        raise CodeReviewOutputError(
+            f"{where}: the session made no model call: modelUsage lists no model with token counts"
+        )
     text = result.get("result")
     if not isinstance(text, str):
         raise CodeReviewOutputError(f"{where}: the result has no text")
+    if not _utf8(text):
+        raise CodeReviewOutputError(f"{where}: the result is not valid UTF-8 text")
     return text
 
 
