@@ -1,0 +1,3 @@
+# Bytecode a local run of the scripts leaves; only the sources go into the image.
+**/__pycache__
+**/*.pyc
