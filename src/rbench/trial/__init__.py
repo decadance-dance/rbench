@@ -9,16 +9,34 @@ from rbench.trial.images import (
     build_proxy_image,
     image_id,
 )
+from rbench.trial.repository import (
+    REPO_DIR,
+    REPOSITORY_FILE,
+    RepositoryError,
+    RepositoryState,
+    agent_runner,
+    copy_comments,
+    inspect_repository,
+    prepare_repository,
+)
 
 __all__ = [
     "AGENT_NAME",
     "PROXY_LOG",
     "PROXY_NAME",
     "PROXY_URL",
+    "REPOSITORY_FILE",
+    "REPO_DIR",
+    "RepositoryError",
+    "RepositoryState",
     "TrialError",
     "TrialProject",
+    "agent_runner",
     "build_agent_image",
     "build_proxy_image",
     "compose_spec",
+    "copy_comments",
     "image_id",
+    "inspect_repository",
+    "prepare_repository",
 ]

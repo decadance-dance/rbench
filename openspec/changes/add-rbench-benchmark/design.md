@@ -228,7 +228,7 @@ server or build step, and opens from disk as the spec requires.
   created, never mounted.
   - The agent image (`images/agent`) installs exactly the CLI versions an engine declares, and
     rbench reads them back from the built image. Its base images are pinned by digest, and its
-    build context holds only the Dockerfile.
+    build context holds only the Dockerfile and the files it copies in, such as the `gh` stub (D4).
   - Images are referenced as `<name>@sha256:<hex>`. A local build in Docker's classic image store
     has no registry digest, so the digest is the image ID: the content digest of the image's
     configuration, which names its layers. Trials run an image by that ID, never by a tag or a pull.
@@ -259,10 +259,24 @@ server or build step, and opens from disk as the spec requires.
 - The repository is built once, at import, from the source repository: `base` is the PR's base
   tree, and `reviewed` is the head tree squashed onto it. It is stored as a git bundle (D11).
 - A fresh `git init` has no remotes, reflog, tags or packed objects.
-- A `gh` stub on `PATH` answers `pr view` and `pr diff` from `pr.json` and the repository. It
-  reports the PR as `OPEN` with no comments or reviews, so engines that skip closed or reviewed PRs
-  still run. `gh pr comment` writes its body to the trial's raw output, which normalization reads
-  like any other engine output. Anything else fails.
+- A trial unpacks the bundle on the host, after checking its SHA-256, into a fresh repository
+  (`git init --template=`, no reflog, no `FETCH_HEAD`), checked out on `reviewed`. It copies that
+  repository with the PR into the started agent with `docker compose cp --archive`, which makes the
+  agent's user own it: `/rbench/repo`, `/rbench/pr.json` (number, title, description) and an empty
+  `/rbench/output/`.
+- The same inspection runs on the host copy and in the agent, before the engine starts. It requires
+  exactly the branches `base` and `reviewed`, `reviewed`'s only parent `base`, HEAD on `reviewed`,
+  no remote, nothing in `.git` but `HEAD`, `config`, `index`, `objects` and `refs`, no alternates,
+  and every object reachable from the two commits. Both copies must agree. Any failure is an
+  infrastructure error. The object count and both commit ids go to the trial's `repository.json`;
+  the audit recounts with the same inspection after the engine.
+- A `gh` stub (`images/agent/gh`, Node, on `PATH`) answers `pr view` and `pr diff` from
+  `pr.json` and the repository. `pr diff` is `git diff base reviewed`. It reports the PR as `OPEN`
+  with no comments or reviews, so engines that skip closed or reviewed PRs still run. `gh pr
+  comment` writes its body to `/rbench/output/comment-<n>.md`. After the engine, the trial copies
+  the regular files named so into `raw/pr-comments/`, which normalization reads like any other
+  engine output. The stub opens no connection. Anything else fails with exit 1: another command,
+  another PR, `-R`, `--jq` and fields it does not have.
 
 ### D5. Managed configuration enforces the hermetic policy; shims log
 **Choice.**

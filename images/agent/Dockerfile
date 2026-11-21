@@ -21,5 +21,8 @@ RUN set -eu; pkgs=""; \
     npm install -g --no-fund --no-audit $pkgs; \
     npm cache clean --force
 
+# The gh stub (design D4): answers PR lookups from the trial's frozen PR, sends nothing anywhere.
+COPY --chmod=755 gh /usr/local/bin/gh
+
 USER node
 WORKDIR /home/node

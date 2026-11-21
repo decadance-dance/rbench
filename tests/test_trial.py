@@ -187,6 +187,8 @@ def test_project_file_and_commands(fake_bin, tmp_path):
     result = project.exec_agent(["curl", "https://github.com"], stdin="x")
     fake_bin.scenario("docker")
     project.copy_proxy_log(tmp_path / "proxy.log")
+    project.copy_to_agent(tmp_path / "stage", "/rbench")
+    project.copy_from_agent("/rbench/output", tmp_path / "out")
     project.down()
 
     assert (result.returncode, result.stdout) == (7, "out")
@@ -196,6 +198,8 @@ def test_project_file_and_commands(fake_bin, tmp_path):
         (base + ["up", "--detach", "--wait"], ""),
         (base + ["exec", "-T", "agent", "curl", "https://github.com"], "x"),
         (base + ["cp", f"proxy:{PROXY_LOG}", str(tmp_path / "proxy.log")], ""),
+        (base + ["cp", "--archive", str(tmp_path / "stage"), "agent:/rbench"], ""),
+        (base + ["cp", "agent:/rbench/output", str(tmp_path / "out")], ""),
         (base + DOWN, ""),
     ]
 
@@ -300,6 +304,11 @@ def test_base_images_are_pinned_by_digest(image):
     assert len(froms) == 1 and re.fullmatch(r"FROM \S+@sha256:[0-9a-f]{64}", froms[0])
 
 
-def test_agent_build_context_is_the_dockerfile_alone():
-    assert sorted(p.name for p in (ROOT / "images/agent").iterdir()) == ["Dockerfile"]
-    assert "COPY" not in (ROOT / "images/agent/Dockerfile").read_text()
+def test_agent_build_context_is_the_dockerfile_and_the_gh_stub():
+    assert sorted(p.name for p in (ROOT / "images/agent").iterdir()) == ["Dockerfile", "gh"]
+    copies = [
+        line
+        for line in (ROOT / "images/agent/Dockerfile").read_text().splitlines()
+        if line.startswith(("COPY", "ADD"))
+    ]
+    assert copies == ["COPY --chmod=755 gh /usr/local/bin/gh"]
