@@ -256,18 +256,39 @@ stays covered by rreview's tests on the host.
 cannot run at all.
 
 ### D7. Token accounting from transcripts
-**Choice.** Usage is counted per session from the trial's on-disk transcripts, not from stdout
-(checked in the spike on Claude Code 2.1.316 and Codex CLI 0.171.0, issue #24):
-- Claude: the session file under `$CLAUDE_CONFIG_DIR/projects/`. Each message's usage is counted
-  once, deduplicated by `message.id`, because the transcript repeats one message's usage on every
-  content block, and split by `message.model`. The sum matched the billed `modelUsage` exactly on
-  input, output, cache read and cache creation. The stdout `stream-json` assistant events are not
-  used: they under-report output tokens for messages that end in a tool call. Session persistence
-  stays on (no `--no-session-persistence`), or there is no transcript.
-- Codex: the rollout file under `$CODEX_HOME/sessions/`. Its last `token_count` event's
-  `total_token_usage` is the thread's total. `cached_input_tokens` is a subset of `input_tokens`
-  (`total_tokens` = input + output), so uncached input is `input_tokens - cached_input_tokens`;
-  `cache_write_input_tokens` is counted as cache creation (unverified, see Risks).
+**Choice.** Usage is the CLI-reported usage, counted per session from the trial's on-disk
+transcripts, not from stdout (spike on Claude Code 2.1.316 and Codex CLI 0.171.0, issue #24). The
+transcript paths and record schemas below are those of the pinned versions; a CLI upgrade re-checks
+them in the smoke stage.
+
+Claude: the session file under `$CLAUDE_CONFIG_DIR/projects/`.
+- Each message's usage is counted once, deduplicated by `message.id`, because the transcript
+  repeats one message's usage on every content block, and split by `message.model`.
+- In the spike's main session (one model, no subagents), the sum matched the CLI-reported
+  `modelUsage` exactly on input, output, cache read and cache creation.
+- The stdout `stream-json` assistant events are not used: they under-report output tokens for
+  messages that end in a tool call.
+- Session persistence stays on (no `--no-session-persistence`), or there is no transcript.
+- Unverified, a smoke check: subagent transcripts and side calls on a different model (collection,
+  deduplication, and whether `modelUsage` covers them).
+
+Codex: the rollout file under `$CODEX_HOME/sessions/`.
+- `cached_input_tokens` is a subset of `input_tokens` (`total_tokens` = input + output), so
+  uncached input is `input_tokens - cached_input_tokens`.
+- A thread's total is its last `token_count` event's `total_token_usage`, but only when the thread
+  starts from zero usage (not a fork), its counters are valid, and every request in it used the
+  same model (from the rollout's `turn_context`). A forked thread starts with its parent's usage:
+  its total minus that baseline, or the sum of its requests' `last_token_usage`, is its own. A
+  context-window snapshot with zeroed counters is skipped. When a thread's own counters cannot be
+  recovered this way, the trial's usage is flagged incomplete. How the rollout marks a fork and its
+  baseline is a smoke check.
+- When a thread's requests used more than one model, usage is the sum of `last_token_usage` per
+  request, by model. Without per-request usage, the trial's model attribution is flagged incomplete.
+- Fallback when the rollout is missing or unreadable: the last `turn.completed.usage` on stdout,
+  when it is visible and covers the same thread.
+- Provisional: `cache_write_input_tokens` is counted as cache creation. Whether it overlaps
+  `input_tokens` is unknown (the spike saw only zeros); a nonzero case is a smoke check before
+  ordinary input and cache creation are split.
 
 `modelUsage` and Codex's `turn.completed.usage` are cumulative over a resumed session, so neither is
 summed across the processes of one session.
@@ -275,10 +296,15 @@ summed across the processes of one session.
 The quality-against-cost plot uses uncached input plus output, per provider, with cache tokens
 shown apart: cache reads are cheap and would otherwise dominate the axis.
 
-The shim log gives the expected set of sessions. The check for a Claude session is its cumulative
-`modelUsage`: the transcript's last `cost-state` record (undocumented), or the result event of the
-session's last process where it is visible. On a mismatch, `modelUsage` is used and the trial is
-flagged.
+The shim log gives the expected set of sessions. A session with no usable source (no transcript and
+no covering result) flags the trial's usage as incomplete.
+
+The cross-check for a Claude session is its cumulative `modelUsage`: the transcript's last
+`cost-state` record (undocumented), or the result event of the session's last process where it is
+visible. A snapshot is used only when it is known to cover the same work: its record comes after
+the session's last assistant message. On a mismatch with such a snapshot, the snapshot's
+`modelUsage` is used and the trial is flagged. A stale or missing snapshot marks the cross-check as
+unavailable; it never replaces the message counts.
 
 **Alternative considered:** capture each process's final result event. Engines own stdout, so it is
 not always visible.
@@ -424,10 +450,14 @@ limit stops the run by default; waiting for the reset is opt-in (`--wait`).
   with the real login and reads the tool list from the session transcript.
 - **[ReviewBench tasks are public and likely memorized.]** → The report shows task sets apart; `ours`
   and `hidden` carry the weight of the engine decision.
-- **[Transcript usage counts differ from billed usage.]** → The spike (#24) found the on-disk Claude
-  transcript equal to `modelUsage`; a mismatch uses `modelUsage` and flags the trial (D7). Codex's
-  `cache_write_input_tokens` and reasoning tokens were 0 in the spike, so their relation to input
-  and output is unverified; the smoke stage checks them on a real review.
+- **[Transcript usage counts differ from CLI-reported usage.]** → The spike (#24) found the on-disk
+  Claude transcript equal to `modelUsage` for a main session on one model. Subagents, side calls on
+  another model, a nonzero Codex `cache_write_input_tokens` and nonzero reasoning tokens were not
+  seen; the smoke stage checks them. A mismatch against a covering snapshot uses `modelUsage` and
+  flags the trial; without one the cross-check is unavailable (D7).
+- **[Transcript paths and schemas change between CLI versions.]** → D7's paths and records are those
+  of the pinned versions. A CLI upgrade reruns the smoke check; a session with no usable source flags
+  the trial's usage as incomplete.
 - **[Codex rollouts carry the ChatGPT account id (`session_meta`).]** → Transcripts stay in the run
   directory and are never published; only aggregate scores leave it.
 
