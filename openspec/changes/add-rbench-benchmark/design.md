@@ -259,13 +259,139 @@ server or build step, and opens from disk as the spec requires.
     it.
 - Engines launch CLIs themselves, so `claude` and `codex` shims still sit first on `PATH`. Each
   shim:
-  - repeats the policy flags as a second layer: Claude `--strict-mcp-config` and denied
-    `WebSearch`/`WebFetch`; Codex `--ignore-rules --strict-config -c web_search="disabled"`;
-  - adds the model and effort flags for engines whose adapter passes them by flag;
-  - logs the argv and session id;
-  - execs the real binary.
-- The audit compares the sessions in the transcripts with the shim log; a session that bypassed the
-  shims marks the trial contaminated.
+  - repeats the policy flags as a second layer: Claude `--strict-mcp-config` and
+    `--disallowedTools=WebSearch,WebFetch`; Codex `--strict-config -c web_search="disabled"` before
+    the subcommand and `--ignore-rules` right after `exec`;
+  - adds the model and effort flags for engines whose adapter passes them by flag, and only when
+    the engine's argv has none of its own;
+  - logs the argv and what binds the launch to its sessions (below);
+  - starts the real binary as its own child, with the engine's stdio unchanged, forwards signals to
+    it and exits with its status.
+- Shim settings and log. Before the engine starts, the runner writes one settings file at a fixed
+  path in the container, read-only to every trial process. It holds only the trial's public launch
+  settings (the policy flags, and the model and effort for roles delivered by flag) and the log
+  destination; no credential and no task data. The log destination is a collector the runner
+  starts in the container under another user, reached through a Unix socket. It stamps each record
+  with the sender's process id from the socket's peer credentials (`SO_PEERCRED`) and appends it to
+  a file that trial processes cannot write. An engine can add records but cannot change or remove
+  recorded ones.
+- Threat model of the audit (decided). The audit detects a CLI session started without the shims:
+  an engine, or a model's shell command, that runs the real binary by path, by accident or on
+  purpose. It does not defend against a process inside the container that forges the shims' or
+  hooks' records; that is out of scope (Risks). Within this model:
+  - The shim is the launcher. It registers with the collector, starts the CLI as its own child, and
+    records that child's process id from its own `fork`, not from a value a peer reports. Its
+    watcher is a second child of the shim.
+  - The collector accepts launch and binding records only from the shim and watcher pair it
+    registered for that launch. It accepts hook records from any process, because a hook record of
+    an unregistered CLI process is the evidence of a bypass.
+- Session binding. Each root session in the trial's transcripts must have exactly one origin launch:
+  the registered shim launch that started it. It may also have any number of resume launches, each a
+  registered shim launch that reopened the same session. rreview's wrap-up, which resumes a pass
+  (Claude `--resume`, Codex `exec resume`), is the known user of resumes. A resume never stands in
+  for the origin: a session with resumes but no origin marks the trial contaminated.
+  - Claude: a SessionStart hook in the managed settings logs each session Claude Code actually
+    starts: its `session_id`, its `source` (`startup`, `resume` or `fork`) and the process id of the
+    `claude` process it runs under. The audit joins that process id with the child process ids the
+    shims recorded. `startup` and `fork` make the launch the session's origin, and `resume` a resume
+    launch of the same id. The hook runs for sessions started without the shim too. Checked offline
+    with Claude Code 2.1.316 (#25): it reported the real id for a fresh session, `--continue`,
+    `--resume` and `--resume --fork-session`, and it still ran with `--safe-mode`,
+    `--setting-sources user` and `disableAllHooks` set in the user settings, in `--settings` and in
+    the project's `.claude/settings.json`. Subagent transcripts lie under their parent session
+    (`<session>/subagents/`) and are bound through it.
+  - Codex: Codex has no option to set the session id, and the id appears only in the output, in a
+    form that depends on the output mode. The shim's watcher polls the open files of the CLI child
+    the shim started, and of that child's descendants. It binds a rollout file
+    (`sessions/**/rollout-*.jsonl`) only while the CLI holds it open for writing: the flags in
+    `/proc/<pid>/fdinfo` must include write or read-write access and append. A file that is only
+    read, such as by Codex's metadata reader for existing rollouts, binds nothing. The watcher logs
+    the thread id from the rollout's `session_meta`. A launch that opens a rollout with no earlier
+    binding is its origin. A launch that reopens a bound rollout for append, as `codex exec resume`
+    does without writing a new `session_meta`, is a resume launch. Checked offline with Codex CLI
+    0.171.0 (#25): `codex exec` keeps its rollout open for read-write and append (`O_RDWR |
+    O_APPEND`) for the whole session, `codex exec resume <id>` reopens the same file the same way,
+    and `codex exec review` holds both the parent rollout and the review thread's rollout in the
+    same process. A child thread is bound when the same launch opened it for writing and its
+    `parent_thread_id` names a root thread of that launch.
+    `session_id` and `thread_source` alone are not trusted. If a session ends between two polls,
+    its rollout is unbound, and the trial fails closed (see the audit).
+  - Rejected: matching rollouts to launches by `CODEX_HOME`, working directory and time. That only
+    finds candidates: two root rollouts after one launch in the same home both match. Also
+    rejected: a per-launch `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`. It lands in
+    `session_meta.originator` (checked offline). But it is an internal variable that names the
+    client to the provider, not a logging field, so setting it could change the request. Reading
+    the id from `thread.started` or from the `session id:` line on stderr would put the shim into
+    the engine's stdio, and it depends on the output mode.
+- The audit discovers transcripts on its own: every Claude transcript (`projects/**/*.jsonl`) and
+  every Codex rollout anywhere in the trial container's writable filesystem, not only in the homes
+  the shim log names. Any of these marks the trial contaminated: a session with no origin launch,
+  a session with two origin launches, a hook record whose `claude` process no shim started, or a
+  child thread whose lineage does not reach a bound root.
+- An engine's own model and effort must equal the planned role's. The adapter builds the engine's
+  options from the plan: rreview's `--role-model` and `--role-effort`, and `codex-review`'s `-m`,
+  `review_model` and `model_reasoning_effort`. The audit reads the model and effort that applied to
+  each session and child thread, as the CLI reports them. That includes Claude subagents, and
+  `codex-review`'s review thread, which runs `review_model`. A model mismatch makes the trial
+  `misconfigured`, and an effort drift flags it (spec `engine-configurations`, Applied model and
+  effort are recorded). In #25, review-council's Codex rollout showed the model and effort of the
+  trial's `config.toml`; the other roles' applied values were not compared.
+- Shim merge against each engine's own launches, checked in spike #25 (Claude Code 2.1.316, Codex
+  CLI 0.171.0, linux/arm64, one run of each engine's default: `plain` on both CLIs, `code-review`,
+  `codex-review`, review-council 0.14.0, rreview 0.1.1 with `--sandbox external`, and the plugin
+  review engine 5.0.0 on both CLIs). All runs completed, and every session in their transcripts
+  matched the prototype's log. Exercised: fresh launches only, one model per CLI
+  (`claude-sonnet-5-5`, `gpt-6.2-astra`) at effort `low`, plus one review-council rerun at `medium`,
+  no proxy. At `low`, review-council did not dispatch its reviewers. The rreview judge and its
+  wrap-up resume never ran. Not exercised: continuations and forks (checked only offline, above),
+  the D3 proxy, and other models and efforts. Conflicts found and their fixes:
+  - *Variadic `--disallowedTools`.* `--disallowedTools WebSearch WebFetch` also consumes a prompt
+    passed as a positional argument after it, and `claude -p` then fails with "Input must be
+    provided". Fix: one token, `--disallowedTools=WebSearch,WebFetch`.
+  - *`--ignore-rules` is an `exec` option.* Codex rejects it before `exec` ("unexpected argument"),
+    and the top-level `codex review` does not accept it. Fix: the shim puts `--strict-config` and
+    `-c` before the subcommand and inserts `--ignore-rules` right after `exec` (or `e`), where
+    `codex exec review` also takes it. Top-level `codex review`, `resume`, `fork` and the TUI get no
+    `--ignore-rules`; no D13 engine launches them.
+  - *Non-session commands.* `--strict-config` is refused by subcommands such as `codex features`,
+    and engines also call `--version`, `codex plugin` and `codex debug`. The shim adds flags only to
+    session launches (Claude: anything but `--version`, `--help` and management subcommands;
+    Codex: `exec`, `review`, `resume`, `fork` and the TUI). It logs the other calls unchanged.
+    Every `-c` key that the engines and D12 pass loads under `--strict-config`. This was checked
+    offline, where an unknown key fails at startup.
+  - *Model and effort the engine sets itself.* `codex-review` passes `-m` and
+    `model_reasoning_effort`, and rreview passes `--model`/`--effort` and `-m`/`-c` for each role.
+    A second value from the shim would duplicate them, so the shim adds model or effort only
+    when the argv has none. review-council's Codex side got the model and effort of the trial's
+    `config.toml`.
+  - *An engine's own `--sandbox read-only` (decided).* review-council 0.14.0 runs its Codex
+    reviewer with `--sandbox read-only`. Codex's Linux sandbox needs user namespaces, and in the
+    container bubblewrap cannot create them (`codex sandbox linux -- true` fails). The deprecated
+    `use_legacy_landlock` feature is no fallback: it aborts with "filesystem-restricted execution
+    requires bubblewrap". The Codex shim therefore rewrites `-s`/`--sandbox read-only` to
+    `danger-full-access`, so the container is the sandbox, as in D6. It is the only engine flag a
+    shim overrides. The shim log keeps the original argv and names the rewrite. The reviewer can
+    then write in the container (see Risks).
+  - *Shim settings from the environment.* rreview gives its reviewers only an allowlist of
+    environment variables, so a log path or model passed to the shim by variable does not reach
+    its sessions. The shim reads the fixed settings file above.
+  - *`--session-id` with continuations.* Claude Code refuses `--session-id` together with
+    `--continue` or `--resume` unless `--fork-session` is also given ("--session-id can only be used
+    with --continue or --resume if --fork-session is also specified", checked offline). The shim
+    adds `--session-id <uuid>` only to a fresh launch, and to a fork (`--fork-session` with a
+    continuation). A launch is a continuation if it has `-c`/`--continue`, `-r`/`--resume` (also as
+    `--resume=<value>`) or `--from-pr`. It adds no id when the engine passes its own `--session-id`
+    (also as `--session-id=<uuid>`): rreview 0.1.1 passes one on every fresh Claude launch and uses
+    `--resume` for its wrap-up. A continuation keeps the resumed session's id. That id comes from
+    the SessionStart hook, because the argv may hold a name, a PR or nothing (the latest session).
+  - *Other Codex homes.* rreview gives each Codex pass its own `CODEX_HOME` under its run
+    directory, with `auth.json` a symlink straight to the login home (rreview resolves the trial's
+    symlink first). The audit finds them by its own discovery.
+  - *Plugins at the pin.* Claude Code loads the engines' plugins with `--plugin-dir` from the
+    pinned sources in the image. The plugin review engine's own Codex marketplace installs from its
+    repository's `main`, not from the pin. The image therefore ships a local Codex marketplace whose
+    entry is a relative path to the pinned plugin, and the trial installs it into `CODEX_HOME` at
+    start without network access.
 - The Codex shim does not add `--ignore-user-config`. review-council 0.14.0 launches
   `codex exec --sandbox read-only --skip-git-repo-check <prompt>` with no `-m`, and sets the Codex
   model and effort only through `config.toml` (`model`, `model_reasoning_effort`). Ignoring the
@@ -564,8 +690,9 @@ measure a different task from the engines, which all read the repository.
   `codex exec review`, which exposes both capture options.
 - Capture stdout JSONL and the final text file for diagnostics. The final
   `item.completed` event with `item.type = "agent_message"` contains the same rendered review as
-  `-o`. Keep session persistence on. Use the session ID in the D5 shim log to select the
-  parent rollout in `$CODEX_HOME/sessions/` for findings normalization. Its `event_msg` record has
+  `-o`. Keep session persistence on. Use the root thread id the D5 audit bound to this launch to
+  select the parent rollout in `$CODEX_HOME/sessions/` for findings normalization. Its `event_msg`
+  record has
   `payload.type = "item_completed"` and `payload.item.type = "ExitedReviewMode"`. The
   `payload.item.review_output` holds the findings with priority and file/line ranges.
 - review-council: the Claude side is the main session (orchestrator and judge) plus the subagents
@@ -645,7 +772,8 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
 
 **Alternatives considered:**
 - *The `claude` shim tees stdout and logs `rate_limit_event` lines.* It breaks D5's rule that the
-  shim execs the real binary, and it sees the event only for engines that use stream-json.
+  shim leaves the engine's stdio unchanged, and it sees the event only for engines that use
+  stream-json.
 - *Not enforcing the soft threshold for Claude.* The share is available at the cost of one small
   call per check, so this stays only as the fallback.
 
@@ -686,10 +814,13 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
   and returned one structured finding on the changed line of a synthetic two-commit repository.
   A minimal `codex exec` call works through D3's enforcing proxy (#21); `codex exec review`
   through it remains a smoke check.
-- **[The inner Linux sandbox may fail inside Docker.]** → In #22 it could not create a user
-  namespace. In the smoke stage, check review-council, which launches Codex with
-  `--sandbox read-only` (D5), and the Codex-side plugin review engine in D13. D6 uses the
-  container as the sandbox for rreview.
+- **[The inner Linux sandbox fails inside Docker.]** → Confirmed in #22 and #25: bubblewrap cannot
+  create a user namespace in the container, and Codex 0.171.0 has no sandbox without it. D6 uses
+  the container as the sandbox for rreview. The Codex shim rewrites review-council's
+  `--sandbox read-only` to `danger-full-access` (D5). review-council's Codex reviewer can then also
+  write inside the container. Edits are not scored as output. But a write to the checkout can change
+  what a later reviewer, verifier or judge of the same trial reads, and so change the scored
+  findings. The smoke stage records whether the checkout changed during review-council trials.
 - **[Claude Code reports its used share only on stream-json stdout (spike #23).]** → The runner
   reads it from its own calls and a throttled probe (D14). When no reading is available, the soft
   threshold is not enforced for Claude for that check, the run log says so, and the round budget is
@@ -701,8 +832,36 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
 - **[Limit hits were not provoked live.]** → No real limit was approached. The messages and typed
   codes come from the pinned CLIs against a local 429 stub and from their code; the real servers'
   headers and bodies are unverified.
-- **[Shim flags conflict with an engine's own flags.]** → The spike runs each engine's default once
-  with the shims and checks the argv log.
+- **[Shim flags conflict with an engine's own flags.]** → Spiked (#25): each engine's default ran
+  once with prototype shims. The conflicts found (a variadic flag, an `exec`-only flag, flags on
+  non-session commands, duplicate model and effort, an engine's own read-only sandbox, settings
+  passed by environment, `--session-id` with continuations) and their fixes are in D5. #25
+  exercised fresh launches only, one model per CLI at `low` (review-council also at `medium`), and
+  no proxy. The rreview judge and its wrap-up resume never ran. The D3 proxy, other models and
+  efforts, and continuations and forks are left to the smoke stage, and so is a new engine or CLI
+  version.
+- **[A process inside the container forges the audit's records.]** → Out of scope (decided). The
+  audit detects sessions started without the shims, not forged shim, watcher or hook records: a
+  process running as the trial's user could send records to the collector or fake a hook's parent.
+  Tolerated because what such a process could gain is small. Engines' writes are not scored, the
+  container is torn down after the trial, and the network policy (D3 proxy, managed configuration)
+  is enforced below the shims, so a forged record cannot reach the network or the ground truth.
+- **[A session can escape the binding.]** → The Codex watcher polls, so a session that opens and
+  closes its rollout between two polls stays unbound and fails its trial closed (D5). The smoke
+  stage counts such false alarms. The Claude binding depends on the managed SessionStart hook. Only
+  user, project and `--settings` values of `disableAllHooks` were tried against it (#25), and a
+  Claude Code upgrade reruns that check.
+- **[An engine skips its own fan-out on a small change.]** → At effort `low` on the spike's one-line
+  diff, review-council 0.14.0 did not dispatch its reviewers: no subagent and no Codex reviewer
+  ran, and it reported one unverified finding. At `medium`, the lowest matrix effort, it dispatched
+  all three, Codex included. The smoke stage checks the roster review-council reports on a core
+  task.
+- **[In #25 the plugin review engine's lifecycle hooks did not run under `codex exec`.]** → The
+  plugin's install notes have the user trust its hooks in the Codex TUI (`/hooks`). The fresh
+  trial's transcript showed no hook output, so the engine ran its skill without them. The hooks did
+  run on Claude Code. Headless `exec` has hook-trust handling of its own, so this run leaves open
+  what happens once the pinned plugin's hooks are trusted. Whether the trial home pre-trusts them is
+  open for the engine's adapter.
 - **[The judge prefers its own model family.]** → The judge is blind to the engine, and a second
   judge from the other family labels a sample (O1).
 - **[Ground truth for our PRs is incomplete or produced by an engine under test.]** → Augmented
