@@ -43,6 +43,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from rbench.engines import normalization
 from rbench.engines.declaration import CLIS, EFFORTS, DeclarationError, Engine, Setting
 from rbench.engines.pins import MODELS
 from rbench.matrix.expansion import UNDECIDED, Configuration, Matrix, RoleSetting, Round
@@ -53,10 +54,9 @@ SMOKE_VERSION = 1
 # Default estimate per trial, used where no smoke median exists. A guess, not a measurement, so
 # the output labels it DEFAULT; the smoke stage replaces it before any budget is approved (O6).
 DEFAULT_ENGINE_TOKENS = 300_000  # on each provider the configuration uses
-# limit: the normalization model is not pinned yet (issue #45); the default assumes Claude.
-DEFAULT_NORMALIZATION_TOKENS = {"claude": 30_000}
+# Only a Markdown engine's trials run the normalizer (design D9), on its pinned model's CLI.
+DEFAULT_NORMALIZATION_TOKENS = {MODELS[normalization.MODEL]: 30_000}
 DEFAULT_JUDGE_TOKENS = {"claude": 60_000}  # the judge is claude-opus-5-5 (design O1)
-NO_NORMALIZATION = frozenset({"plain"})  # structured output, no model step (spec Plain output)
 
 # Decision O6: a round's budget per provider is its plan estimate x 1.2.
 BUDGET_MARGIN = (6, 5)
@@ -200,10 +200,9 @@ def load_smoke(path: Path, declared: Mapping[str, Engine]) -> SmokeMedians:
 
 
 def default_estimate(config: Configuration) -> Tokens:
-    normalization = {} if config.engine in NO_NORMALIZATION else DEFAULT_NORMALIZATION_TOKENS
     return {
         "engine": {p: DEFAULT_ENGINE_TOKENS for p in sorted(config.providers)},
-        "normalization": dict(normalization),
+        "normalization": dict(DEFAULT_NORMALIZATION_TOKENS) if config.markdown else {},
         "judge": dict(DEFAULT_JUDGE_TOKENS),
     }
 
@@ -315,12 +314,12 @@ def render(
                 " measured"
             )
     if defaults:
-        normalization = ", ".join(f"{t} on {p}" for p, t in DEFAULT_NORMALIZATION_TOKENS.items())
+        normalizer = ", ".join(f"{t} on {p}" for p, t in DEFAULT_NORMALIZATION_TOKENS.items())
         judge = ", ".join(f"{t} on {p}" for p, t in DEFAULT_JUDGE_TOKENS.items())
         lines.append(
             f"  DEFAULT per trial: engine {DEFAULT_ENGINE_TOKENS} on each provider the"
-            f" configuration uses; normalization {normalization} (none for"
-            f" {', '.join(sorted(NO_NORMALIZATION))}); judge {judge}"
+            f" configuration uses; normalization {normalizer} (Markdown engines"
+            f" only); judge {judge}"
         )
 
     for plan in plans:

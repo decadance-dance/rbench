@@ -115,8 +115,15 @@ class Configuration:
 
     @property
     def providers(self) -> frozenset[str]:
-        """The CLIs its models run on; a round's budget must cover each."""
+        """The CLIs its models run on, which its engine tokens are on."""
         return frozenset(MODELS[m] for _, s in self.roles for m in s.models)
+
+    @property
+    def budget_providers(self) -> frozenset[str]:
+        """The CLIs a trial spends on: its models' and, for a Markdown engine, the normalizer's.
+        A round's budget covers each; engine estimates use `providers` alone."""
+        extra = {MODELS[normalization.MODEL]} if self.markdown else set()
+        return self.providers | extra
 
 
 @dataclass(frozen=True)
@@ -310,7 +317,7 @@ def parse_matrix(data: object, source: str, engines: Mapping[str, Engine]) -> Ma
                     raise MatrixError(f"{where}: configuration {c.id} repeats {seen[c.id]}")
                 seen[c.id] = where
                 configurations.append(c)
-        used = frozenset().union(*(c.providers for c in configurations))
+        used = frozenset().union(*(c.budget_providers for c in configurations))
         budget = _budget(raw["budget"], f"{at}: budget", used)
         rounds.append(Round(name, budget, tuple(configurations)))
     if stage == "smoke":

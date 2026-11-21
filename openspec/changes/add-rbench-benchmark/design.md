@@ -653,6 +653,12 @@ not judge them. It runs hermetic, like the judge: the same container setup and s
 
 - An engine declaration says `output = "markdown"` or `"structured"` (the default). Only a
   Markdown engine's report goes through this step.
+- The normalizer runs in the engine's own image, so a Markdown engine must pin `cli.claude`, and
+  its declaration is rejected without one.
+- A Markdown configuration's trials also spend on Claude, the normalizer's provider. The round's
+  frozen budget therefore covers Claude even when every role runs on Codex, and loading the plan
+  checks that. Engine estimates still use only the roles' providers. The default normalization
+  estimate applies to Markdown configurations only.
 - The pin is `claude-sonnet-5-5` at effort `medium`, with prompt version 1
   (`src/rbench/engines/normalization-prompt-v1.md`). Medium, not low: the copy must be complete,
   and the step's tokens are counted apart from the engine's anyway. A Markdown configuration's

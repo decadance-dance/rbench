@@ -106,16 +106,24 @@ class Normalization:
 
 
 def _text(value: object) -> bool:
-    return isinstance(value, str) and bool(value.strip())
+    """A non-blank string the ledger can write: JSON may carry lone surrogates, UTF-8 cannot."""
+    if not (isinstance(value, str) and value.strip()):
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _line(value: object) -> bool:
     return type(value) is int and value >= 1
 
 
-def parse_findings(data: object, where: str) -> list[dict]:
-    """Validate findings given as the ledger stores them, or as the normalizer answers (with
-    `severity` null when the engine gives none); return them in the ledger's format.
+def parse_findings(data: object, where: str, *, severity_required: bool = False) -> list[dict]:
+    """Validate findings given as the ledger stores them, or as the normalizer answers
+    (`severity_required`: every item has `severity`, null when the engine gives none); return
+    them in the ledger's format.
 
     Engine and model output is untrusted: one bad item rejects the whole list, naming `where`
     (the trial) and the item.
@@ -130,9 +138,11 @@ def parse_findings(data: object, where: str) -> list[dict]:
             raise NormalizationError(
                 f"{at}: expected an object of file, start_line, end_line, message and severity"
             )
+        if severity_required and "severity" not in item:
+            raise NormalizationError(f"{at}: severity: missing; null when the engine gives none")
         for key in ("file", "message"):
             if not _text(item[key]):
-                raise NormalizationError(f"{at}: {key}: expected a non-empty string")
+                raise NormalizationError(f"{at}: {key}: expected a non-empty UTF-8 string")
         if not _line(item["start_line"]):
             raise NormalizationError(f"{at}: start_line: expected a line number from 1")
         if not (_line(item["end_line"]) and item["end_line"] >= item["start_line"]):
@@ -141,7 +151,9 @@ def parse_findings(data: object, where: str) -> list[dict]:
         severity = item.get("severity")
         if severity is not None:
             if not _text(severity):
-                raise NormalizationError(f"{at}: severity: expected a non-empty string or null")
+                raise NormalizationError(
+                    f"{at}: severity: expected a non-empty UTF-8 string or null"
+                )
             finding["severity"] = severity
         findings.append(finding)
     return findings
@@ -153,6 +165,8 @@ def _usage(model_usage: object, where: str) -> dict[str, dict[str, int]]:
         raise NormalizationError(f"{where}: modelUsage does not show the pinned model {MODEL}")
     usage = {}
     for model, counts in sorted(model_usage.items()):
+        if not _text(model):
+            raise NormalizationError(f"{where}: modelUsage key {model!r}: expected a model id")
         if not (isinstance(counts, dict) and _USAGE.keys() <= counts.keys()):
             raise NormalizationError(f"{where}: modelUsage of {model!r}: missing token counts")
         for key in _USAGE:
@@ -188,7 +202,7 @@ def parse_result(stdout: str, where: str) -> Normalization:
         if not (isinstance(item, dict) and item.keys() == {"text"} and _text(item["text"])):
             raise NormalizationError(f"{where}: unlocated item {i}: expected {{text}}")
         texts.append(item["text"])
-    findings = parse_findings(answer["findings"], where)
+    findings = parse_findings(answer["findings"], where, severity_required=True)
     return Normalization(findings, texts, _usage(result.get("modelUsage"), where))
 
 

@@ -36,6 +36,7 @@ default = {{ model = "claude-opus-5-5", effort = "high" }}
     "panel": f"""
 name = "panel"
 pin = {{ kind = "git", ref = "{COMMIT}" }}
+output = "markdown"
 cli = {{ claude = "2.1.316", codex = "0.167.0" }}
 [roles.coordinator]
 cli = "claude"
@@ -111,7 +112,10 @@ def default_config(bench: Path, name: str) -> Configuration:
     e = load_engine(bench / "engines" / f"{name}.toml")
     roles = sorted(e.default_configuration().items())
     return Configuration(
-        e.name, e.version, tuple((r, RoleSetting((s.model,), s.effort)) for r, s in roles)
+        e.name,
+        e.version,
+        tuple((r, RoleSetting((s.model,), s.effort)) for r, s in roles),
+        e.output == "markdown",
     )
 
 

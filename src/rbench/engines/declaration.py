@@ -33,7 +33,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from rbench.engines.pins import check_ref, model_cli
+from rbench.engines import normalization
+from rbench.engines.pins import MODELS, check_ref, model_cli
 
 CLIS = ("claude", "codex")
 DELIVERIES = ("flag", "config")
@@ -157,6 +158,13 @@ def parse_engine(data: object, source: str) -> Engine:
     output = data.get("output", "structured")
     if output not in OUTPUTS:
         raise DeclarationError(f"{where}: output must be structured or markdown, got {output!r}")
+    # The normalizer runs in the engine's own image (design D9), so that image needs its CLI.
+    normalizer_cli = MODELS[normalization.MODEL]
+    if output == "markdown" and normalizer_cli not in clis:
+        raise DeclarationError(
+            f"{where}: output = 'markdown' needs a pinned {normalizer_cli} CLI for the"
+            f" normalization step ({normalization.MODEL}); add cli.{normalizer_cli}"
+        )
 
     roles = data["roles"]
     if not (isinstance(roles, dict) and roles):

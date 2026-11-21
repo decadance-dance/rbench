@@ -213,7 +213,7 @@ def freeze_plan(
     if round_ is None:
         names = ", ".join(r.name for r in matrix.rounds)
         raise LedgerError(f"matrix {matrix_path}: no round {round_name!r}; rounds: {names}")
-    providers = sorted(frozenset().union(*(c.providers for c in round_.configurations)))
+    providers = sorted(frozenset().union(*(c.budget_providers for c in round_.configurations)))
     budget = {p: round_.budget_for(p) for p in providers}
 
     engine_records = {}
@@ -472,7 +472,7 @@ def parse_plan(data: object, where: str) -> Plan:
 
     r = _fields(d["round"], f"{where}: round", {"name", "budget"})
     budget = _object(r["budget"], f"{where}: round.budget")
-    providers = {p for _, c in configurations.values() for p in c.providers}
+    providers = {p for _, c in configurations.values() for p in c.budget_providers}
     if budget.keys() != providers:
         raise LedgerError(
             f"{where}: round.budget: expected a budget for exactly {sorted(providers)}"
