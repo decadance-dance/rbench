@@ -684,8 +684,8 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
 - **[Headless `codex-review` execution and capture.]** → Confirmed in #22 with Codex CLI 0.171.0
   on Linux arm64 only. `codex exec review` ran without a TTY, used D5's directory-mounted login
   and returned one structured finding on the changed line of a synthetic two-commit repository.
-  Plain `codex exec` works through D3's enforcing proxy (#21); `codex exec review` through it
-  remains a smoke check.
+  A minimal `codex exec` call works through D3's enforcing proxy (#21); `codex exec review`
+  through it remains a smoke check.
 - **[The inner Linux sandbox may fail inside Docker.]** → In #22 it could not create a user
   namespace. In the smoke stage, check review-council, which launches Codex with
   `--sandbox read-only` (D5), and the Codex-side plugin review engine in D13. D6 uses the
