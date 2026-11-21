@@ -207,9 +207,11 @@ def _copy_answer(project: TrialProject, launch: Launch, raw: Path) -> str | None
 
 
 def _codex_stdout(launch: Launch, records: list[dict], raw: Path) -> dict[int, Path]:
-    """The engine's stdout as the stdout of its shim launch, when the engine is that one `codex`
-    launch; a Codex launch an engine makes itself has stdout the runner never sees (design D5)."""
-    if launch.argv[:1] != ("codex",):
+    """The engine's stdout as the stdout of its shim launch, when the engine is that one
+    `codex exec --json` launch; a Codex launch an engine makes itself has stdout the runner never
+    sees (design D5), and one without `--json` prints no events `count_usage` can read (D7)."""
+    options = launch.argv[: launch.argv.index("--")] if "--" in launch.argv else launch.argv
+    if options[:2] != ("codex", "exec") or "--json" not in options:
         return {}
     own = [
         r["launch"]

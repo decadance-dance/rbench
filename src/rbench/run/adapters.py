@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from rbench.engines import plain
+from rbench.engines import plain, rreview
 from rbench.engines.declaration import Setting
 from rbench.engines.pins import MODELS
 from rbench.engines.plain import Launch
@@ -116,4 +116,20 @@ class Plain(Adapter):
             raise EngineFailure(f"invalid output: {e}") from None
 
 
-ADAPTERS: dict[str, Adapter] = {plain.NAME: Plain()}
+class Rreview(Adapter):
+    """rreview (design D13): one `rreview` process that puts each role's model and effort on its
+    own passes' command lines, so the shim adds none; its `result.json` comes on stdout."""
+
+    def launch(self, trial: EngineTrial) -> Launch:
+        return Launch(rreview.NAME, rreview.launch(trial.settings).argv, "", {}, None)
+
+    def result(self, trial: EngineTrial, launch: Launch, output: Output) -> list[dict]:
+        if output.status not in (rreview.EXIT_CLEAN, rreview.EXIT_GATED):
+            raise EngineFailure(f"engine error: {launch.cli} exited {output.status}")
+        try:
+            return rreview.findings(output.stdout, output.status)
+        except rreview.RreviewOutputError as e:
+            raise EngineFailure(f"invalid output: {e}") from None
+
+
+ADAPTERS: dict[str, Adapter] = {plain.NAME: Plain(), rreview.NAME: Rreview()}

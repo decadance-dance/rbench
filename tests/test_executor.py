@@ -389,7 +389,7 @@ def test_a_claude_trial_runs_in_its_project_and_stores_findings_and_usage(sandbo
 
 
 @pytest.mark.real_executor
-def test_a_codex_trial_passes_its_stdout_to_usage_as_its_launchs(sandbox):
+def test_a_plain_codex_trial_stores_usage_with_its_model_unverified(sandbox):
     trial_dir, counts, _ = sandbox(
         ["gpt-6.2-sol"], lambda launch: docker_replies(codex_trial(launch))
     )
@@ -398,8 +398,28 @@ def test_a_codex_trial_passes_its_stdout_to_usage_as_its_launchs(sandbox):
     findings, usage = read_results(trial_dir)
     assert findings == [FINDING | {"severity": "nit"}]
     assert usage["engine"] == {GPT: {"input": 6, "output": 3, "cache_read": 4, "cache_creation": 0}}
-    # Without the stdout, the launch's model attribution would be flagged unverified (D7).
-    assert usage["incomplete"]["engine"] == []
+    # plain's launch has no `--json`: no stdout events can verify the model (D7).
+    assert usage["incomplete"]["engine"] == [
+        "Codex thread t1: no clean stdout of a launch shows it, so the model its usage ran on"
+        " is unverified"
+    ]
+
+
+def test_only_a_codex_exec_json_launch_passes_its_stdout_to_usage(tmp_path):
+    def launch(*argv):
+        return plain.Launch("codex", ("codex", *argv), "", {}, None)
+
+    def record(n, argv):
+        return {"kind": "launch", "launch": n, "cli": "codex", "argv": list(argv)}
+
+    stdout = tmp_path / trial_module.STDOUT_FILE
+    own = ("exec", "--json", "-m", GPT, "-")
+    records = [record(1, ("exec", "-")), record(2, own)]
+    assert trial_module._codex_stdout(launch(*own), records, tmp_path) == {2: stdout}
+    assert trial_module._codex_stdout(launch("exec", "-"), records, tmp_path) == {}
+    assert trial_module._codex_stdout(launch("exec", "--", "--json"), records, tmp_path) == {}
+    twice = [*records, record(3, own)]  # which launch is the engine's is unknown
+    assert trial_module._codex_stdout(launch(*own), twice, tmp_path) == {}
 
 
 @pytest.mark.real_executor
