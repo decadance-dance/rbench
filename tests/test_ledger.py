@@ -4,6 +4,7 @@ Engines, tasks, images and matrices are synthetic and built in tmp_path.
 """
 
 import dataclasses
+import errno
 import hashlib
 import json
 import re
@@ -12,9 +13,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from test_manifest import write_manifest
+from test_hidden import git_repo, hidden_dir
+from test_manifest import edit, write_manifest
 from test_matrix import engines, matrix
-from test_tasks import item, write_task
+from test_tasks import HID, HIDDEN, item, write_task
 
 import rbench.ledger.plan as plan_module
 import rbench.ledger.trials as trials_module
@@ -44,7 +46,14 @@ from rbench.ledger import (
 )
 from rbench.ledger.plan import checkout_path
 from rbench.matrix.expansion import Configuration, MatrixError, RoleSetting
-from rbench.tasks import CORE_LIST_FILE, load_core_list, load_task_set
+from rbench.tasks import (
+    CORE_LIST_FILE,
+    GROUND_TRUTH_FILE,
+    HIDDEN_DIR_ENV,
+    MANIFEST_FILE,
+    load_core_list,
+    load_task_set,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 CLI = {"claude": "2.1.316", "codex": "0.167.0"}
@@ -812,7 +821,10 @@ def cli_inputs(root: Path, images: dict | None = None) -> list[str]:
     ]
 
 
-def test_run_creates_the_run_and_stops_before_executing(checkout: Path, capsys) -> None:
+def test_run_creates_the_run_and_stops_before_executing(
+    checkout: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv(HIDDEN_DIR_ENV, str(checkout / "nonexistent"))
     argv = cli_inputs(checkout)
 
     assert main([*argv, "--run-id", "smoke-1"]) == ExitCode.ERROR
@@ -884,3 +896,157 @@ def test_run_refuses_a_symlinked_matrix(checkout: Path, capsys) -> None:
     assert main(argv) == ExitCode.ERROR
     assert "is a symlink" in capsys.readouterr().err
     assert not (checkout / "runs").exists()
+
+
+@pytest.fixture
+def full_inputs(tmp_path: Path, monkeypatch) -> tuple[Path, list[str], Path]:
+    checkout = git_repo(tmp_path / "public")
+    monkeypatch.setattr(plan_module, "CHECKOUT_ROOT", checkout)
+    monkeypatch.chdir(checkout)
+    argv = cli_inputs(checkout)
+    Path(argv[1]).write_text(
+        MATRIX_TOML.replace('"screening"', '"full"')
+        .replace('"core"', '"all"')
+        .replace("attempts = 1", "attempts = 3")
+    )
+    hidden = hidden_dir(tmp_path)
+    task = write_task(hidden, HID, task_set="hidden")
+    write_manifest(hidden, task_set="hidden")
+    monkeypatch.setenv(HIDDEN_DIR_ENV, str(hidden))
+    return checkout, [*argv, "--run-id", "fixture"], task
+
+
+def assert_private_output(output: str, task: Path, *, includes_id: bool = False) -> None:
+    gt = json.loads((task / GROUND_TRUTH_FILE).read_text())
+    for secret in (str(task.parent), gt["canary"], HIDDEN, gt["items"][0]["message"]):
+        assert secret not in output
+    if not includes_id:
+        assert task.name not in output
+
+
+def test_full_run_freezes_hidden_task_in_ignored_results(full_inputs, capsys) -> None:
+    checkout, argv, task = full_inputs
+
+    assert main(argv) == ExitCode.ERROR  # The executor is still pending.
+    out, err = capsys.readouterr()
+    assert "30 trials pending" in out
+    assert "the trial executor is not implemented yet" in err
+    assert_private_output(out + err, task)
+
+    run_dir = checkout / "runs" / "fixture"
+    plan = load_plan(run_dir)
+    manifest = json.loads((task.parent / MANIFEST_FILE).read_text())
+    assert plan.task_sets == {"hidden": manifest["version"], "ours": 1, "reviewbench": 1}
+    assert [t.id for t in plan.tasks] == sorted([task.name, "o-1", "o-2", "rb-1", "rb-2"])
+    (planned,) = (t for t in plan.tasks if t.set == "hidden")
+    assert dataclasses.asdict(planned) == {
+        "id": task.name,
+        "set": "hidden",
+        "sha256": manifest["tasks"][task.name]["sha256"],
+    }
+    hidden_trials = [t for t in plan.trials if t.task == task.name]
+    assert len(hidden_trials) == 6
+    for trial in hidden_trials:
+        assert read_status(run_dir / TRIALS_DIR / trial.id) == TrialStatus("pending")
+    for path in run_dir.rglob("*"):
+        assert not path.is_symlink()
+        if path.is_file():
+            assert_private_output(path.read_text(), task, includes_id=(path.name == PLAN_FILE))
+
+
+def test_full_run_requires_a_configured_hidden_directory(full_inputs, monkeypatch, capsys) -> None:
+    checkout, argv, task = full_inputs
+    monkeypatch.delenv(HIDDEN_DIR_ENV)
+
+    assert main(argv) == ExitCode.ERROR
+    err = capsys.readouterr().err
+    assert f"set {HIDDEN_DIR_ENV} to the hidden task directory" in err
+    assert_private_output(err, task)
+    assert not (checkout / "runs").exists()
+
+
+def test_full_run_rejects_a_changed_hidden_task(full_inputs, capsys) -> None:
+    checkout, argv, task = full_inputs
+    edit(task / GROUND_TRUTH_FILE, lambda gt: gt["items"][0].update(message="Changed finding."))
+
+    assert main(argv) == ExitCode.ERROR
+    err = capsys.readouterr().err
+    assert "content hash does not match" in err
+    assert_private_output(err, task)
+    assert not (checkout / "runs").exists()
+
+
+def test_full_run_hidden_input_io_error_keeps_its_details_private(
+    full_inputs, monkeypatch, capsys
+) -> None:
+    checkout, argv, task = full_inputs
+
+    def fail_load(config):
+        raise OSError(errno.EACCES, "Permission denied", str(task))
+
+    monkeypatch.setattr(plan_module, "load_hidden_task_set", fail_load)
+    assert main(argv) == ExitCode.ERROR
+    err = capsys.readouterr().err
+    assert "cannot read the hidden task set: Permission denied" in err
+    assert_private_output(err, task)
+    assert not (checkout / "runs").exists()
+
+
+@pytest.mark.parametrize("destination", ["unignored", "symlink", "unignored staging"])
+def test_full_run_rejects_unignored_results(full_inputs, monkeypatch, capsys, destination) -> None:
+    checkout, argv, task = full_inputs
+    output = checkout / "output"
+    if destination == "symlink":
+        output = checkout / "runs"
+        output.symlink_to(task.parent, target_is_directory=True)
+    elif destination == "unignored staging":
+        (checkout / ".gitignore").write_text("/output/fixture\n")
+        output.mkdir()
+    else:
+        output /= task.name
+
+    def unexpected_write(*args):
+        pytest.fail("attempted to write a hidden run at an unignored destination")
+
+    monkeypatch.setattr(plan_module, "atomic_write", unexpected_write)
+    assert main([*argv, "--runs", str(output)]) == ExitCode.ERROR
+    err = capsys.readouterr().err
+    assert "path git ignores" in err
+    assert_private_output(err, task)
+    assert not (output / "fixture").exists()
+    if destination == "unignored staging":
+        assert list(output.iterdir()) == []
+
+
+def test_full_run_creation_error_keeps_the_hidden_trial_private(
+    full_inputs, monkeypatch, capsys
+) -> None:
+    checkout, argv, task = full_inputs
+
+    def fail_hidden_trial(trial_dir, state):
+        if trial_dir.name.startswith(task.name + "--"):
+            raise OSError(errno.ENOSPC, "No space left on device", str(trial_dir))
+        set_state(trial_dir, state)
+
+    monkeypatch.setattr(plan_module, "set_state", fail_hidden_trial)
+    assert main(argv) == ExitCode.ERROR
+    err = capsys.readouterr().err
+    assert "cannot create the run with hidden tasks: No space left on device" in err
+    assert_private_output(err, task)
+    assert list((checkout / "runs").iterdir()) == []
+
+
+def test_full_run_plan_read_error_keeps_its_details_private(
+    full_inputs, monkeypatch, capsys
+) -> None:
+    checkout, argv, task = full_inputs
+
+    def fail_read(run_dir):
+        raise LedgerError(f"cannot read plan for {task}")
+
+    monkeypatch.setattr("rbench.cli.load_plan", fail_read)
+    assert main(argv) == ExitCode.ERROR
+    err = capsys.readouterr().err
+    assert "cannot read the newly created plan.json" in err
+    assert_private_output(err, task)
+    assert (checkout / "runs" / "fixture" / PLAN_FILE).is_file()

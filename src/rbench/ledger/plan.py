@@ -12,6 +12,9 @@ role receives its model and effort, and the trials in queue order (attempt, then
 configuration). It holds no timestamps, so the same inputs give the same bytes, and the run never
 re-reads its matrix: an edited matrix only earns a warning (`matrix_warning`).
 
+Hidden tasks use the same frozen fields as public tasks: set version, task id and content hash.
+The plan never stores their directory, canary or ground truth.
+
 The matrix path is stored relative to the rbench checkout, never as an absolute or home path,
 because run directories may be published; a matrix outside the checkout is refused.
 
@@ -45,12 +48,14 @@ from rbench.matrix.expansion import (
     RoleSetting,
     parse_matrix,
 )
-from rbench.tasks.loader import TASK_ID, TASK_SETS, Task
+from rbench.tasks.hidden import check_hidden_results_dir, hidden_config
+from rbench.tasks.loader import TASK_ID, TASK_SETS, Task, TaskError
 from rbench.tasks.manifest import (
     CORE_LIST_FILE,
     CoreList,
     Manifest,
     load_core_list,
+    load_hidden_task_set,
     load_task_set,
     select_core,
 )
@@ -61,7 +66,6 @@ PLAN_FILE = "plan.json"
 LOCK_FILE = "ledger.lock"
 TRIALS_DIR = "trials"
 RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
-# The hidden set's directory is operator configuration (issue #35); until then runs plan these.
 PUBLIC_SETS = ("reviewbench", "ours")
 PIN_KINDS = ("git", "version", "sha256", "cli")
 # limit: the checkout of an editable install (`uv run`); an installed wheel has no checkout, so
@@ -508,21 +512,42 @@ def parse_plan(data: object, where: str) -> Plan:
     )
 
 
+def _check_hidden_run_dir(path: Path) -> None:
+    try:
+        check_hidden_results_dir(path)
+    except (TaskError, OSError, RuntimeError):
+        raise LedgerError(
+            "results of hidden tasks go only to a path git ignores;"
+            " use --runs with an ignored directory such as runs/"
+        ) from None
+
+
 def create_run(runs_dir: Path, run_id: str, plan: Plan) -> Path:
     """Create `runs_dir/run_id` with the plan, the lock file and every trial pending.
 
     The directory is built under a temporary name and renamed into place, so a run directory
     either holds the whole plan and every trial, or does not exist. An existing run is refused.
+    Plans with hidden tasks require Git to ignore both the staging and final directories.
     """
     runs_dir = Path(runs_dir)
+    hidden = "hidden" in plan.task_sets
     if not RUN_ID.fullmatch(run_id):
-        raise LedgerError(f"bad run id {run_id!r}; use letters, digits, '.', '_' and '-'")
+        label = "bad run id" if hidden else f"bad run id {run_id!r}"
+        raise LedgerError(f"{label}; use letters, digits, '.', '_' and '-'")
     run_dir = runs_dir / run_id
-    if run_dir.exists():
-        raise LedgerError(f"run {run_dir} already exists; resume it or choose another run id")
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    tmp = Path(tempfile.mkdtemp(dir=runs_dir, prefix=f".{run_id}.", suffix=".tmp"))
+    tmp = None
     try:
+        if hidden:
+            _check_hidden_run_dir(run_dir)
+        if run_dir.exists():
+            label = "run" if hidden else f"run {run_dir}"
+            raise LedgerError(f"{label} already exists; resume it or choose another run id")
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        prefix = ".rbench." if hidden else f".{run_id}."
+        tmp = Path(tempfile.mkdtemp(dir=runs_dir, prefix=prefix, suffix=".tmp"))
+        if hidden:
+            # An ignore rule for the final directory may leave its staging sibling visible.
+            _check_hidden_run_dir(tmp)
         atomic_write(tmp / PLAN_FILE, dump_json(dataclasses.asdict(plan)))
         atomic_write(tmp / LOCK_FILE, b"")
         (tmp / TRIALS_DIR).mkdir(mode=0o700)
@@ -533,8 +558,11 @@ def create_run(runs_dir: Path, run_id: str, plan: Plan) -> Path:
             set_state(trial_dir, "pending")
         # Fails if another runner created the same run meanwhile: the target is not empty.
         os.rename(tmp, run_dir)
-    except BaseException:
-        shutil.rmtree(tmp, ignore_errors=True)
+    except BaseException as e:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if hidden and isinstance(e, OSError):
+            raise LedgerError(f"cannot create the run with hidden tasks: {e.strerror}") from None
         raise
     return run_dir
 
@@ -643,8 +671,16 @@ def start_run(
         raise MatrixError(f"{matrix_path}: not a valid UTF-8 TOML file: {e}") from e
     engines = load_engines(engines_dir)
     matrix = parse_matrix(data, str(matrix_path), engines)
+    hidden_set = None
+    if matrix.tasks == "all":
+        try:
+            hidden_set = load_hidden_task_set(hidden_config())
+        except OSError as e:
+            raise LedgerError(f"cannot read the hidden task set: {e.strerror}") from None
     tasks_root = Path(tasks_root)
     task_sets = [load_task_set(tasks_root / s, s) for s in PUBLIC_SETS if (tasks_root / s).is_dir()]
+    if hidden_set is not None:
+        task_sets.append(hidden_set)
     core = load_core_list(tasks_root / CORE_LIST_FILE) if matrix.tasks == "core" else None
     plan = freeze_plan(
         matrix,
