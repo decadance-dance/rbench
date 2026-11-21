@@ -66,11 +66,11 @@ def test_resume_refuses_second_runner_and_names_live_holder(tmp_path: Path) -> N
 
 
 def test_resume_after_crash_recovers_only_unfinished_trials(
-    tmp_path: Path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch, capsys, stub_executor
 ) -> None:
     monkeypatch.setattr(plan_module, "CHECKOUT_ROOT", tmp_path)
     argv = cli_inputs(tmp_path)
-    assert main([*argv, "--run-id", "crashed"]) == ExitCode.ERROR
+    assert main([*argv, "--run-id", "crashed"]) == ExitCode.OK
     capsys.readouterr()
     run_dir = tmp_path / "runs" / "crashed"
     plan = load_plan(run_dir)
@@ -112,12 +112,12 @@ with run_lock(Path(sys.argv[1])):
     checkpoints = [done / FINDINGS_FILE, done / USAGE_FILE]
     checkpoints.extend(d / STATUS_FILE for d in trial_dirs[1:])
     before = {p: p.read_bytes() for p in checkpoints}
-    assert main(["resume", str(run_dir)]) == ExitCode.ERROR
+    assert main(["resume", str(run_dir)]) == ExitCode.OK
     out, err = capsys.readouterr()
     assert f"recovered stale run lock from pid {holder['pid']} on {holder['host']}" in err
     assert "continues with its frozen plan" in err
-    assert "3 trials ready to rerun" in out
-    assert "rbench resume: the trial executor is not implemented yet" in err
+    assert "3 trials to run" in out
+    assert stub_executor.queues[-1] == [running.name, interrupted.name, pending.name]
     assert load_plan(run_dir) == plan
     assert read_status(running).state == "interrupted"
     assert stat.S_IMODE((running / STATUS_FILE).stat().st_mode) == 0o600
@@ -148,7 +148,9 @@ def test_resume_refuses_unreadable_trial_status_before_changing_trials(
 
 
 @pytest.mark.parametrize("format_version", [1, 0])
-def test_resume_checks_previous_ledger_format(tmp_path: Path, capsys, format_version: int) -> None:
+def test_resume_checks_previous_ledger_format(
+    tmp_path: Path, capsys, format_version: int, stub_executor
+) -> None:
     run_dir, plan = plan_json(tmp_path)
     assert plan["format"] == 1  # The format shipped by the previous ledger writer.
     (run_dir / PLAN_FILE).write_text(json.dumps(plan | {"format": format_version}))
@@ -159,8 +161,7 @@ def test_resume_checks_previous_ledger_format(tmp_path: Path, capsys, format_ver
     exit_code = main(["resume", str(run_dir)])
     _, err = capsys.readouterr()
     if format_version == 1:
-        assert exit_code == ExitCode.ERROR
-        assert "the trial executor is not implemented yet" in err
+        assert exit_code == ExitCode.OK
         assert read_status(trial_dir).state == "interrupted"
     else:
         assert exit_code == ExitCode.ERROR
@@ -194,7 +195,7 @@ def test_resume_refuses_remote_holder_even_when_local_lock_is_free(tmp_path: Pat
 @pytest.mark.parametrize("operation", ["read", "write"])
 def test_resume_errors_omit_hidden_trial_id(full_inputs, monkeypatch, capsys, operation) -> None:
     checkout, argv, task = full_inputs
-    assert main(argv) == ExitCode.ERROR
+    assert main(argv) == ExitCode.OK
     capsys.readouterr()
     run_dir = checkout / "runs" / "fixture"
     trial = next(t for t in load_plan(run_dir).trials if t.task == task.name)

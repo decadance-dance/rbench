@@ -1,5 +1,7 @@
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,7 @@ from rbench.trial import (
     build_proxy_image,
     compose_spec,
     image_id,
+    images,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +63,65 @@ def test_agent_image_pins_versions_and_reads_them_back(fake_bin):
         ["run", "--rm", "--network", "none", AGENT_ID, "/usr/local/bin/claude", "--version"],
         ["run", "--rm", "--network", "none", AGENT_ID, "/usr/local/bin/codex", "--version"],
     ]
+
+
+PLUGIN = ("https://github.com/example/plugin", "c" * 40, "1.2.0")
+YQ = "yq (https://github.com/mikefarah/yq/) version v4.44.3\n"
+
+
+def plugin_answers(fake_bin, listing="plugin plugin 1.2.0\n", yq=YQ):
+    fake_bin.scenario("docker", replies=[
+        {"match": "build ", "stdout": AGENT_ID + "\n"},
+        {"match": "claude --version", "stdout": "2.1.316 (Claude Code)\n"},
+        {"match": "/opt/rbench/plugins", "stdout": listing},
+        {"match": "yq --version", "stdout": yq},
+    ])  # fmt: skip
+
+
+def test_agent_image_installs_the_plugin_at_its_commit_and_reads_it_back(fake_bin):
+    plugin_answers(fake_bin)
+
+    assert build_agent_image({"claude": "2.1.316"}, plugin=PLUGIN).clis == {"claude": "2.1.316"}
+
+    build, _, listing, yq = [call["argv"] for call in fake_bin.calls()]
+    assert build[3] == f"rbench-agent:claude-2.1.316-plugin-{'c' * 12}"
+    assert "PLUGIN_REPO=https://github.com/example/plugin" in build
+    assert f"PLUGIN_COMMIT={'c' * 40}" in build
+    assert listing[:6] == ["run", "--rm", "--network", "none", AGENT_ID, "node"]
+    assert listing[-1] == "/opt/rbench/plugins"
+    assert yq == ["run", "--rm", "--network", "none", AGENT_ID, "/usr/local/bin/yq", "--version"]
+
+
+@pytest.mark.parametrize(
+    ("answers", "message"),
+    [
+        ({"listing": ""}, "expected one plugin"),
+        ({"listing": "plugin plugin 1.2.0\nother other 1.0.0\n"}, "expected one plugin"),
+        ({"listing": "dir plugin 1.2.0\n"}, "expected one plugin"),
+        ({"listing": "plugin plugin 1.3.0\n"}, "expected plugin plugin 1.2.0, the image has 1.3.0"),
+        ({"yq": "yq 3.4.1\n"}, "expected 'yq"),
+    ],
+)  # fmt: skip
+def test_agent_image_refuses_another_plugin_or_yq_inside(fake_bin, answers, message):
+    plugin_answers(fake_bin, **answers)
+
+    with pytest.raises(TrialError, match=message):
+        build_agent_image({"claude": "2.1.316"}, plugin=PLUGIN)
+
+
+@pytest.mark.parametrize(
+    "plugin",
+    [
+        ("git@github.com:example/plugin", "c" * 40, "1.2.0"),
+        ("https://github.com/example/plugin --upload-pack=x", "c" * 40, "1.2.0"),
+        ("https://github.com/example/plugin", "main", "1.2.0"),
+        ("https://github.com/example/plugin", "c" * 40, "latest"),
+    ],
+)
+def test_agent_image_checks_the_plugin_before_docker(fake_bin, plugin):
+    with pytest.raises((TrialError, FloatingRefError)):
+        build_agent_image({"claude": "2.1.316"}, plugin=plugin)
+    assert fake_bin.calls() == []
 
 
 def test_agent_image_installs_only_declared_clis(fake_bin):
@@ -377,3 +439,20 @@ def test_agent_build_context_holds_only_the_image_and_its_policy():
     # A COPY --from takes from a build stage, not from the context.
     copies = re.findall(r"^COPY (?!--from).*? (\S+) \S+$", dockerfile, re.MULTILINE)
     assert copies == ["gh", "managed-settings.json", "requirements.toml", "lib/"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_plugin_listing_skips_the_codex_marketplace(tmp_path: Path):
+    plugin = tmp_path / "plugin" / ".claude-plugin"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text('{"name": "plugin", "version": "1.2.0"}')
+    (tmp_path / ".agents" / "plugins").mkdir(parents=True)  # the local Codex marketplace
+
+    done = subprocess.run(
+        ["node", "-e", images._PLUGINS_SCRIPT, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert done.stdout == "plugin plugin 1.2.0\n"

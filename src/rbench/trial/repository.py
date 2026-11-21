@@ -178,10 +178,11 @@ def prepare_repository(
 
 
 def agent_runner(project: TrialProject, where: str) -> Runner:
-    """A `Runner` in the trial's agent container."""
+    """A `Runner` in the trial's agent container. Its errors give the command and its exit
+    status, never its stderr: after the engine ran, the container's output is the engine's."""
 
     def run(argv: list[str]) -> str:
-        return _stdout(project.exec_agent(argv), argv, where)
+        return _stdout(project.exec_agent(argv), argv, where, quote=False)
 
     return run
 
@@ -214,11 +215,16 @@ def _take_comments(copied: Path, dest: Path) -> list[Path]:
     return [path for _, path in sorted(kept)]
 
 
-def _stdout(result: subprocess.CompletedProcess[str], argv: list[str], where: str) -> str:
+def _stdout(
+    result: subprocess.CompletedProcess[str], argv: list[str], where: str, quote: bool = True
+) -> str:
     if result.returncode != 0:
-        detail = result.stderr.strip().splitlines()[-1:] or ["no output"]
         command = " ".join(argv[:4])
-        raise RepositoryError(f"{where}: {command} exited {result.returncode}: {detail[0]}")
+        message = f"{where}: {command} exited {result.returncode}"
+        if quote:
+            detail = result.stderr.strip().splitlines()[-1:] or ["no output"]
+            message += f": {detail[0]}"
+        raise RepositoryError(message)
     return result.stdout
 
 

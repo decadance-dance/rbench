@@ -1,0 +1,7 @@
+# Written by rbench to .review-council/config.local.yml in the reviewed checkout of every
+# review-council trial (design D13). Only the Claude side and the Codex side review: the Google
+# and Perplexity seats are off. No reviewer model is set here: the Claude side's comes from the
+# session flags, the Codex side's from the trial's config.toml.
+reviewers:
+  google: { enabled: false }
+  perplexity: { enabled: false }

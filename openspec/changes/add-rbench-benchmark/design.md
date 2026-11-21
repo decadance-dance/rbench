@@ -258,6 +258,31 @@ server or build step, and opens from disk as the spec requires.
     executor (#55) gives each trial a name unique to the run and the trial on the Docker daemon,
     stable across its retries, and reuses a name only while it holds the run's lock. A trial id
     alone is unique only within its plan, so two runs could otherwise stop each other's trials.
+    The name is `rbench-` and the first 16 hex digits of the SHA-256 of the run's identity and the
+    trial id, so no task id reaches the daemon. The identity is 32 random hex digits in the run
+    directory's `identity` file (D8), written when the run is created, or under the lock before
+    the first trial of a run created without one: neither another client using the same path nor
+    a move of the run directory changes the names. `rbench run` takes the lock before the new run
+    directory is renamed into place; `run` and `resume` then list the daemon's compose projects
+    and remove every one named for a trial of the run before any trial starts.
+  - The engine runs under coreutils `timeout` inside the agent: on the limit, the engine's process
+    group gets TERM and, 30 seconds later, KILL, so the shims still log each CLI's exit before
+    the audit reads the log. A shell wrapper runs `timeout -v` with `timeout`'s own stderr in a
+    file and the engine's on the real stderr, and ends stderr with its own line: the outcome and
+    the status. The outcome is `timeout` when `timeout` reported sending a signal (the trial is
+    `failed` with reason `timeout`), `start` when the engine is not an executable on `PATH` or
+    `timeout` reported failing to run it (an infrastructure error), and `exit` otherwise, the
+    engine's own status, 124 included. With no such line, the launch never completed in the
+    agent: an infrastructure error too. The host waits for `docker compose exec` at most the
+    limit plus 90 seconds, and for `docker compose down` at most 120 seconds, then treats the
+    call as an infrastructure error.
+  - A Codex trial holds an exclusive `flock` on its login home directory from before its project
+    starts until it is removed, so trials of any runner on the host that share the login run one
+    after the other. An agent that mounts a login carries the label `rbench.codex-login`, a hash
+    of the login's path. Under the lock, before it starts, a trial lists running agents with
+    that label: another project's agent means a runner died or failed to remove its project
+    while that agent may still hold the login, so the run stops and names that project, which
+    its own run removes.
 
 **Alternatives considered:**
 - *Anthropic's devcontainer firewall (iptables).* It allows GitHub and port 22, and resolves domains
@@ -672,6 +697,7 @@ not always visible.
 **Choice.** `runs/<run-id>/` holds:
 - `plan.json`;
 - `ledger.lock`;
+- `identity`, random hex that names the run's compose projects (D3);
 - one directory per trial with `status.json`, `findings.json`, `usage.json` and `raw/`;
 - `judge/`.
 
@@ -940,11 +966,90 @@ measure a different task from the engines, which all read the repository.
   record has
   `payload.type = "item_completed"` and `payload.item.type = "ExitedReviewMode"`. The
   `payload.item.review_output` holds the findings with priority and file/line ranges.
+- `codex-review` is a structured engine: each finding of `review_output` (0.171.0
+  `ReviewFinding`) has a file and a line range, so it becomes a finding without the D9 step. The
+  adapter (#49, `rbench.engines.codex_review`) makes `absolute_file_path` relative to the
+  checkout, takes `line_range` as the lines, the title and body as the message, and `P<priority>`
+  as the engine's own label. The result is read from the rollout of the one root thread the launch
+  bound: the collected rollout whose session_meta names no `parent_thread_id` (the review thread
+  names its parent at the top level, with source `subagent: review`). The result must have the
+  pinned `ReviewOutputEvent` shape, with no key repeated in its rollout line; a finding outside
+  the checkout, a priority outside 0 to 3 or a bad range rejects the result whole. The launch
+  check reads the argv the CLI got (only the D5 policy flags added) and the working directory
+  `/rbench/repo`. A `review_output` that is null (an aborted review), or Codex's
+  fallback for a reviewer answer it cannot parse as JSON (no findings and an empty
+  `overall_correctness`, the text kept in `overall_explanation`), fails the trial instead of
+  scoring zero findings. The parent thread (`-m`) and the review thread (`review_model`) both
+  request the role's model and effort; #46 records what applied to each.
 - review-council: the Claude side is the main session (orchestrator and judge) plus the subagents
   `reviewer-claude`, `reviewer-security` and the Claude verifier, all `model: inherit`, so the
   session's `--model` and `--effort` set them. The Codex side is the Codex reviewer and verifier,
   set only through `config.toml`. The Google and Perplexity seats are disabled in
   `.review-council/config.local.yml`.
+  - The adapter (#51, `rbench.engines.review_council`) pins version 0.14.0 to the source of
+    `deployhq/review-council` at `c9a73575503c12277cd46409c7cbdbe452e7c582` (its `plugin.json`
+    says 0.14.0; spike #25 ran it). Its roles are `claude_side` (delivery by flag) and
+    `codex_side` (delivery by config). The trial's shim settings carry only the Claude model and
+    effort, and `config.toml` carries `model` and `model_reasoning_effort` for Codex.
+  - The launch is `claude -p "/review-council:run" --plugin-dir /opt/rbench/plugins/review-council
+    --setting-sources user --allowedTools "Bash Read Grep Glob Agent Skill Write" --output-format
+    stream-json --verbose`, spike #25's, without the PR number: the plugin then finds the PR of
+    the current branch with `gh pr view`, which the gh stub answers. The report is the session's
+    last main-session text, the final `result` included, that holds the pinned report heading
+    `## Review Council Report` with a report after it, from that heading on: Markdown for the D9
+    step. The skill may go on after the report, so a session with no such text, a malformed or
+    ambiguous stream-json event (a repeated key, a truncated line, `NaN` or an infinity) or a
+    `result` that is not the last event is `failed`.
+  - review-council runs as a fresh install: the adapter owns the whole `.review-council/` state
+    the pinned skill reads from the checkout (`config.yml` an empty mapping, `config.local.yml`
+    ours, `learnings.md` empty), written before the launch and replacing committed copies in the
+    work tree only. The trial home's git ignore file hides them while untracked, and the adapter's
+    `prepare_checkout` marks tracked ones skip-worktree, so `git status` and `git diff` show the
+    commits as they are. Limits, each refused as `misconfigured` before the engine starts, with a
+    reason that names the path only: a committed symlink at `.review-council` or at one of the
+    three files, or a directory where a file goes (`check_checkout`, before any write), and a
+    committed ignore rule that negates the trial's, so that `git status` still shows a file
+    (`prepare_checkout`). review-council's config reader ignores both config files without
+    mikefarah yq v4, so the agent image installs a pinned yq with every plugin
+    (`build_agent_image(plugin=...)`, which fetches the plugin by its exact commit into
+    `/opt/rbench/plugins/<name>` and reads its `plugin.json` version back).
+  - Adapter checkout hooks: an adapter may define `check_checkout(run)` and
+    `prepare_checkout(run)`; the executor calls them with `repository.agent_runner`, the first
+    before writing any of `Launch.files`, the second after writing them and before the engine
+    starts. Each returns the reasons that make the trial `misconfigured`; on any, the executor
+    writes nothing more and does not start the engine. They must be idempotent and touch nothing
+    but the adapter's own paths.
+  - `misconfigured`: the shim log shows a Codex session launch with its own model, effort or
+    profile, or `--ignore-user-config` (config.toml then did not apply), a rewrite other than the
+    sandbox, or a Claude session without the Claude side's `--model` and `--effort`; and a
+    session whose applied model (#46) differs from its side's, Codex's default model included.
+- `ponytail-review` is pinned by the plugin's release, 5.3.3 (tag `v5.3.3` = commit
+  `7801d061243d7b753bad0e0b3c057cd250b11755` of `https://github.com/DietrichGebert/ponytail`). The
+  adapter records the release, its tag and commit; a version it does not know is refused, and a
+  floating one (`latest`, a range) fails the declaration. The image holds the plugin at that commit
+  in `/opt/rbench/plugins/ponytail`, and its plugin stage also writes the local Codex marketplace
+  `/opt/rbench/plugins/.agents/plugins/marketplace.json` (name `rbench`, one local entry
+  `./<name>`), so the image digest covers it and the trial cannot change it. One `reviewer` role; its model picks the CLI and the shims add
+  its model and effort. The request reviews the trial's PR, which the `gh` stub answers for, and
+  goes on stdin:
+  - Claude Code: `claude -p --plugin-dir /opt/rbench/plugins/ponytail --permission-mode
+    bypassPermissions --output-format json` with `/ponytail:ponytail-review PR #<n>`. The review is
+    the result's text.
+  - Codex: first `codex plugin marketplace add /opt/rbench/plugins` and `codex plugin add
+    ponytail@rbench`, which install the plugin from the image's local marketplace into the trial's
+    `CODEX_HOME` with no network (D5, Plugins at the pin), then `codex exec --sandbox
+    danger-full-access --json --output-last-message <file> -` with `$ponytail:ponytail-review PR
+    #<n>`. The review is that file, once the CLI exits with status 0 and its `--json` events show a
+    completed turn with its token usage and no failed one. A top-level `error` event alone fails
+    nothing: Codex 0.171.0 emits it also for an error it retries, and only the exit status tells the
+    two apart. The events are split on LF only, since a JSON string may hold U+2028. An empty file
+    with no completed agent message is the CLI's placeholder for no last message, and fails the
+    trial; a blank last message is a blank review.
+  - On Claude Code the session also exits with status 0, and each `modelUsage` entry of the
+    `success` result has its token counts.
+  - Both reviews are Markdown and go through D9's normalizer. The trial home does not pre-trust
+    the plugin's Codex lifecycle hooks, so Codex skips them as untrusted and its variant runs the
+    review skill without them, while Claude Code runs them (see Risks).
 - rreview: the panel roles `intent_contracts`, `reliability` and `security` run on Codex with one
   model for the whole panel; the coordinator runs on Claude Code; the judge runs on Codex, because
   rreview refuses a coordinator and judge of the same family.
@@ -1282,8 +1387,10 @@ comes from the `maintainer`.
   plugin's install notes have the user trust its hooks in the Codex TUI (`/hooks`). The fresh
   trial's transcript showed no hook output, so the engine ran its skill without them. The hooks did
   run on Claude Code. Headless `exec` has hook-trust handling of its own, so this run leaves open
-  what happens once the pinned plugin's hooks are trusted. Whether the trial home pre-trusts them is
-  open for the engine's adapter.
+  what happens once the pinned plugin's hooks are trusted. The adapter (#77) does not pre-trust
+  them: `ponytail-review` on Codex runs its review skill without the hooks that run on Claude Code,
+  a known difference between its two variants. Deciding and implementing hook trust is #125;
+  verifying it in the smoke stage is #60.
 - **[The judge prefers its own model family.]** → The judge is blind to the engine, and a second
   judge from the other family labels a sample (O1).
 - **[Ground truth for our PRs is incomplete or produced by an engine under test.]** → Augmented

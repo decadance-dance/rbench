@@ -23,6 +23,18 @@ _ID = re.compile(r"sha256:[0-9a-f]{64}")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 # All that `<cli> --version` prints, e.g. "2.1.316 (Claude Code)" and "codex-cli 0.171.0".
 _VERSION_OUTPUT = {"claude": "{} (Claude Code)", "codex": "codex-cli {}", "rreview": "rreview {}"}
+_PLUGIN_REPO = re.compile(r"https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+")
+PLUGINS_DIR = "/opt/rbench/plugins"
+# Prints "<dir> <name> <version>" for each installed plugin, from its .claude-plugin/plugin.json;
+# `.agents` there is the local Codex marketplace, not a plugin.
+_PLUGINS_SCRIPT = (
+    "const fs = require('fs'); const d = process.argv[1];"
+    " for (const n of fs.existsSync(d) ? fs.readdirSync(d).filter((n) => !n.startsWith('.')).sort() : []) {"
+    " const p = require(`${d}/${n}/.claude-plugin/plugin.json`);"
+    " console.log(`${n} ${p.name} ${p.version}`); }"
+)
+# The yq the Dockerfile installs with a plugin (images/agent/Dockerfile).
+_YQ_OUTPUT = "yq (https://github.com/mikefarah/yq/) version v4.44.3"
 # The variable that carries the Claude token into a trial (spec trial-isolation, Credentials).
 CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 REDACTED = "<redacted>"
@@ -52,11 +64,13 @@ def docker(
     what: str,
     env: Mapping[str, str] | None = None,
     secrets: Iterable[str] = (),
+    timeout: float | None = None,
 ) -> str:
     """Run `docker <argv>` and return its stdout; raise `TrialError` naming `what` on failure.
 
     `env` is docker's whole environment, `host_env()` by default. `secrets` are redacted from the
-    diagnostics an error carries.
+    diagnostics an error carries. With `timeout`, a call still running after that many seconds is
+    killed and refused.
     """
     secrets = tuple(secrets)
     try:
@@ -68,7 +82,10 @@ def docker(
             errors="replace",
             stdin=subprocess.DEVNULL,
             env=dict(env) if env is not None else host_env(),
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired:
+        raise TrialError(f"{what}: docker {argv[0]} did not return within {timeout:g}s") from None
     except OSError as e:
         raise TrialError(redact(f"{what}: cannot run docker: {e}", secrets)) from None
     if result.returncode != 0:
@@ -100,15 +117,18 @@ def build_agent_image(
     clis: dict[str, str],
     images_dir: Path = IMAGES_DIR,
     tag: str | None = None,
+    plugin: tuple[str, str, str] | None = None,
     rreview: tuple[str, str] | None = None,
 ) -> Image:
     """Build the agent image with exactly these CLI versions and read them back from it.
 
     `clis` maps each CLI the engine declares to its exact version; a CLI not in it is not
-    installed. `rreview` is the (commit, release) of rreview to build into the image, for the
-    rreview engine (`rbench.engines.rreview.RELEASES`); None installs no rreview. The result is
-    what the ledger pins for an engine. `tag` replaces the default tag, which names the CLI
-    versions; the reference is the digest either way.
+    installed. `plugin` is the (https repository, commit, version) of the engine's Claude Code
+    plugin: the image holds that commit in `/opt/rbench/plugins/<name>` (with yq), and its
+    `plugin.json` must give that version. `rreview` is the (commit, release) of rreview to build
+    into the image, for the rreview engine (`rbench.engines.rreview.RELEASES`); None installs no
+    rreview. The result is what the ledger pins for an engine. `tag` replaces the default tag,
+    which names the CLI versions (and the plugin's commit); the reference is the digest either way.
     """
     if not (isinstance(clis, dict) and clis):
         raise TrialError("agent image: clis must name at least one CLI")
@@ -127,7 +147,19 @@ def build_agent_image(
         build_args["RREVIEW_COMMIT"] = commit
         versions["rreview"] = release
     # Docker tags allow [A-Za-z0-9_.-]; SemVer build metadata uses "+".
-    tag = tag or "-".join(f"{name}-{versions[name]}" for name in sorted(versions)).replace("+", "_")
+    default_tag = "-".join(f"{name}-{versions[name]}" for name in sorted(versions)).replace(
+        "+", "_"
+    )
+    if plugin is not None:
+        repo, commit, version = plugin
+        if not (isinstance(repo, str) and _PLUGIN_REPO.fullmatch(repo)):
+            raise TrialError(f"agent image: plugin repository {repo!r} is not an https URL")
+        if not (isinstance(commit, str) and _COMMIT.fullmatch(commit)):
+            raise TrialError(f"agent image: plugin commit {commit!r} is not a full commit id")
+        check_ref("agent image", "version", version, "plugin version")
+        build_args |= {"PLUGIN_REPO": repo, "PLUGIN_COMMIT": commit}
+        tag = tag or f"{default_tag}-plugin-{commit[:12]}"
+    tag = tag or default_tag
     ref = _build(AGENT_NAME, tag, images_dir / "agent", build_args)
     for name, version in sorted(versions.items()):
         what = f"reading the {name} version in {ref}"
@@ -138,7 +170,27 @@ def build_agent_image(
         )
         if out.strip() != _VERSION_OUTPUT[name].format(version):
             raise TrialError(f"{ref}: expected {name} {version}, the image reports {out.strip()!r}")
+    if plugin is not None:
+        _check_plugin(ref, plugin[2])
     return Image(ref, dict(clis))
+
+
+def _check_plugin(ref: str, version: str) -> None:
+    """The built image holds one plugin, of `version`, in a directory named as the plugin, and
+    the pinned yq."""
+    run = ("run", "--rm", "--network", "none", image_id(ref))
+    what = f"reading the plugin in {ref}"
+    found = docker(*run, "node", "-e", _PLUGINS_SCRIPT, PLUGINS_DIR, what=what).split("\n")
+    plugins = [line.split(" ") for line in found if line]
+    if len(plugins) != 1 or len(plugins[0]) != 3 or plugins[0][0] != plugins[0][1]:
+        raise TrialError(f"{ref}: expected one plugin in {PLUGINS_DIR}, found {found!r}")
+    if plugins[0][2] != version:
+        raise TrialError(
+            f"{ref}: expected plugin {plugins[0][1]} {version}, the image has {plugins[0][2]}"
+        )
+    out = docker(*run, "/usr/local/bin/yq", "--version", what=f"reading the yq version in {ref}")
+    if out.strip() != _YQ_OUTPUT:
+        raise TrialError(f"{ref}: expected {_YQ_OUTPUT!r}, the image reports {out.strip()!r}")
 
 
 def build_proxy_image(images_dir: Path = IMAGES_DIR, tag: str = "latest") -> str:

@@ -880,23 +880,23 @@ def cli_inputs(root: Path, images: dict | None = None) -> list[str]:
     ]
 
 
-def test_run_creates_the_run_and_stops_before_executing(
-    checkout: Path, monkeypatch, capsys
+def test_run_creates_the_run_and_executes_its_trials(
+    checkout: Path, monkeypatch, capsys, stub_executor
 ) -> None:
     monkeypatch.setenv(HIDDEN_DIR_ENV, str(checkout / "nonexistent"))
     argv = cli_inputs(checkout)
 
-    assert main([*argv, "--run-id", "smoke-1"]) == ExitCode.ERROR
-    out, err = capsys.readouterr()
+    assert main([*argv, "--run-id", "smoke-1"]) == ExitCode.OK
+    out, _ = capsys.readouterr()
     assert "runs/smoke-1: 6 trials pending" in out
-    assert "the trial executor is not implemented yet" in err
+    assert stub_executor.queues == [[t.id for t in load_plan(checkout / "runs" / "smoke-1").trials]]
     plan = load_plan(checkout / "runs" / "smoke-1")
     assert len(plan.trials) == 2 * 3
     assert plan.matrix.path == "matrices/m.toml"
     assert plan.matrix.sha256 == hashlib.sha256(MATRIX_TOML.encode()).hexdigest()
     assert str(checkout) not in (checkout / "runs" / "smoke-1" / PLAN_FILE).read_text()
 
-    assert main(argv) == ExitCode.ERROR  # default run id: UTC time, stage and round
+    assert main(argv) == ExitCode.OK  # default run id: UTC time, stage and round
     names = sorted(p.name for p in (checkout / "runs").iterdir())
     assert len(names) == 2 and names[0].endswith("Z-screening-r1") and names[1] == "smoke-1"
 
@@ -983,13 +983,14 @@ def assert_private_output(output: str, task: Path, *, includes_id: bool = False)
         assert task.name not in output
 
 
-def test_full_run_freezes_hidden_task_in_ignored_results(full_inputs, capsys) -> None:
+def test_full_run_freezes_hidden_task_in_ignored_results(
+    full_inputs, capsys, stub_executor
+) -> None:
     checkout, argv, task = full_inputs
 
-    assert main(argv) == ExitCode.ERROR  # The executor is still pending.
+    assert main(argv) == ExitCode.OK
     out, err = capsys.readouterr()
     assert "30 trials pending" in out
-    assert "the trial executor is not implemented yet" in err
     assert_private_output(out + err, task)
 
     run_dir = checkout / "runs" / "fixture"

@@ -21,7 +21,10 @@ extend-include = ["tests/fixtures/bin/fake"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["live: needs Docker, real claude or codex logins or the network; run with RBENCH_LIVE=1"]
+markers = [
+    "live: needs Docker, real claude or codex logins or the network; run with RBENCH_LIVE=1",
+    "real_executor: runs `rbench run` and `rbench resume` with the trial executor, not the stub",
+]
 
 [dependency-groups]
 dev = [

@@ -47,6 +47,46 @@ RUN set -eu; if [ -n "$RREVIEW_COMMIT" ]; then \
         && dpkg-query -W -f '${Version}\n' zsh > /opt/rbench/zsh.version; \
     fi
 
+# The engine's Claude Code plugin at the commit its declaration pins (design D5, Plugins at the
+# pin), fetched by that exact commit, without its history, into /opt/rbench/plugins/<name>, the
+# name from its .claude-plugin/plugin.json; root-owned and read-only to the trial. With it comes
+# mikefarah yq 4.44.3, checked by SHA-256: a plugin may read YAML config with it (review-council
+# ignores its config files without it). /opt/rbench/plugins is also a local Codex marketplace,
+# named rbench, listing the plugin, so a trial installs it into CODEX_HOME offline instead of from
+# the plugin's own marketplace, which follows its default branch. An empty PLUGIN_COMMIT installs
+# none of them.
+ARG PLUGIN_REPO=
+ARG PLUGIN_COMMIT=
+ARG TARGETARCH
+RUN set -eu; if [ -n "$PLUGIN_COMMIT" ]; then \
+        src=$(mktemp -d); \
+        git -C "$src" init -q; \
+        git -C "$src" fetch -q --depth 1 "$PLUGIN_REPO" "$PLUGIN_COMMIT"; \
+        git -C "$src" checkout -q FETCH_HEAD; \
+        test "$(git -C "$src" rev-parse HEAD)" = "$PLUGIN_COMMIT"; \
+        name=$(node -p 'require(process.argv[1]).name' "$src/.claude-plugin/plugin.json"); \
+        echo "$name" | grep -Eqx '[a-z0-9][a-z0-9-]*'; \
+        rm -rf "$src/.git"; \
+        install -d -m 0755 /opt/rbench/plugins; \
+        cp -R "$src" "/opt/rbench/plugins/$name"; \
+        rm -rf "$src"; \
+        chown -R root:root "/opt/rbench/plugins/$name"; \
+        chmod -R u+rwX,go+rX,go-w "/opt/rbench/plugins/$name"; \
+        install -d -m 0755 /opt/rbench/plugins/.agents/plugins; \
+        printf '{"name": "rbench", "plugins": [{"name": "%s", "source": {"source": "local", "path": "./%s"}, "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"}}]}\n' \
+            "$name" "$name" > /opt/rbench/plugins/.agents/plugins/marketplace.json; \
+        chmod 0644 /opt/rbench/plugins/.agents/plugins/marketplace.json; \
+        case "$TARGETARCH" in \
+            arm64) sum=0e7e1524f68d91b3ff9b089872d185940ab0fa020a5a9052046ef10547023156 ;; \
+            amd64) sum=a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7 ;; \
+            *) echo "no pinned yq for $TARGETARCH" >&2; exit 1 ;; \
+        esac; \
+        curl -fsSL -o /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_$TARGETARCH"; \
+        echo "$sum  /usr/local/bin/yq" | sha256sum -c -; \
+        chmod 0755 /usr/local/bin/yq; \
+    fi
+
 # The gh stub (design D4): answers PR lookups from the trial's frozen PR, sends nothing anywhere.
 COPY --chmod=755 gh /usr/local/bin/gh
 
