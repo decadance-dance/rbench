@@ -39,6 +39,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rbench.engines import normalization
 from rbench.engines.declaration import CLIS, Engine, Setting
 from rbench.engines.pins import MODELS
 from rbench.engines.plain import NAME as PLAIN
@@ -72,6 +73,7 @@ class Configuration:
     version: str
     roles: tuple[tuple[str, RoleSetting], ...]  # every role of the engine, sorted by name
     inputs: tuple[tuple[str, str], ...] = ()  # sorted; `Engine.inputs_for` its providers
+    markdown: bool = False  # the engine's output goes through the normalization step
     id: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -87,9 +89,14 @@ class Configuration:
         - for `plain`, the version is its prompt hash, and `inputs` holds the findings schema
           hash and, for a Codex model, the model catalog hash (design D12); an engine without
           inputs has no `inputs` key, so its ids do not depend on this field.
+
+        A Markdown engine's settings also hold the normalization step's pin, so a new normalizer
+        model or prompt gives new ids; a structured engine's do not.
         """
         roles = {r: {"models": list(s.models), "effort": s.effort} for r, s in self.roles}
         settings = {"engine": self.engine, "version": self.version, "roles": roles}
+        if self.markdown:
+            settings["normalization"] = dict(normalization.SETTINGS)
         return settings | ({"inputs": dict(self.inputs)} if self.inputs else {})
 
     @property
@@ -110,8 +117,15 @@ class Configuration:
 
     @property
     def providers(self) -> frozenset[str]:
-        """The CLIs its models run on; a round's budget must cover each."""
+        """The CLIs its models run on, which its engine tokens are on."""
         return frozenset(MODELS[m] for _, s in self.roles for m in s.models)
+
+    @property
+    def budget_providers(self) -> frozenset[str]:
+        """The CLIs a trial spends on: its models' and, for a Markdown engine, the normalizer's.
+        A round's budget covers each; engine estimates use `providers` alone."""
+        extra = {MODELS[normalization.MODEL]} if self.markdown else set()
+        return self.providers | extra
 
 
 @dataclass(frozen=True)
@@ -193,7 +207,13 @@ def configuration(engine: Engine, roles: Sequence[tuple[str, RoleSetting]]) -> C
     """The configuration of `engine` with these role settings (sorted by role), with the input
     hashes of the CLIs its models run on."""
     clis = {MODELS[m] for _, s in roles for m in s.models}
-    return Configuration(engine.name, engine.version, tuple(roles), engine.inputs_for(clis))
+    return Configuration(
+        engine.name,
+        engine.version,
+        tuple(roles),
+        engine.inputs_for(clis),
+        markdown=engine.output == "markdown",
+    )
 
 
 def _default(engine: Engine) -> Configuration:
@@ -309,7 +329,7 @@ def parse_matrix(data: object, source: str, engines: Mapping[str, Engine]) -> Ma
                     raise MatrixError(f"{where}: configuration {c.id} repeats {seen[c.id]}")
                 seen[c.id] = where
                 configurations.append(c)
-        used = frozenset().union(*(c.providers for c in configurations))
+        used = frozenset().union(*(c.budget_providers for c in configurations))
         budget = _budget(raw["budget"], f"{at}: budget", used)
         rounds.append(Round(name, budget, tuple(configurations)))
     if stage == "smoke":
