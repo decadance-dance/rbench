@@ -205,9 +205,11 @@ def _title_and_body(pr: PullRequest) -> tuple[str, str] | str:
     from an outage.
     """
     owner, name = pr.nwo.split("/")
-    pull = _gh_object(["api", f"repos/{pr.nwo}/pulls/{pr.number}"], pr)
-    commit = _gh_object(["api", f"repos/{pr.nwo}/commits/{pr.head}"], pr)
-    pages = _gh(["api", "--paginate", "--slurp", f"repos/{pr.nwo}/issues/{pr.number}/timeline"], pr)
+    pull = _gh_object(["api", f"repos/{pr.nwo}/pulls/{pr.number}"], pr.key)
+    commit = _gh_object(["api", f"repos/{pr.nwo}/commits/{pr.head}"], pr.key)
+    pages = _gh(
+        ["api", "--paginate", "--slurp", f"repos/{pr.nwo}/issues/{pr.number}/timeline"], pr.key
+    )
     edits = _gh_object(
         [
             "api",
@@ -221,7 +223,7 @@ def _title_and_body(pr: PullRequest) -> tuple[str, str] | str:
             "-F",
             f"number={pr.number}",
         ],
-        pr,
+        pr.key,
     )
     try:
         start = _time(commit["commit"]["committer"]["date"])
@@ -318,23 +320,24 @@ def _time(value: object) -> datetime:
     return when
 
 
-def _gh(args: list[str], pr: PullRequest) -> object:
+def _gh(args: list[str], label: str) -> object:
+    """Run `gh` with `args` and parse its JSON reply; errors start with `label` (the PR)."""
     what = "gh api " + next(a for a in args[1:] if not a.startswith("-"))
     try:
         result = subprocess.run(
             ["gh", *args], stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False
         )
     except OSError as err:
-        raise TaskImportError(f"{pr.key}: cannot run gh: {err}") from None
+        raise TaskImportError(f"{label}: cannot run gh: {err}") from None
     if result.returncode != 0:
-        raise TaskImportError(f"{pr.key}: {what} failed: {result.stderr.strip()}")
-    return _json(result.stdout.encode(), f"{pr.key}: {what}")
+        raise TaskImportError(f"{label}: {what} failed: {result.stderr.strip()}")
+    return _json(result.stdout.encode(), f"{label}: {what}")
 
 
-def _gh_object(args: list[str], pr: PullRequest) -> dict:
-    reply = _gh(args, pr)
+def _gh_object(args: list[str], label: str) -> dict:
+    reply = _gh(args, label)
     if not isinstance(reply, dict):
-        raise TaskImportError(f"{pr.key}: gh api did not return an object")
+        raise TaskImportError(f"{label}: gh api did not return an object")
     return reply
 
 

@@ -12,7 +12,7 @@ from pathlib import Path
 from rbench.ledger import TRIALS_DIR, load_plan, matrix_warning, read_status, start_run
 from rbench.ledger.resume import recover_trials, run_lock
 from rbench.plan import command as plan_command
-from rbench.tasks import release, reviewbench
+from rbench.tasks import ours, release, reviewbench
 
 
 class ExitCode(IntEnum):
@@ -42,12 +42,34 @@ TASK_COMMANDS = [
     ("fetch", "download task source archives and check them against the manifest"),
     ("release", "publish a public set version's source archives as a GitHub release"),
 ]
+# (set, help, arguments, run) of `rbench tasks import <set>`.
+IMPORTERS = [
+    (
+        "reviewbench",
+        "import the pinned ReviewBench subset",
+        reviewbench.add_arguments,
+        reviewbench.run,
+    ),
+    ("ours", "mine merged PRs of public repositories", ours.add_arguments, ours.run),
+]
+
+
+def _import_arguments(parser: argparse.ArgumentParser) -> None:
+    sets = parser.add_subparsers(dest="set", metavar="<set>", required=True)
+    for name, help_, add_arguments, _ in IMPORTERS:
+        add_arguments(sets.add_parser(name, help=help_, description=help_))
+
+
+def _import(args: argparse.Namespace) -> int:
+    return next(run for name, _, _, run in IMPORTERS if name == args.set)(args)
+
+
 TASK_ARGUMENTS = {
-    "import": reviewbench.add_arguments,
+    "import": _import_arguments,
     "fetch": release.add_fetch_arguments,
     "release": release.add_release_arguments,
 }
-TASK_RUN = {"import": reviewbench.run, "fetch": release.run_fetch, "release": release.run_release}
+TASK_RUN = {"import": _import, "fetch": release.run_fetch, "release": release.run_release}
 
 
 def build_parser() -> argparse.ArgumentParser:

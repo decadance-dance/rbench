@@ -380,8 +380,7 @@ def _blob(checkout: Path, commit: str, path: str) -> bytes:
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    """The arguments of `rbench tasks import`."""
-    parser.add_argument("set", choices=[SET], help="the task set to import")
+    """The arguments of `rbench tasks import reviewbench`."""
     parser.add_argument(
         "--checkout", type=Path, required=True, help="a local clone of review-bench/ReviewBench"
     )

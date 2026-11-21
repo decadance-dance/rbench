@@ -830,10 +830,10 @@ def test_malformed_source_or_golden_is_rejected(tmp_path: Path, change, message)
         load_task_set(set_dir, "reviewbench")
 
 
-def test_only_reviewbench_records_source_or_golden(tmp_path: Path) -> None:
+def test_ours_source_is_mined_and_only_reviewbench_records_golden(tmp_path: Path) -> None:
     set_dir = two_task_set(tmp_path)
     edit(set_dir / MANIFEST_FILE, lambda m: m.update(source=SOURCE))
-    with pytest.raises(TaskError, match=r"only the reviewbench set records 'source'"):
+    with pytest.raises(TaskError, match=r"'source': missing filters, merged_after"):
         load_task_set(set_dir, "ours")
     edit(set_dir / MANIFEST_FILE, lambda m: m.pop("source"))
     golden = {"path": "golden/t-1.json", "sha256": "b" * 64}

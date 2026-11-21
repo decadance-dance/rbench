@@ -20,6 +20,15 @@ mapped from, which is never stored itself:
                "severity_map": {"high": "must", ...}, "producer_map": {"human_review": "human", ...}}
     "tasks": {"<task-id>": {"sha256": ..., "license": ..., "golden": {"path": ..., "sha256": ...}}}
 
+The `ours` set records how it was mined instead (design D15): the repositories, the merge window,
+the filters, the severity rule and labels (spec review-tasks, Severity mapping from external sets):
+
+    "source": {"repos": ["<owner>/<name>", ...], "merged_after": "2026-07-01",
+               "merged_before": "2026-11-20", "filters": {"max_per_repo": 3, ...},
+               "severity_map": {"M": "must", "S": "should", "N": "nit"},
+               "severity_rule": {"must": "...", "should": "...", "nit": "..."},
+               "severity_labels": "rule" | "maintainer" | "rule+maintainer"}
+
 A changed `source` needs a higher version, like a changed task.
 
 Changelog entries number the versions 1 to `version`; each names the tasks it changed with
@@ -74,10 +83,23 @@ MANIFEST_OPTIONAL_KEYS = {"source"}
 MANIFEST_TASK_KEYS = {"sha256"}
 MANIFEST_TASK_OPTIONAL_KEYS = {"license", "golden"}
 SOURCE_KEYS = {"repo", "commit", "subset", "severity_map", "producer_map"}
+MINED_SOURCE_KEYS = {
+    "repos",
+    "merged_after",
+    "merged_before",
+    "filters",
+    "severity_map",
+    "severity_rule",
+    "severity_labels",
+}
+SEVERITY_LABELS = ("rule", "maintainer", "rule+maintainer")
+DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 GOLDEN_KEYS = {"path", "sha256"}
 SHA1 = re.compile(r"[0-9a-f]{40}")
-# Only this set is imported from a pinned external source.
+# Only this set is imported from a pinned external source, with a golden file per task.
 SOURCED_SETS = ("reviewbench",)
+# This set records how it was mined.
+MINED_SETS = ("ours",)
 CHANGELOG_KEYS = {"version", "note", "changed"}
 CORE_LIST_KEYS = {"version", "tasks"}
 
@@ -102,6 +124,19 @@ class SourcePin:
 
 
 @dataclass(frozen=True)
+class MinedSource:
+    """How a mined set was built: repositories, merge window, filters and severity rule."""
+
+    repos: tuple[str, ...]
+    merged_after: str
+    merged_before: str
+    filters: dict[str, int]
+    severity_map: dict[str, str]
+    severity_rule: dict[str, str]
+    severity_labels: str
+
+
+@dataclass(frozen=True)
 class ManifestTask:
     sha256: str
     license: str | None
@@ -122,7 +157,7 @@ class Manifest:
     tasks: dict[str, ManifestTask]
     changelog: tuple[ChangelogEntry, ...]
     path: Path
-    source: SourcePin | None = None
+    source: SourcePin | MinedSource | None = None
 
     def __repr__(self) -> str:
         # A hidden manifest's tasks and changelog are hidden ids, and its path is private.
@@ -524,12 +559,16 @@ def _parse_manifest(data: dict, label: str, path: Path, task_set: str) -> Manife
         )
     source = None
     if "source" in data:
-        if task_set not in SOURCED_SETS:
-            raise TaskError(f"{label}: only the {', '.join(SOURCED_SETS)} set records 'source'")
-        source = _source(data["source"], f"{label}: 'source'")
+        if task_set in MINED_SETS:
+            source = _mined_source(data["source"], f"{label}: 'source'")
+        elif task_set in SOURCED_SETS:
+            source = _source(data["source"], f"{label}: 'source'")
+        else:
+            sets = " and ".join((*SOURCED_SETS, *MINED_SETS))
+            raise TaskError(f"{label}: only the {sets} sets record 'source'")
     # A pinned source and per-task golden files only make sense together.
     for task_id, entry in tasks.items():
-        if (entry.golden is None) != (source is None):
+        if task_set in SOURCED_SETS and (entry.golden is None) != (source is None):
             need = (
                 "'golden', since the manifest has a 'source'"
                 if source
@@ -558,6 +597,48 @@ def _source(raw: object, where: str) -> SourcePin:
         subset=_tree_path(raw["subset"], f"{where}: 'subset'"),
         severity_map=severities,
         producer_map=_string_map(raw["producer_map"], f"{where}: 'producer_map'"),
+    )
+
+
+def _mined_source(raw: object, where: str) -> MinedSource:
+    if not isinstance(raw, dict):
+        raise TaskError(f"{where} must be an object")
+    _check_keys(raw, MINED_SOURCE_KEYS, set(), where)
+    repos = raw["repos"]
+    if not (
+        isinstance(repos, list)
+        and repos
+        and all(isinstance(r, str) and REPO.fullmatch(r) for r in repos)
+        and len(set(repos)) == len(repos)
+    ):
+        raise TaskError(f"{where}: 'repos' must be a non-empty list of distinct owner/name ids")
+    for key in ("merged_after", "merged_before"):
+        if not (isinstance(raw[key], str) and DATE.fullmatch(raw[key])):
+            raise TaskError(f"{where}: {key!r} must be a YYYY-MM-DD date")
+    if raw["merged_after"] >= raw["merged_before"]:
+        raise TaskError(f"{where}: 'merged_after' must be before 'merged_before'")
+    filters = raw["filters"]
+    if not (
+        isinstance(filters, dict)
+        and all(type(v) is int and v > 0 and k.strip() for k, v in filters.items())
+    ):
+        raise TaskError(f"{where}: 'filters' must map names to positive integers")
+    severities = _string_map(raw["severity_map"], f"{where}: 'severity_map'")
+    if any(value not in SEVERITIES for value in severities.values()):
+        raise TaskError(f"{where}: 'severity_map' values must be one of {', '.join(SEVERITIES)}")
+    rule = _string_map(raw["severity_rule"], f"{where}: 'severity_rule'")
+    if set(rule) != set(SEVERITIES):
+        raise TaskError(f"{where}: 'severity_rule' must have exactly {', '.join(SEVERITIES)}")
+    if raw["severity_labels"] not in SEVERITY_LABELS:
+        raise TaskError(f"{where}: 'severity_labels' must be one of {', '.join(SEVERITY_LABELS)}")
+    return MinedSource(
+        tuple(repos),
+        raw["merged_after"],
+        raw["merged_before"],
+        dict(filters),
+        severities,
+        rule,
+        raw["severity_labels"],
     )
 
 
