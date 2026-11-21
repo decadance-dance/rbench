@@ -1,0 +1,15 @@
+# Claude Code's built-in review (spec engine-configurations, Engine adapters; design D13). It ships
+# with Claude Code, so the pinned Claude Code version is the engine's version.
+name = "code-review"
+pin = { kind = "cli", ref = "claude" }
+# It reports in prose; the pinned normalization step copies its findings (design D9).
+output = "markdown"
+
+[cli]
+claude = "2.1.316"
+
+# One session on a Claude model; the shim adds its model and effort (design D5).
+[roles.reviewer]
+cli = "claude"
+delivery = "flag"
+default = { model = "claude-sonnet-5-5", effort = "high" }

@@ -164,33 +164,38 @@ def _usage(model_usage: object, where: str) -> dict[str, dict[str, int]]:
         # The pinned model must be the one that ran; a fallback is not the normalizer.
         raise NormalizationError(f"{where}: modelUsage does not show the pinned model {MODEL}")
     usage = {}
-    for model, counts in sorted(model_usage.items()):
+    # Entries are named by their sorted position: a key is model output, never quoted.
+    for i, (model, counts) in enumerate(sorted(model_usage.items())):
         if not _text(model):
-            raise NormalizationError(f"{where}: modelUsage key {model!r}: expected a model id")
+            raise NormalizationError(f"{where}: modelUsage entry {i}: expected a model id")
         if not (isinstance(counts, dict) and _USAGE.keys() <= counts.keys()):
-            raise NormalizationError(f"{where}: modelUsage of {model!r}: missing token counts")
+            raise NormalizationError(f"{where}: modelUsage entry {i}: missing token counts")
         for key in _USAGE:
             if type(counts[key]) is not int or counts[key] < 0:
-                raise NormalizationError(f"{where}: modelUsage of {model!r}: bad {key}")
+                raise NormalizationError(f"{where}: modelUsage entry {i}: bad {key}")
         usage[model] = {ours: counts[theirs] for theirs, ours in _USAGE.items()}
     return usage
 
 
 def parse_result(stdout: str, where: str) -> Normalization:
-    """Validate the `claude -p --output-format json` result of the normalizer, whole."""
+    """Validate the `claude -p --output-format json` result of the normalizer, whole. Errors
+    never quote it: the model may have copied the report."""
     # Imported here: rbench.ledger imports the matrix, which imports this module for SETTINGS.
+    from rbench.engines.plain import CLAUDE_SUBTYPES  # it imports declaration, which imports us
     from rbench.ledger.trials import no_repeated_keys
 
     try:
         result = json.loads(stdout, object_pairs_hook=no_repeated_keys)
-    except (ValueError, RecursionError) as e:
-        raise NormalizationError(f"{where}: the result is not one JSON object: {e}") from None
+    except (ValueError, RecursionError):
+        # The decoder's message for a repeated key lists the object's keys.
+        raise NormalizationError(f"{where}: the result is not one JSON object") from None
     if not isinstance(result, dict) or result.get("type") != "result":
         raise NormalizationError(f"{where}: expected a result object")
     if result.get("is_error") is not False:
-        raise NormalizationError(
-            f"{where}: the session ended in an error ({result.get('subtype')})"
-        )
+        subtype = result.get("subtype")
+        known = isinstance(subtype, str) and subtype in CLAUDE_SUBTYPES
+        ended = f"subtype {subtype}" if known else "an unknown subtype"
+        raise NormalizationError(f"{where}: the session ended in an error, with {ended}")
     answer = result.get("structured_output")
     if not (isinstance(answer, dict) and answer.keys() == {"findings", "unlocated"}):
         raise NormalizationError(f"{where}: structured_output: expected findings and unlocated")
@@ -245,6 +250,6 @@ def normalize(project: "TrialProject", report: str, trial: str) -> Normalization
     prepare(project, shim_settings({}))
     done = project.exec_agent(argv(), stdin=prompt(report))
     if done.returncode != 0:
-        detail = (done.stderr.strip().splitlines() or ["no output"])[-1]
-        raise NormalizationError(f"{where}: claude exited {done.returncode}: {detail}")
+        # Not its stderr: it may quote the report. The caller keeps the shim log and transcripts.
+        raise NormalizationError(f"{where}: claude exited {done.returncode}")
     return parse_result(done.stdout, where)

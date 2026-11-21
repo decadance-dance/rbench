@@ -216,4 +216,8 @@ def load_engine(path: Path) -> Engine:
         from rbench.engines.rreview import bind
 
         engine = bind(engine, Path(path).parent)
+    elif engine.name == "code-review":
+        from rbench.engines import code_review  # it imports this module
+
+        engine = code_review.bind(engine, str(path))
     return engine
