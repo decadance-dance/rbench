@@ -217,8 +217,11 @@ server or build step, and opens from disk as the spec requires.
   - `requirements.toml` sets allowed values, and Codex enforces them over the user `config.toml`
     and `-c` flags. With `allowed_web_search_modes = ["disabled"]`, a user `web_search = "live"`
     and `-c web_search="live"` both fell back to `disabled`, with a startup warning that names the
-    file. A `[features]` entry there pinned a feature against `--enable`. The policy also sets
-    `cli_auth_credentials_store = "file"`.
+    file. A `[features]` entry there pinned a feature against `--enable`.
+  - `requirements.toml` also sets `cli_auth_credentials_store = "file"`. This was configured, not
+    tested: no run gave it a conflicting user value. That it is enforced comes from the 0.171.0
+    source, which applies this field over `config.toml` as an exact value
+    (`codex-rs/core/src/config/requirements.rs`). `file` is also Codex's default.
   - `managed_config.toml` is still read, as a legacy file. Codex makes it the top config layer:
     its `model` beat both the user `config.toml` and `-c model=...`. It would therefore override
     the model and effort that engines set in the trial's `config.toml`, so the image does not ship
@@ -242,9 +245,11 @@ The shims never change the prompt.
 
 The trial has one `CLAUDE_CONFIG_DIR` and one `CODEX_HOME`. All processes share them. Codex uses a
 login made only for the benchmark (its own `codex login`, so its own refresh-token chain), kept in a
-login home no other tool uses. That login home holds only `auth.json`. The whole directory is
-bind-mounted read-write into the trial, and the trial's `CODEX_HOME/auth.json` is a symlink to the
-`auth.json` in it. Mounting the file alone does not work: Codex 0.171.0 replaces `auth.json` by a
+login home no other tool uses. That login home is a dedicated credential directory. It holds
+`auth.json` and the files Codex makes next to it: `auth.json.lock` and transient `.auth-*` save
+files. It holds nothing unrelated; files left by `codex login` (logs, `tmp/`) are removed. It is
+mounted as a directory, read-write, into the trial, and the trial's `CODEX_HOME/auth.json` is a
+symlink to the `auth.json` in it. Mounting the file alone does not work: Codex 0.171.0 replaces `auth.json` by a
 temporary file and a rename in the target's directory, and a rename onto a mount point fails with
 `EBUSY`. Codex follows the symlink, so the temporary file and its `auth.json.lock` both land in the
 login home. Refreshed tokens therefore go back only to that home. Sessions, logs and state stay in
@@ -401,13 +406,18 @@ limit stops the run by default; waiting for the reset is opt-in (`--wait`).
 - **[Codex `auth.json` refresh races between processes.]** → One login file per trial, at most one
   Codex trial per login, and a login only the benchmark uses, so Orca and the operator's own Codex
   never share its refresh-token chain. The spike (#20, Codex CLI 0.171.0) ran 3 concurrent
-  `codex exec` in one container on one mounted login, and all 3 finished. On a copy whose access
-  token had expired, 3 concurrent processes had to refresh at the same time, and all 3 finished.
-  The new tokens landed only in the mounted login home, and a later refresh from them succeeded.
-  Codex re-reads `auth.json` before it refreshes, and saves by compare-and-save under
-  `auth.json.lock`. A forced refresh on a copy of the login used up the refresh token that the
-  original still held. The original then needed a new `codex login`. So rbench never copies
-  `auth.json`. There is one login file, bind-mounted, and Codex refreshes it in place.
+  `codex exec` in one container on one directory-mounted login home, and all 3 finished. Then 3
+  concurrent processes started on a copy whose access token had expired, and all 3 finished. The
+  copy got new tokens, and a later refresh from them succeeded. Codex re-reads `auth.json` before
+  it refreshes, and saves by compare-and-save under `auth.json.lock`. Two points are inferred, not
+  observed:
+  - that the 3 processes sent overlapping refresh requests (no request log was kept);
+  - that the copy's refresh invalidated the original's refresh token. It is inferred from Codex's
+    `refresh_token_reused` handling. No refresh from the original was tried; the original login
+    was redone instead.
+
+  So rbench never copies `auth.json`. There is one login file in a directory-mounted login home,
+  and Codex refreshes it in place.
 - **[`codex-review` may not run non-interactively.]** → Codex's built-in review is a TUI command;
   the spike finds a non-interactive way to run it. Without one, `codex-review` leaves the matrix.
 - **[Claude Code may not report the used share of its subscription window.]** → The spike checks.
