@@ -22,10 +22,11 @@ with `gh pr view`, which the trial's gh stub answers, so the argv holds nothing 
   and the trial home's git ignore file).
 
 The report is the session's last text that holds the pinned report heading, Markdown from that
-heading on, which the pinned normalization step copies into findings (design D9). A Codex session that did not run the Codex side's model (a fallback to
-Codex's default) makes the trial `misconfigured`: `check_launches` finds a Codex launch that
-overrides the config's model in the shim log, and `model_mismatches` compares the models each
-session applied (read from the transcripts, #46) with `requested`.
+heading on, which the pinned normalization step copies into findings (design D9). A Codex
+session that did not run the Codex side's model (a fallback to Codex's default) makes the trial
+`misconfigured`: `check_launches` finds a Codex launch that overrides the config's model in the
+shim log, and `model_mismatches` compares the models each session applied (read from the
+transcripts, #46) with `requested`.
 """
 
 import functools
