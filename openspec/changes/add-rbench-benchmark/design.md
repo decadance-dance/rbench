@@ -228,7 +228,8 @@ server or build step, and opens from disk as the spec requires.
   created, never mounted.
   - The agent image (`images/agent`) installs exactly the CLI versions an engine declares, and
     rbench reads them back from the built image. Its base images are pinned by digest, and its
-    build context holds only the Dockerfile.
+    build context is `images/agent/` alone: the Dockerfile, the managed configuration and the
+    shim scripts (D5).
   - Images are referenced as `<name>@sha256:<hex>`. A local build in Docker's classic image store
     has no registry digest, so the digest is the image ID: the content digest of the image's
     configuration, which names its layers. Trials run an image by that ID, never by a tag or a pull.
