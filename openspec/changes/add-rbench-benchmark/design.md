@@ -232,6 +232,15 @@ server or build step, and opens from disk as the spec requires.
   - Images are referenced as `<name>@sha256:<hex>`. A local build in Docker's classic image store
     has no registry digest, so the digest is the image ID: the content digest of the image's
     configuration, which names its layers. Trials run an image by that ID, never by a tag or a pull.
+  - That ID pins one local build, not its source. Two `--no-cache` builds of the same Dockerfile
+    and CLI versions get different IDs, because creation times differ (PR #109 review). A frozen
+    plan therefore runs, and resumes, only on the images it recorded. If one is gone from the
+    Docker host, the trial fails to start with an infrastructure error. A rebuild gives a new ID,
+    so it needs a new run. Reuse (spec run-ledger) matches only trials that ran the same build.
+- Each trial is a fresh compose project. Compose identifies a project by name and would adopt
+  containers left under it, so starting a trial first removes whatever an earlier attempt left
+  under that name. A start that fails removes the containers and networks it created, and the
+  error names the trial.
 
 **Alternatives considered:**
 - *Anthropic's devcontainer firewall (iptables).* It allows GitHub and port 22, and resolves domains
