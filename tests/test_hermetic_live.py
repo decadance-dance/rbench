@@ -187,9 +187,10 @@ def test_policy_holds_with_and_without_the_shims_and_every_session_is_bound(tria
     assert stops[claude_sessions[0]["session_id"]] == "low"
     applied = applied_sessions(records, dest / "transcripts", CODEX_CONFIG)
     print("applied:", json.dumps(applied.sessions), applied.mismatched, applied.flagged)
-    shim_session = next(s for s in applied.sessions if s["launch"] == 1)
-    assert shim_session["requested"] == {"model": "claude-sonnet-5-5", "effort": "low"}
-    assert shim_session["applied"]["efforts"] == ["low"]
+    (shim_launch,) = next(s for s in applied.sessions if s["launch"] == 1)["launches"]
+    assert shim_launch["requested"] == {"model": "claude-sonnet-5-5", "effort": "low"}
+    assert shim_launch["applied"]["efforts"] == ["low"]
+    assert all("time" in r for r in records)  # the collector's clock attributes resumed lines
 
     # Only the sessions that bypassed the shims fail to bind.
     problems = unbound_sessions(read_shim_log(dest / "shim.jsonl"), dest / "transcripts")

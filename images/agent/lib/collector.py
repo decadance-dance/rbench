@@ -6,6 +6,9 @@ accepts, as one JSON line, to a log they cannot write. Each record gets a sequen
 the sender's pid and uid (`sender_pid`, `sender_uid`) from the socket's peer credentials
 (SO_PEERCRED), never values the sender reports.
 
+Each record also gets the collector's wall-clock `time`, so the audit can tell which launch of a
+resumed session wrote a transcript line (#46).
+
 A connection's first record says what it is:
 - `launch`: a shim registers a launch, which gets the next launch number; the same connection
   then sends the launch's `child` (the CLI's pid and start time, from the shim's own fork) and
@@ -28,6 +31,7 @@ import socketserver
 import struct
 import sys
 import threading
+import time
 
 SOCKET = "/run/rbench/collector.sock"
 LOG = "/var/log/rbench/shim.jsonl"
@@ -79,6 +83,8 @@ META = {"source": (str, dict, type(None))} | {
     )
 }  # fmt: skip
 REWRITE = {"index": INT, "from": STR, "to": STR}
+# Claude Code 2.1.316's effort levels (`effort.level` of Stop and SubagentStop hook input).
+LEVELS = ("low", "medium", "high", "xhigh", "max")
 REQUIRED = {
     "launch": {"cli", "argv", "final_argv", "added"},
     "child": {"pid"},
@@ -106,6 +112,13 @@ def check(record: object, kinds: tuple[str, ...]) -> dict:
     for key in ("argv", "final_argv", "added"):
         if not all(isinstance(a, str) for a in record.get(key, [])):
             raise Rejected(f"{kind}: {key} holds a non-string")
+    if kind == "effort":
+        if record["event"] not in ("Stop", "SubagentStop"):
+            raise Rejected(f"effort: unknown event {record['event']!r}")
+        if ("agent_id" in record) != (record["event"] == "SubagentStop"):
+            raise Rejected("effort: an agent_id goes with SubagentStop, and only there")
+        if record.get("effort", LEVELS[0]) not in LEVELS:
+            raise Rejected("effort: not an effort level")
     if kind == "launch" and record["cli"] not in ("claude", "codex"):
         raise Rejected(f"launch: unknown cli {record['cli']!r}")
     for name, value in record.get("homes", {}).items():
@@ -149,7 +162,8 @@ class Log:
     def write(self, record: dict) -> None:
         with self.lock:
             self.seq += 1
-            line = json.dumps({"seq": self.seq, **record}, sort_keys=True) + "\n"
+            stamped = {"seq": self.seq, **record, "time": time.time()}
+            line = json.dumps(stamped, sort_keys=True) + "\n"
             os.write(self.fd, line.encode())
 
     def register(self, shim: int) -> int:

@@ -51,9 +51,11 @@ from rbench.ledger.trials import (
     dump_json,
     no_repeated_keys,
     read_results,
+    read_sessions,
     read_status,
     set_state,
     store_results,
+    store_sessions,
 )
 from rbench.matrix.expansion import (
     STAGES,
@@ -626,6 +628,11 @@ def _reuse_trials(staging: Path, plan: Plan, source_dir: Path) -> None:
             continue
         try:
             findings, usage = read_results(previous)
+            sessions = read_sessions(previous)
+            if sessions is not None and sessions["misconfigured"]:
+                raise LedgerError(f"{previous}: a done trial whose sessions.json is misconfigured")
+            if sessions is not None:
+                store_sessions(staging / TRIALS_DIR / trial.id, sessions)
             store_results(
                 staging / TRIALS_DIR / trial.id, findings, usage, reused_from=source_dir.name
             )

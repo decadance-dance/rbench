@@ -356,7 +356,8 @@ def claude_trial(launch: plain.Launch) -> dict:
         {"kind": "child", "launch": 1, "pid": 101, "start": 1},
         {"kind": "hook", "session_id": SESSION, "source": "startup"}
         | {"claude_pid": 101, "claude_start": 1},
-        {"kind": "effort", "event": "Stop", "session_id": SESSION, "effort": "medium"},
+        {"kind": "effort", "event": "Stop", "session_id": SESSION, "effort": "medium"}
+        | {"claude_pid": 101, "claude_start": 1},
         {"kind": "exit", "launch": 1, "status": 0},
     )
     findings = [FINDING | {"severity": "must_fix"}]
@@ -482,8 +483,13 @@ def test_a_claude_trial_runs_in_its_project_and_stores_findings_and_usage(sandbo
                 "cli": "claude",
                 "session": SESSION,
                 "launch": 1,
-                "requested": {"model": OPUS, "effort": "medium"},
-                "applied": {"models": [OPUS], "efforts": ["medium"]},
+                "launches": [
+                    {
+                        "launch": 1,
+                        "requested": {"model": OPUS, "effort": "medium"},
+                        "applied": {"models": [OPUS], "efforts": ["medium"]},
+                    }
+                ],
             }
         ],
         "misconfigured": [],
@@ -859,12 +865,13 @@ def test_a_session_on_another_model_makes_the_trial_misconfigured(sandbox, model
     assert counts == {"misconfigured": 1}
     ran = named or "an unlisted value (see sessions.json)"
     assert read_status(trial_dir).reason == (
-        f"claude session 0 of sessions.json (launch 1) ran {ran}; it requested {OPUS}"
+        f"claude session 0 of sessions.json, launch 1, ran {ran}; it requested {OPUS}"
     )
     assert MARKER not in (trial_dir / "status.json").read_text()
     (session,) = json.loads((trial_dir / "sessions.json").read_text())["sessions"]
-    assert session["requested"] == {"model": OPUS, "effort": "medium"}
-    assert session["applied"] == {"models": sorted([OPUS, model]), "efforts": ["medium"]}
+    (entry,) = session["launches"]
+    assert entry["requested"] == {"model": OPUS, "effort": "medium"}
+    assert entry["applied"] == {"models": sorted([OPUS, model]), "efforts": ["medium"]}
 
 
 @pytest.mark.real_executor

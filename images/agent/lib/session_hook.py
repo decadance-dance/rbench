@@ -28,6 +28,7 @@ CLAUDE = "/usr/local/bin/claude"
 PROC = "/proc"
 FIELDS = ("session_id", "source", "transcript_path", "cwd", "model")
 STOPS = ("Stop", "SubagentStop")
+LEVELS = ("low", "medium", "high", "xhigh", "max")  # Claude Code 2.1.316's effort levels
 
 
 def stat(pid: int) -> list[str]:
@@ -52,11 +53,13 @@ def claude_process() -> tuple[int | None, int | None]:
 
 
 def effort_record(data: dict) -> dict:
-    """The applied effort of a Stop or SubagentStop event: no level when the event names none."""
+    """The applied effort of a Stop or SubagentStop event: only a SubagentStop names its agent,
+    and a level that is not one of Claude's is left out, as not reported."""
     record = {"kind": "effort", "event": data["hook_event_name"]}
-    record |= {k: data[k] for k in ("session_id", "agent_id") if isinstance(data.get(k), str)}
+    keys = ("session_id", "agent_id") if record["event"] == "SubagentStop" else ("session_id",)
+    record |= {k: data[k] for k in keys if isinstance(data.get(k), str)}
     effort = data.get("effort")
-    if isinstance(effort, dict) and isinstance(effort.get("level"), str):
+    if isinstance(effort, dict) and effort.get("level") in LEVELS:
         record["effort"] = effort["level"]
     return record
 

@@ -137,14 +137,20 @@ def root(tmp_path: Path) -> Path:
     return tmp_path / "transcripts"
 
 
-def stdout(tmp_path: Path, thread: str, *usages: dict, reroute: bool = False) -> Path:
+def stdout(
+    tmp_path: Path,
+    thread: str,
+    *usages: dict,
+    reroute: bool = False,
+    message: str = f"model rerouted: {GPT} -> gpt-other (HighRiskCyberActivity)",
+    item: str = "error",
+) -> Path:
     """A `codex exec --json` stdout in the pinned CLI's shape."""
     file = tmp_path / "stdout" / f"{thread}-{len(list(tmp_path.glob('stdout/*')))}.jsonl"
     file.parent.mkdir(exist_ok=True)
     events = [{"type": "thread.started", "thread_id": thread}, {"type": "turn.started"}]
     if reroute:
-        message = f"model rerouted: {GPT} -> gpt-other (HighRiskCyberActivity)"
-        events.append({"type": "item.completed", "item": {"id": "item_0", "type": "error"}})
+        events.append({"type": "item.completed", "item": {"id": "item_0", "type": item}})
         events[-1]["item"]["message"] = message
     events += [{"type": "turn.completed", "usage": u} for u in usages]
     file.write_text("".join(json.dumps(e) + "\n" for e in events))
@@ -446,10 +452,26 @@ def test_codex_model_attribution_needs_the_launch_stdout(tmp_path, root):
 
     assert rerouted.models == without.models == {GPT: counts(5, 1)}
     assert rerouted.incomplete == [
-        f"Launch 1 (codex): model rerouted: {GPT} -> gpt-other (HighRiskCyberActivity)",
+        "Launch 1 (codex): its stdout shows a model reroute, so its usage ran on another model",
         unverified("t1"),
     ]
     assert without.incomplete == [unverified("t1")]
+
+
+def test_a_reroute_is_an_error_item_and_its_text_stays_out_of_usage(tmp_path, root):
+    write(root, A, [meta("t1"), turn("u1", GPT), record("t1", "u1", "r1", codex_usage(5, 0, 1))])
+    shim_log = log(*launch(1, "codex", "exec"), binding(1, A, "t1"))
+    marker = f"model rerouted: other -> {GPT} (zz-synthetic-marker)"
+
+    other_item = count_usage(shim_log, root, {1: stdout(tmp_path, "t1", reroute=True, item="x")})
+    marked = count_usage(shim_log, root, {1: stdout(tmp_path, "t1", reroute=True, message=marker)})
+
+    assert other_item.incomplete == []  # a clean stdout that shows t1: its model is verified
+    assert marked.incomplete == [
+        "Launch 1 (codex): its stdout shows a model reroute, so its usage ran on another model",
+        unverified("t1"),
+    ]
+    assert "zz-synthetic-marker" not in json.dumps(usage_record(marked))
 
 
 def broken(tmp_path: Path, kind: str) -> Path:
@@ -624,7 +646,7 @@ def test_a_reroute_on_stdout_flags_the_stdout_fallback_too(tmp_path, root):
     usage = count_usage(shim_log, root, out)
     assert usage.models == {GPT: counts(9, 1)}
     assert usage.incomplete == [
-        f"Launch 1 (codex): model rerouted: {GPT} -> gpt-other (HighRiskCyberActivity)",
+        "Launch 1 (codex): its stdout shows a model reroute, so its usage ran on another model",
         unverified("t1"),
     ]
 

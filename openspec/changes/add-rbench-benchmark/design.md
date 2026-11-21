@@ -454,29 +454,49 @@ server or build step, and opens from disk as the spec requires.
   effort are recorded). In #25, review-council's Codex rollout showed the model and effort of the
   trial's `config.toml`; the other roles' applied values were not compared.
   As implemented (#46, `rbench.trial.applied`), after the audit of every attempt, into the trial's
-  `sessions.json`, one entry per session in the transcripts:
-  - Requested: the model and effort on the argv the CLI got (Claude `--model`, `--effort`; Codex
-    `-m`, `--model`, `-c model=`, `-c model_reasoning_effort=`), which the shim adds for roles
-    delivered by flag, else, for Codex, the trial's `config.toml`. A subagent takes its session's
-    launch, a Codex thread the launch that bound it first without resuming.
-  - Applied, Claude: the models of the session's assistant messages, a subagent being a session
-    of its own. Claude Code 2.1.316 reports the applied effort, after any downgrade for the model,
-    neither in the stream-json init event nor in the transcript nor in SessionStart hook input,
-    only in tool-context hook input (`effort.level`). The managed settings therefore also run the
-    session hook on `Stop` and `SubagentStop`, and it logs an `effort` record: the session id,
-    the subagent's id and the level, never the message text the event carries. Checked on the
-    pinned binary in the hermetic live test against the local provider stub (no provider call):
-    the shim's session logged `low`, its requested effort. Against a real model, which may
-    downgrade, it is a smoke check (#60).
-  - Applied, Codex: the models and efforts of the thread's `turn_context` records, plus the target
-    of a reroute item on its launch's captured `exec --json` stdout, for the thread that stdout
-    starts. A `turn_context` without `effort` (none configured) reports no effort.
-  - Any applied model other than the requested one, or any model when none was requested (a
-    default), makes the trial `misconfigured`. An effort other than the requested one, or none
-    reported (the session killed before its turn ended, a model without effort support), flags
-    the trial for the report; it is not `misconfigured`. Models and levels are CLI output: a value
-    that is not a plain name is recorded as `<invalid>`, and a reason in the status names only
-    models of `models.toml` and known levels, pointing to `sessions.json` for any other.
+  `sessions.json`: one entry per session in the transcripts, identified by its origin launch, with
+  each of its launches (origin and resumes) judged against that launch's own request:
+  - Requested: the model and effort on the argv the CLI got, read as the shim reads options and
+    in every form the CLI takes (`--flag value`, `--flag=value`, Codex's attached `-mX` and
+    `-ckey=value`): Claude `--model`, `--effort`; Codex `-m`, `--model`, `-c model=`, and for the
+    review thread (session_meta source `subagent: review`) `-c review_model=`, with
+    `-c model_reasoning_effort=`; else, for Codex, the trial's `config.toml`. A `-c` override
+    without a value or with one that is not a name, an option without its value, or two
+    different values is an invalid request, which makes the trial `misconfigured`.
+  - Attribution: the collector stamps each record with its wall-clock `time`. A transcript line
+    belongs to the session's launch whose run, from its launch record to its exit record, holds
+    the line's timestamp; a session with one launch and no times takes every line. A line no run
+    holds is flagged. Copied history is not counted: a Claude message whose id is in a session
+    that started earlier (a fork's parent, as in D7), and a Codex turn whose id is in the rollout
+    of the thread it forked from.
+  - Applied, Claude: the models of the session's own assistant messages, a subagent being a
+    session of its own. Claude Code 2.1.316 reports the applied effort, after any downgrade for
+    the model, neither in the stream-json init event nor in the transcript nor in SessionStart
+    hook input, only in tool-context hook input (`effort.level`). The managed settings therefore
+    also run the session hook on `Stop` and `SubagentStop`, and it logs an `effort` record: the
+    event, the session id, the subagent's id (SubagentStop only) and a level of Claude's, never
+    the message text the event carries. The collector and the reader refuse any other event or
+    level. A record counts only when its `claude` process is the child of one of the session's
+    launches, and for that launch. Checked on the pinned binary in the hermetic live test against
+    the local provider stub (no provider call): the shim's session logged `low`, its requested
+    effort. Against a real model, which may downgrade, it is a smoke check (#60).
+  - Applied, Codex: the models and efforts of the thread's `turn_context` records, plus the
+    target of a reroute on the launch's own captured `exec --json` stdout, for a thread that stdout
+    starts. A reroute is an `item.completed` of type `error` whose message is
+    `model rerouted: <from> -> <to> (<reason>)`; one whose `<from>` is not the launch's requested
+    model, or of another shape, is recorded as `<invalid>`. Usage (D7) uses the same evidence and
+    records only that a launch was rerouted, never the message. A `turn_context` without
+    `effort` (none configured) reports no effort.
+  - Any applied model other than the launch's requested one, or any model when none was requested
+    (a default), makes the trial `misconfigured`. An effort other than the requested one, or none
+    reported (`efforts` null: the session killed before its turn ended, a model without effort
+    support), flags the trial for the report; it is not `misconfigured`. Models and levels are CLI
+    output: a value that is not a plain name is recorded as `<invalid>`, and a reason in the
+    status names only models of `models.toml` and known levels, pointing to `sessions.json` for
+    any other.
+  - `--reuse` carries a done trial's `sessions.json`, validated whole; an invalid one, or one that
+    lists a model mismatch, refuses the reuse. A trial stored before #46 has none, and the reused
+    trial then has none either: its applied values are not recorded.
 - Shim merge against each engine's own launches, checked in spike #25 (Claude Code 2.1.316, Codex
   CLI 0.171.0, linux/arm64, one run of each engine's default: `plain` on both CLIs, `code-review`,
   `codex-review`, review-council 0.14.0, rreview 0.1.1 with `--sandbox external`, and the plugin
