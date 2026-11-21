@@ -146,6 +146,7 @@ def test_plan_holds_what_the_spec_freezes(tmp_path: Path) -> None:
                     "default": {"model": "claude-opus-5-5", "effort": "high"},
                 }
             },
+            "output": "structured",
         }
     }
     assert plan["matrix"] == {"path": "m.toml", "sha256": "f" * 64}

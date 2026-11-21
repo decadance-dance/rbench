@@ -39,6 +39,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rbench.engines import normalization
 from rbench.engines.declaration import CLIS, Engine, Setting
 from rbench.engines.pins import MODELS
 
@@ -70,6 +71,7 @@ class Configuration:
     engine: str
     version: str
     roles: tuple[tuple[str, RoleSetting], ...]  # every role of the engine, sorted by name
+    markdown: bool = False  # the engine's output goes through the normalization step
     id: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -85,9 +87,15 @@ class Configuration:
         - for `plain`, the version is its prompt hash, and the findings schema hash and the Codex
           model catalog hash (generated per CLI version, design D12) must join the settings too;
           the `plain` adapter (issue #47) adds them.
+
+        A Markdown engine's settings also hold the normalization step's pin, so a new normalizer
+        model or prompt gives new ids; a structured engine's do not.
         """
         roles = {r: {"models": list(s.models), "effort": s.effort} for r, s in self.roles}
-        return {"engine": self.engine, "version": self.version, "roles": roles}
+        settings = {"engine": self.engine, "version": self.version, "roles": roles}
+        if self.markdown:
+            settings["normalization"] = dict(normalization.SETTINGS)
+        return settings
 
     @property
     def hash(self) -> str:
@@ -192,6 +200,7 @@ def _default(engine: Engine) -> Configuration:
         engine.name,
         engine.version,
         tuple((r, RoleSetting((s.model,), s.effort)) for r, s in sorted(roles.items())),
+        engine.output == "markdown",
     )
 
 
@@ -239,7 +248,12 @@ def _expand(entry: object, where: str, engines: Mapping[str, Engine]) -> list[Co
         choices.append(settings)
     names = sorted(engine.roles)
     return [
-        Configuration(engine.name, engine.version, tuple(zip(names, combo, strict=True)))
+        Configuration(
+            engine.name,
+            engine.version,
+            tuple(zip(names, combo, strict=True)),
+            engine.output == "markdown",
+        )
         for combo in itertools.product(*choices)
     ]
 

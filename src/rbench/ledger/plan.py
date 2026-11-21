@@ -122,6 +122,9 @@ class PlannedEngine:
     clis: dict[str, str]
     image: str
     roles: dict[str, PlannedRole]
+    # markdown: its report goes through the normalization step. A plan written before the field
+    # existed has none, and its engines are structured.
+    output: str = "structured"
 
 
 @dataclass(frozen=True)
@@ -242,6 +245,7 @@ def freeze_plan(
                 }
                 for r, role in engine.roles.items()
             },
+            "output": engine.output,
         }
     for c in round_.configurations:
         if c.version != engines[c.engine].version:
@@ -373,7 +377,8 @@ def parse_plan(data: object, where: str) -> Plan:
     declared: dict[str, Engine] = {}
     for name, raw in sorted(_object(d["engines"], f"{where}: engines").items()):
         at = f"{where}: engines.{name}"
-        e = _fields(raw, at, {"pin", "version", "clis", "image", "roles"})
+        keys = {"pin", "version", "clis", "image", "roles"}
+        e = _fields(raw, at, keys | ({"output"} & _object(raw, at).keys()))
         clis = _object(e["clis"], f"{at}.clis")
         image = Image(e["image"], clis)
         check_image(at, image)
@@ -386,6 +391,7 @@ def parse_plan(data: object, where: str) -> Plan:
             "name": name,
             "pin": e["pin"],
             "cli": clis,
+            **({"output": e["output"]} if "output" in e else {}),
             "roles": {
                 role: {k: v for k, v in r.items() if not (k == "cli" and v is None)}
                 for role, r in roles.items()
@@ -409,13 +415,16 @@ def parse_plan(data: object, where: str) -> Plan:
                 role: PlannedRole(r.cli, r.delivery, r.default)
                 for role, r in sorted(engine.roles.items())
             },
+            engine.output,
         )
 
     configurations: dict[str, tuple[PlannedConfiguration, Configuration]] = {}
     for i, raw in enumerate(_list(d["configurations"], f"{where}: configurations")):
         at = f"{where}: configurations[{i}]"
         c = _fields(raw, at, {"id", "providers", "settings"})
-        s = _fields(c["settings"], f"{at}.settings", {"engine", "version", "roles"})
+        keys = {"engine", "version", "roles"}
+        s = _object(c["settings"], f"{at}.settings")
+        s = _fields(s, f"{at}.settings", keys | ({"normalization"} & s.keys()))
         engine = engines.get(s["engine"]) if isinstance(s["engine"], str) else None
         if engine is None:
             raise LedgerError(f"{at}.settings.engine: not an engine of the plan")
@@ -439,7 +448,14 @@ def parse_plan(data: object, where: str) -> Plan:
                 except ValueError as error:
                     raise LedgerError(str(error)) from None
             roles.append((role, RoleSetting(tuple(models), effort)))
-        config = Configuration(s["engine"], s["version"], tuple(roles))
+        markdown = declared[s["engine"]].output == "markdown"
+        config = Configuration(s["engine"], s["version"], tuple(roles), markdown)
+        if config.settings.get("normalization") != s.get("normalization"):
+            raise LedgerError(
+                f"{at}.settings.normalization: the plan's normalization pin is not this rbench's"
+                f" ({json.dumps(config.settings.get('normalization'), sort_keys=True)}); continue"
+                " the run with the rbench version that started it, or start a new run"
+            )
         if config.settings != s or config.id != c["id"]:
             raise LedgerError(f"{at}.id: does not match its settings")
         if c["providers"] != sorted(config.providers):

@@ -4,6 +4,7 @@ A declaration is a TOML file:
 
     name = "example"
     pin = { kind = "git", ref = "refs/tags/v1.2.3" }
+    output = "markdown"  # or "structured" (the default): how its findings come out
 
     [cli]  # exact versions of the CLIs installed in the engine's image
     claude = "2.1.316"
@@ -14,6 +15,10 @@ A declaration is a TOML file:
     delivery = "flag"  # flag: the shim adds model and effort flags;
                        # config: the adapter writes them into the trial's config.toml
     default = { model = "claude-opus-5-5", effort = "high" }
+
+A `markdown` engine's report goes through the pinned normalization step
+(`rbench.engines.normalization`), whose pin joins its configurations' settings; `structured`
+findings are converted without a model step (spec engine-configurations, Findings normalization).
 
 The roles' defaults together are the engine's default configuration.
 
@@ -32,6 +37,7 @@ from rbench.engines.pins import check_ref, model_cli
 
 CLIS = ("claude", "codex")
 DELIVERIES = ("flag", "config")
+OUTPUTS = ("structured", "markdown")
 # The effort values each CLI accepts, checked against:
 # - Claude Code 2.1.316: `claude --help`, `--effort <level>`;
 # - Codex CLI 0.167.0: the union of the `supported_reasoning_levels` its bundled catalog
@@ -79,6 +85,7 @@ class Engine:
     pin_ref: str
     clis: dict[str, str]  # CLI name -> exact version
     roles: dict[str, Role]
+    output: str = "structured"
 
     @property
     def version(self) -> str:
@@ -127,7 +134,7 @@ def _table(
 
 def parse_engine(data: object, source: str) -> Engine:
     """Validate a parsed declaration; `source` (its file) prefixes every error."""
-    data = _table(data, source, {"name", "pin", "cli", "roles"})
+    data = _table(data, source, {"name", "pin", "cli", "roles"}, frozenset({"output"}))
     name = data["name"]
     if not (isinstance(name, str) and _NAME.fullmatch(name)):
         raise DeclarationError(f"{source}: name: bad engine name {name!r}")
@@ -147,10 +154,14 @@ def parse_engine(data: object, source: str) -> Engine:
     else:
         raise DeclarationError(f"{where}: pin.kind: unknown pin kind {kind!r}")
 
+    output = data.get("output", "structured")
+    if output not in OUTPUTS:
+        raise DeclarationError(f"{where}: output must be structured or markdown, got {output!r}")
+
     roles = data["roles"]
     if not (isinstance(roles, dict) and roles):
         raise DeclarationError(f"{where}: roles must be a table of at least one role")
-    engine = Engine(name, kind, ref, dict(clis), {})
+    engine = Engine(name, kind, ref, dict(clis), {}, output)
     for role_name, raw in roles.items():
         at = f"{where}: role {role_name!r}"
         if not _ROLE.fullmatch(role_name):

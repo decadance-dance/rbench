@@ -651,6 +651,39 @@ copies and inspection trivial.
 converted to findings by a pinned model with a versioned prompt. The step copies findings and does
 not judge them. It runs hermetic, like the judge: the same container setup and shims, no tools.
 
+- An engine declaration says `output = "markdown"` or `"structured"` (the default). Only a
+  Markdown engine's report goes through this step.
+- The pin is `claude-sonnet-5-5` at effort `medium`, with prompt version 1
+  (`src/rbench/engines/normalization-prompt-v1.md`). Medium, not low: the copy must be complete,
+  and the step's tokens are counted apart from the engine's anyway. A Markdown configuration's
+  settings hold `normalization: {model, effort, prompt_version, prompt_sha256}`, where the hash
+  covers the prompt and its output schema. Changing any of them gives new configuration ids, so
+  earlier trials are not reused. A structured engine's settings and ids do not change.
+  - A run frozen with another normalizer pin refuses to resume and names the field.
+  - A plan written before the output kind existed loads with every engine structured.
+- The launch is `claude -p --model <model> --effort <effort> --tools "" --output-format json
+  --json-schema <schema>`. It runs through the shim in a fresh compose project of the agent image,
+  prepared with D5's homes and shim settings, with no repository copied in. The prompt and the
+  report go by stdin, never on the command line. The report sits between two marker lines that
+  name its hash, as data that gives no instructions. A blank report has no findings and runs no
+  model. The caller owns the project, as for a trial: it starts the project, collects its shim log
+  and transcripts, and removes it.
+- The answer is `{findings: [{file, start_line, end_line, message, severity}], unlocated:
+  [{text}]}`. `severity` is the engine's own label, or null when the engine gives none. One bad
+  item rejects the whole result, and the error names the trial and the item. Structured output
+  goes through the same validation, with no model step.
+- Items the report gives without a file or a line are not findings: spec `engine-configurations`
+  (Findings normalization) requires both. Their count and text stay in the normalization record
+  under `raw/`, next to the pin, so the loss is visible. The smoke stage (#60) compares the number
+  of copied items with the report.
+- Tokens come from the `modelUsage` of the result. That differs from D7's transcripts, because
+  rbench owns this process's stdout, and its single result covers the whole session. The
+  pinned model must appear in `modelUsage`: a session that ran another model is rejected. Side calls
+  on other models are counted too. They go to the trial's `usage.json` under `normalization`, apart
+  from `engine`. The fields of the result (`structured_output`, `modelUsage` and its
+  `inputTokens`, `outputTokens`, `cacheReadInputTokens` and `cacheCreationInputTokens`) are those
+  of Claude Code 2.1.316. The smoke stage checks them against a live call.
+
 **Alternative considered:** ask each engine for JSON. That changes the engines being measured.
 
 `plain` is the exception: it is our own baseline, not an engine under test, so it asks for JSON
