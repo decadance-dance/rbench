@@ -1,5 +1,5 @@
 {
-  "archive_sha256": "e74019311948c56a0926df164848da96762f678ad19dc941dbd3b63b1cd832e3",
+  "archive_sha256": "e61fe78c65ba6ca1b6e452b5dd9dca44c5643466e3bbb699e97b5d92c2d31efb",
   "base": "b842dd4df1fb5138d63c2bc6a1e9b820a4635510",
   "description": "## Description\r\n\r\nThis PR corrects the summation bounds in the K-Means inertia formula in the clustering documentation.\r\n\r\nThe previous notation used:\r\n\r\n\\sum_{i=0}^{n}\r\n\r\nwhich includes `n + 1` terms.\r\n\r\nThis changes the bounds to:\r\n\r\n\\sum_{i=0}^{n-1}\r\n\r\nwhich correctly represents `n` samples while remaining consistent with zero-based indexing used throughout scikit-learn.\r\n\r\nFixes #34299",
   "head": "1e8749842a779fef1697a4c8e7bf9ee4e083b94d",

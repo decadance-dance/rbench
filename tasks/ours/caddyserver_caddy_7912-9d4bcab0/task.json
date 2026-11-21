@@ -1,5 +1,5 @@
 {
-  "archive_sha256": "1b23fb6058eed624901ea073140a8c13308aa0ac42b21321e3b8d5c94effbcf2",
+  "archive_sha256": "48fbb7e83baaf3aae275f759760d09ff9c35f0f90e0c8b674fbd0ca829340e92",
   "base": "c96bca12693419ac5be751a0cbbae2c3cbf89c58",
   "description": "Populate the SERVER_ADDR FastCGI environment variable using the local socket address of the incoming connection from the request context. Only sets SERVER_ADDR when local address resolves to a valid IP address.\n\nFixes #7891",
   "head": "9d4bcab078a12b3df2304905704700f9a015b936",

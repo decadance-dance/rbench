@@ -1,5 +1,5 @@
 {
-  "archive_sha256": "a807145c6256c603419db2821e754400f3aab276372a4ee94d760c77bcc18a6a",
+  "archive_sha256": "39f408b7ba7656edd9f919874d3194059a2e2c538063935a1af73ded47ce6e02",
   "base": "83366c2b275599366d0b914b27128141cf4ca936",
   "description": "## Motivation\n\n`PathRouter::merge` hands each of the other router's endpoints back to `route` or `route_service`. For `Endpoint::Route`, the endpoint is already a `Route`, but `route_service` wraps it in `Route::new` again. Each merge of a router that holds a service route (`route_service`, `nest_service` and so on) therefore adds another layer of boxing and a `RouteFuture`. Every request to that route then pays for an extra clone of the service and an extra dynamic dispatch.\n\n## Solution\n\nInsert the existing `Route` with `route_endpoint` instead of calling `route_service`. Nothing else changes: the path is still validated and conflicts are still reported the same way.\n\nThe new test counts how many times a service is cloned while it handles a request, and checks that a merged service route is cloned as often as the same route used directly. Before this change it was cloned twice per request instead of once.\n",
   "head": "c264bd14b24482bf8bd0faa9168934a8d094ffa9",
