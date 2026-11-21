@@ -22,6 +22,18 @@ IMAGES_DIR = CHECKOUT_ROOT / "images"
 _ID = re.compile(r"sha256:[0-9a-f]{64}")
 # All that `<cli> --version` prints, e.g. "2.1.316 (Claude Code)" and "codex-cli 0.171.0".
 _VERSION_OUTPUT = {"claude": "{} (Claude Code)", "codex": "codex-cli {}"}
+_COMMIT = re.compile(r"[0-9a-f]{40}")
+_PLUGIN_REPO = re.compile(r"https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+")
+PLUGINS_DIR = "/opt/rbench/plugins"
+# Prints "<dir> <name> <version>" for each installed plugin, from its .claude-plugin/plugin.json.
+_PLUGINS_SCRIPT = (
+    "const fs = require('fs'); const d = process.argv[1];"
+    " for (const n of fs.existsSync(d) ? fs.readdirSync(d).sort() : []) {"
+    " const p = require(`${d}/${n}/.claude-plugin/plugin.json`);"
+    " console.log(`${n} ${p.name} ${p.version}`); }"
+)
+# The yq the Dockerfile installs with a plugin (images/agent/Dockerfile).
+_YQ_OUTPUT = "yq (https://github.com/mikefarah/yq/) version v4.44.3"
 # The variable that carries the Claude token into a trial (spec trial-isolation, Credentials).
 CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 REDACTED = "<redacted>"
@@ -96,13 +108,19 @@ def _build(name: str, tag: str, context: Path, build_args: dict[str, str]) -> st
 
 
 def build_agent_image(
-    clis: dict[str, str], images_dir: Path = IMAGES_DIR, tag: str | None = None
+    clis: dict[str, str],
+    images_dir: Path = IMAGES_DIR,
+    tag: str | None = None,
+    plugin: tuple[str, str, str] | None = None,
 ) -> Image:
     """Build the agent image with exactly these CLI versions and read them back from it.
 
     `clis` maps each CLI the engine declares to its exact version; a CLI not in it is not
-    installed. The result is what the ledger pins for an engine. `tag` replaces the default tag,
-    which names the CLI versions; the reference is the digest either way.
+    installed. `plugin` is the (https repository, commit, version) of the engine's Claude Code
+    plugin: the image holds that commit in `/opt/rbench/plugins/<name>` (with yq), and its
+    `plugin.json` must give that version. The result is what the ledger pins for an engine.
+    `tag` replaces the default tag, which names the CLI versions (and the plugin's commit); the
+    reference is the digest either way.
     """
     if not (isinstance(clis, dict) and clis):
         raise TrialError("agent image: clis must name at least one CLI")
@@ -111,8 +129,18 @@ def build_agent_image(
             raise TrialError(f"agent image: unknown CLI {cli!r}; expected one of {CLIS}")
         check_ref("agent image", "version", version, f"clis.{cli}")
     # Docker tags allow [A-Za-z0-9_.-]; SemVer build metadata uses "+".
-    tag = tag or "-".join(f"{cli}-{clis[cli]}" for cli in sorted(clis)).replace("+", "_")
+    default_tag = "-".join(f"{cli}-{clis[cli]}" for cli in sorted(clis)).replace("+", "_")
     build_args = {f"{cli.upper()}_VERSION": clis.get(cli, "") for cli in CLIS}
+    if plugin is not None:
+        repo, commit, version = plugin
+        if not (isinstance(repo, str) and _PLUGIN_REPO.fullmatch(repo)):
+            raise TrialError(f"agent image: plugin repository {repo!r} is not an https URL")
+        if not (isinstance(commit, str) and _COMMIT.fullmatch(commit)):
+            raise TrialError(f"agent image: plugin commit {commit!r} is not a full commit id")
+        check_ref("agent image", "version", version, "plugin version")
+        build_args |= {"PLUGIN_REPO": repo, "PLUGIN_COMMIT": commit}
+        tag = tag or f"{default_tag}-plugin-{commit[:12]}"
+    tag = tag or default_tag
     ref = _build(AGENT_NAME, tag, images_dir / "agent", build_args)
     for cli, version in sorted(clis.items()):
         what = f"reading the {cli} version in {ref}"
@@ -123,7 +151,27 @@ def build_agent_image(
         )
         if out.strip() != _VERSION_OUTPUT[cli].format(version):
             raise TrialError(f"{ref}: expected {cli} {version}, the image reports {out.strip()!r}")
+    if plugin is not None:
+        _check_plugin(ref, plugin[2])
     return Image(ref, dict(clis))
+
+
+def _check_plugin(ref: str, version: str) -> None:
+    """The built image holds one plugin, of `version`, in a directory named as the plugin, and
+    the pinned yq."""
+    run = ("run", "--rm", "--network", "none", image_id(ref))
+    what = f"reading the plugin in {ref}"
+    found = docker(*run, "node", "-e", _PLUGINS_SCRIPT, PLUGINS_DIR, what=what).split("\n")
+    plugins = [line.split(" ") for line in found if line]
+    if len(plugins) != 1 or len(plugins[0]) != 3 or plugins[0][0] != plugins[0][1]:
+        raise TrialError(f"{ref}: expected one plugin in {PLUGINS_DIR}, found {found!r}")
+    if plugins[0][2] != version:
+        raise TrialError(
+            f"{ref}: expected plugin {plugins[0][1]} {version}, the image has {plugins[0][2]}"
+        )
+    out = docker(*run, "/usr/local/bin/yq", "--version", what=f"reading the yq version in {ref}")
+    if out.strip() != _YQ_OUTPUT:
+        raise TrialError(f"{ref}: expected {_YQ_OUTPUT!r}, the image reports {out.strip()!r}")
 
 
 def build_proxy_image(images_dir: Path = IMAGES_DIR, tag: str = "latest") -> str:

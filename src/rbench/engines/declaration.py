@@ -215,4 +215,8 @@ def load_engine(path: Path) -> Engine:
         from rbench.engines import ponytail_review  # it imports this module
 
         engine = ponytail_review.bind(engine, str(path))
+    elif engine.name == "review-council":
+        from rbench.engines import review_council  # it imports this module
+
+        engine = review_council.bind(engine, Path(path).parent)
     return engine

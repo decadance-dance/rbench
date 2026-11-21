@@ -1,0 +1,28 @@
+# review-council, the multi-model review plugin for Claude Code (spec engine-configurations,
+# Engine adapters; design D5, D13), pinned by its plugin version: 0.14.0 is the source of
+# https://github.com/deployhq/review-council at commit c9a73575503c12277cd46409c7cbdbe452e7c582
+# (`.claude-plugin/plugin.json` version 0.14.0, the commit spike #25 ran). Its adapter is
+# `rbench.engines.review_council`; review-council/config.local.yml is written into the reviewed
+# checkout of every trial.
+name = "review-council"
+pin = { kind = "version", ref = "0.14.0" }
+# A Markdown report, copied into findings by the pinned normalization step (design D9).
+output = "markdown"
+
+[cli]
+claude = "2.1.316"
+codex = "0.171.0"
+
+# Design D13: the Claude side is the main session (orchestrator and judge) and its `model:
+# inherit` subagents, so the shim's --model and --effort set all of them.
+[roles.claude_side]
+cli = "claude"
+delivery = "flag"
+default = { model = "claude-opus-5-5", effort = "high" }
+
+# The Codex reviewer and verifier: review-council launches `codex exec` with no model flag, so
+# their model and effort come only from the trial's config.toml (design D5).
+[roles.codex_side]
+cli = "codex"
+delivery = "config"
+default = { model = "gpt-6.2-sol", effort = "high" }

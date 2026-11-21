@@ -884,11 +884,31 @@ measure a different task from the engines, which all read the repository.
   session's `--model` and `--effort` set them. The Codex side is the Codex reviewer and verifier,
   set only through `config.toml`. The Google and Perplexity seats are disabled in
   `.review-council/config.local.yml`.
+  - The adapter (#51, `rbench.engines.review_council`) pins version 0.14.0 to the source of
+    `deployhq/review-council` at `c9a73575503c12277cd46409c7cbdbe452e7c582` (its `plugin.json`
+    says 0.14.0; spike #25 ran it). Its roles are `claude_side` (delivery by flag) and
+    `codex_side` (delivery by config). The trial's shim settings carry only the Claude model and
+    effort, and `config.toml` carries `model` and `model_reasoning_effort` for Codex.
+  - The launch is `claude -p "/review-council:run" --plugin-dir /opt/rbench/plugins/review-council
+    --setting-sources user --allowedTools "Bash Read Grep Glob Agent Skill Write" --output-format
+    stream-json --verbose`, spike #25's, without the PR number: the plugin then finds the PR of
+    the current branch with `gh pr view`, which the gh stub answers. The report is the `result`
+    of the final `result` event, Markdown for the D9 step.
+  - `config.local.yml` is written into the checkout before the launch. review-council's config
+    reader ignores both config files without mikefarah yq v4, so the agent image installs a pinned
+    yq with every plugin (`build_agent_image(plugin=...)`, which fetches the plugin by its exact
+    commit into `/opt/rbench/plugins/<name>` and reads its `plugin.json` version back).
+  - `misconfigured`: the shim log shows a Codex session launch with its own model, effort or
+    profile, or `--ignore-user-config` (config.toml then did not apply), a rewrite other than the
+    sandbox, or a Claude session without the Claude side's `--model` and `--effort`; and a
+    session whose applied model (#46) differs from its side's, Codex's default model included.
 - `ponytail-review` is pinned by the plugin's release, 5.3.3 (tag `v5.3.3` = commit
   `7801d061243d7b753bad0e0b3c057cd250b11755` of `https://github.com/DietrichGebert/ponytail`). The
   adapter records the release, its tag and commit; a version it does not know is refused, and a
   floating one (`latest`, a range) fails the declaration. The image holds the plugin at that commit
-  in `/opt/rbench/plugins/ponytail`. One `reviewer` role; its model picks the CLI and the shims add
+  in `/opt/rbench/plugins/ponytail`, and its plugin stage also writes the local Codex marketplace
+  `/opt/rbench/plugins/.agents/plugins/marketplace.json` (name `rbench`, one local entry
+  `./<name>`), so the image digest covers it and the trial cannot change it. One `reviewer` role; its model picks the CLI and the shims add
   its model and effort. The request reviews the trial's PR, which the `gh` stub answers for, and
   goes on stdin:
   - Claude Code: `claude -p --plugin-dir /opt/rbench/plugins/ponytail --permission-mode
