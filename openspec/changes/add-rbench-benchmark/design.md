@@ -182,22 +182,40 @@ server or build step, and opens from disk as the spec requires.
 
 ### D3. Trial = one `docker compose` project: agent container + squid proxy
 **Choice.**
-- The agent container sits on an `internal: true` network. Its only route out is a squid proxy that
-  allowlists the providers' API and auth hosts and logs every CONNECT. The host list comes from a
-  logged smoke run and is fixed in `images/proxy/allowlist`.
+- Two networks. The agent container is only on an internal bridge (`internal: true`) in isolated
+  gateway mode (`com.docker.network.bridge.gateway_mode_ipv4: isolated`, so the bridge has no host
+  address). The proxy is on that bridge and on an ordinary one that reaches the internet. The
+  agent's only route out is the squid proxy, which allowlists the providers' API and auth hosts and
+  logs every CONNECT. The host list comes from a logged smoke run and is fixed in
+  `images/proxy/allowlist`.
+  - An internal bridge alone is not enough: in Docker's default gateway mode the bridge has a host
+    address, and the agent can reach any host service listening on it. Isolated mode removes that
+    address. Checked with Docker 29.4.1 (#21): a listener in the Docker host's network namespace
+    answered an agent on a default internal bridge at the gateway address, and an agent on an
+    isolated one reached no bridge address. On both, `host.docker.internal` and external names did
+    not resolve. A deployment without isolated mode needs equivalent host isolation.
 - The smoke run (#21, Claude Code 2.1.316, Codex CLI 0.171.0) fixed the allowlist at three hosts:
   - `api.anthropic.com`: the Claude API. `CLAUDE_CODE_OAUTH_TOKEN` needs no refresh host.
   - `chatgpt.com`: Codex's API and account calls under a ChatGPT login.
   - `auth.openai.com`: Codex's token refresh. The run did not reach it, because its token was
     fresh, but a trial does (#20).
 - Squid allows `CONNECT` to port 443 of exactly these hosts, with no subdomains, and denies
-  everything else, plain HTTP included. Both CLIs honour `HTTPS_PROXY`/`HTTP_PROXY`, set with an
-  empty `NO_PROXY`. In the run, neither resolved any name but the proxy's.
-- The proxy refuses, and logs, three kinds of traffic, with no effect on either CLI's result:
-  - Claude's telemetry (`http-intake.logs.us5.datadoghq.com`). D5's non-essential-traffic switches
-    stop it at the source.
+  everything else, plain HTTP included. The ACL is `acl allowed dstdomain -n
+  "/etc/squid/allowlist"`. Without `-n`, squid matches a numeric destination by its reverse DNS
+  name, so `CONNECT <ip>:443` passes whenever the IP's PTR record names an allowed host. The
+  spike's enforcing configuration lacked `-n`. A docker-only check (#21) showed the difference:
+  with a test list naming `dns.google`, `CONNECT 8.8.8.8:443` tunnelled without `-n` and was
+  refused with it.
+- Both CLIs honour `HTTPS_PROXY`/`HTTP_PROXY`, set with an empty `NO_PROXY`. In the run, neither
+  resolved any name but the proxy's.
+- In the run, the proxy refused and logged three kinds of traffic, with no effect on either CLI's
+  result:
+  - Claude's telemetry (`http-intake.logs.us5.datadoghq.com`). With D5's non-essential-traffic
+    switches set, one call made no such attempt.
   - Codex's metrics (`ab.chatgpt.com`).
   - Codex's fetches from OpenAI file storage (`*.oaiusercontent.com`).
+- #37 checks, for the compose project it builds: a refused `CONNECT` to a numeric IP, no access to
+  a host service on the bridge, external DNS refused, and `github.com` refused and logged.
 - Images are built per engine version and CLI versions, not per task. The scrubbed repository is
   unpacked from the task's archive (D11) and copied in with `docker cp` when the container is
   created, never mounted.
@@ -260,7 +278,9 @@ The trial has one `CLAUDE_CONFIG_DIR` and one `CODEX_HOME`. All processes share 
 login made only for the benchmark (its own `codex login`, so its own refresh-token chain), kept in a
 login home no other tool uses. That login home is a dedicated credential directory. It holds
 `auth.json` and the files Codex makes next to it: `auth.json.lock` and transient `.auth-*` save
-files. It holds nothing unrelated; files left by `codex login` (logs, `tmp/`) are removed. It is
+files. It holds nothing unrelated; files left by `codex login` (logs, `tmp/`) are removed. The login
+home used in spike #21 still held `auth.lock`, `log/` and `tmp/`; #40 checks the mount's contents
+before trials start. It is
 mounted as a directory, read-write, into the trial, and the trial's `CODEX_HOME/auth.json` is a
 symlink to the `auth.json` in it. Mounting the file alone does not work: Codex 0.171.0 replaces `auth.json` by a
 temporary file and a rename in the target's directory, and a rename onto a mount point fails with
@@ -269,6 +289,7 @@ login home. Refreshed tokens therefore go back only to that home. Sessions, logs
 the trial's `CODEX_HOME` inside the container. The trial homes hold:
 - the policy settings;
 - `ENABLE_CLAUDEAI_MCP_SERVERS=false`;
+- Codex's ChatGPT apps off for every Codex engine (#104), verified before any Codex trial is scored;
 - auto-memory and background tasks off, non-essential traffic off;
 - telemetry, error reporting and the autoupdater off;
 - `enableWeakerNestedSandbox`;
@@ -587,8 +608,10 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
   reproduced. A `claude setup-token` token passed by `--env-file` as `CLAUDE_CODE_OAUTH_TOKEN`
   authenticates `claude -p` in a Linux container on Docker Desktop (Claude Code 2.1.316,
   linux/arm64) with an empty `CLAUDE_CONFIG_DIR`, also with D5's managed settings and shim flags.
-  D3 stands; the `sbx` and separate-user fallbacks are not needed. The same call also works through
-  D3's enforcing proxy (#21). Credential source (decided): on
+  D3 stands; the `sbx` and separate-user fallbacks are not needed. #19 ran with the managed settings
+  and shim flags but no proxy. #21 ran `claude -p` with the same token through D3's enforcing proxy,
+  with and without D5's traffic switches but without the managed settings or shim flags. Credential
+  source (decided): on
   macOS the operator keeps the token in the Keychain (generic password, service
   `rbench-claude-oauth`). rbench reads it at trial start and passes it to `docker` by variable name
   only (`-e CLAUDE_CODE_OAUTH_TOKEN`, value in the child's environment), so the value never appears
@@ -665,18 +688,23 @@ The probe was not run as a runner step in the spike; one equivalent manual call 
   host it never saw:
   - Such a path shows up as a refused attempt in run health; the call fails rather than leaks.
   - A host is added only with a logged reason.
-  - Under the default settings, every Codex process makes about seven refused attempts: one metrics
-    call to `ab.chatgpt.com` and six fetches from `*.oaiusercontent.com`, whose purpose was not
-    identified. Refused attempts do not contaminate a trial (spec `trial-isolation`), but they are
-    noise in run health.
-  - The Codex switches that would stop this traffic (OTel metrics, apps) are a smoke check for D5.
+  - In the one enforced Codex run, under the default settings, the proxy refused seven attempts:
+    one metrics call to `ab.chatgpt.com` and six fetches from `*.oaiusercontent.com`, whose purpose
+    was not identified. Other runs may differ. Refused attempts do not contaminate a trial (spec
+    `trial-isolation`), but they are noise in run health.
+  - Whether Codex's switches (OTel metrics, apps) stop this traffic, the storage fetches included,
+    is untested and open.
+  - Codex's token refresh through the proxy is unverified: the run's token was fresh, so
+    `auth.openai.com` is listed from #20 and the 0.171.0 source, not from a logged connection.
   - No CLI ignored the proxy env. If a future version does, it gets no route at all, because the
-    agent network is internal, so it fails visibly instead of leaking.
+    agent's bridge is internal and isolated (D3), so it fails visibly instead of leaking.
 - **[Codex loads the account's ChatGPT apps.]** → Under a ChatGPT login, Codex 0.171.0 fetched the
   account's apps (connectors) and cached their tools in the trial's `CODEX_HOME` (#21). They are
-  served through `chatgpt.com`, so the allowlist cannot block them. Turning them off belongs in D5's
-  hermetic configuration, like Claude's `ENABLE_CLAUDEAI_MCP_SERVERS=false`, and is a smoke check
-  until it is verified.
+  served through `chatgpt.com`, which the model call needs too. The proxy log shows the same
+  allowed host for both, so neither the allowlist nor the audit can tell them apart. #26 turned the
+  apps off for `plain` with `-c features.apps=false`; #104 does it for every Codex engine in D5's
+  managed policy. Verified apps disablement is a prerequisite: no Codex trial is scored before #104
+  shows it.
 - **[Codex rollouts carry the ChatGPT account id (`session_meta`).]** → Transcripts stay in the run
   directory and are never published; only aggregate scores leave it.
 
