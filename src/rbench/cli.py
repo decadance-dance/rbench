@@ -103,7 +103,7 @@ def _run(args: argparse.Namespace) -> int:
             runs_dir=args.runs,
             run_id=args.run_id,
         )
-        trials = len(load_plan(run_dir)["trials"])
+        trials = len(load_plan(run_dir).trials)
     except (OSError, ValueError) as e:
         print(f"rbench run: {e}", file=sys.stderr)
         return ExitCode.ERROR

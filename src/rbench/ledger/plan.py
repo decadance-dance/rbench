@@ -7,15 +7,19 @@
     trials/<trial-id>/   one per trial (see `rbench.ledger.trials`), created `pending`
 
 The plan is one round of a matrix: its configurations, the version of every task set and the
-content hash of every planned task, each engine's pin, the CLI versions and the image digest, and
-the trials in queue order (attempt, then task, then configuration). It holds no timestamps, so the
-same inputs give the same bytes, and the run never re-reads its matrix: an edited matrix only
-earns a warning (`matrix_warning`).
+content hash of every planned task, each engine's pin, CLI versions, image digest and how each
+role receives its model and effort, and the trials in queue order (attempt, then task, then
+configuration). It holds no timestamps, so the same inputs give the same bytes, and the run never
+re-reads its matrix: an edited matrix only earns a warning (`matrix_warning`).
+
+The matrix path is stored relative to the rbench checkout, never as an absolute or home path,
+because run directories may be published; a matrix outside the checkout is refused.
 
 Image digests and the CLI versions found in each image come from the image build, so they are an
 explicit input here (`Image`) and must match the versions the engine declaration pins.
 """
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -26,14 +30,21 @@ import time
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from rbench.atomic import atomic_write
-from rbench.engines.declaration import Engine, load_engine
-from rbench.engines.pins import check_ref
-from rbench.ledger.trials import RAW_DIR, LedgerError, dump_json, set_state
-from rbench.matrix.expansion import Configuration, Matrix, MatrixError, parse_matrix
-from rbench.tasks.loader import Task
+from rbench.engines.declaration import CLIS, DELIVERIES, Engine, load_engine
+from rbench.engines.pins import MODELS, FloatingRefError, check_ref
+from rbench.ledger.trials import RAW_DIR, LedgerError, dump_json, no_repeated_keys, set_state
+from rbench.matrix.expansion import (
+    STAGES,
+    Configuration,
+    Matrix,
+    MatrixError,
+    RoleSetting,
+    parse_matrix,
+)
+from rbench.tasks.loader import TASK_ID, TASK_SETS, Task
 from rbench.tasks.manifest import (
     CORE_LIST_FILE,
     CoreList,
@@ -51,12 +62,86 @@ TRIALS_DIR = "trials"
 RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 # The hidden set's directory is operator configuration (issue #35); until then runs plan these.
 PUBLIC_SETS = ("reviewbench", "ours")
+PIN_KINDS = ("git", "version", "sha256", "cli")
+# limit: the checkout of an editable install (`uv run`); an installed wheel has no checkout, so
+# every matrix is outside it and `rbench run` refuses.
+CHECKOUT_ROOT = Path(__file__).resolve().parents[3]
+_HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
 class Image:
     ref: str  # <name>@sha256:<64 hex>
     clis: dict[str, str]  # CLI -> the version installed in the image
+
+
+@dataclass(frozen=True)
+class MatrixFile:
+    path: str  # POSIX, relative to the rbench checkout
+    sha256: str
+
+
+@dataclass(frozen=True)
+class PlannedRound:
+    name: str
+    budget: dict[str, int]  # provider -> tokens, for every provider the round uses
+
+
+@dataclass(frozen=True)
+class Pin:
+    kind: str
+    ref: str
+
+
+@dataclass(frozen=True)
+class PlannedRole:
+    cli: str | None  # the declared CLI; None: the model's CLI
+    delivery: str  # flag | config
+
+
+@dataclass(frozen=True)
+class PlannedEngine:
+    pin: Pin
+    version: str
+    clis: dict[str, str]
+    image: str
+    roles: dict[str, PlannedRole]
+
+
+@dataclass(frozen=True)
+class PlannedConfiguration:
+    id: str
+    providers: tuple[str, ...]
+    settings: dict
+
+
+@dataclass(frozen=True)
+class PlannedTask:
+    id: str
+    set: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class PlannedTrial:
+    id: str
+    attempt: int
+    task: str
+    configuration: str
+
+
+@dataclass(frozen=True)
+class Plan:
+    format: int
+    matrix: MatrixFile
+    stage: str
+    round: PlannedRound
+    attempts: int
+    configurations: tuple[PlannedConfiguration, ...]
+    engines: dict[str, PlannedEngine]
+    task_sets: dict[str, int]
+    tasks: tuple[PlannedTask, ...]
+    trials: tuple[PlannedTrial, ...]
 
 
 def trial_id(task_id: str, configuration: Configuration, attempt: int) -> str:
@@ -68,6 +153,24 @@ def _who(task: Task) -> str:
     return "a hidden task" if task.set == "hidden" else f"task {task.id!r}"
 
 
+def _exact(where: str, kind: str, value: object, field: str) -> str:
+    try:
+        return check_ref(where, kind, value, field)
+    except FloatingRefError as e:
+        raise LedgerError(str(e)) from None
+
+
+def check_image(where: str, image: Image) -> None:
+    """The image is referenced by digest, and its CLIs are known CLIs at exact versions."""
+    _exact(where, "image", image.ref, "image")
+    if not (isinstance(image.clis, dict) and image.clis):
+        raise LedgerError(f"{where}: clis must name at least one CLI")
+    for cli, version in image.clis.items():
+        if cli not in CLIS:
+            raise LedgerError(f"{where}: clis: unknown CLI {cli!r}; expected one of {CLIS}")
+        _exact(where, "version", version, f"clis.{cli}")
+
+
 def freeze_plan(
     matrix: Matrix,
     round_name: str,
@@ -77,13 +180,16 @@ def freeze_plan(
     images: Mapping[str, Image],
     matrix_path: str,
     matrix_sha256: str,
-) -> dict:
-    """The frozen plan of round `round_name` of `matrix`, as plan.json stores it.
+) -> Plan:
+    """The frozen plan of round `round_name` of `matrix`.
 
     `task_sets` are `load_task_set` results, so each task already matches its manifest's hash.
     `core` is the core list, needed when the matrix plans core tasks. `images` maps each engine
-    to its image. `matrix_path` and `matrix_sha256` name the matrix file as it was read.
+    to its image; every entry is checked, used or not. `matrix_path` (relative to the checkout)
+    and `matrix_sha256` name the matrix file as it was read.
     """
+    for name, image in sorted(images.items()):
+        check_image(f"image of engine {name!r}", image)
     round_ = next((r for r in matrix.rounds if r.name == round_name), None)
     if round_ is None:
         names = ", ".join(r.name for r in matrix.rounds)
@@ -101,17 +207,20 @@ def freeze_plan(
             raise LedgerError(f"{where}: resolve tag {engine.pin_ref} to its commit first")
         if (image := images.get(name)) is None:
             raise LedgerError(f"{where}: no image given")
-        ref = check_ref(where, "image", image.ref, "image")
         if image.clis != engine.clis:
             raise LedgerError(
-                f"{where}: image {ref} has CLIs {image.clis}, but the declaration pins"
+                f"{where}: image {image.ref} has CLIs {image.clis}, but the declaration pins"
                 f" {engine.clis}"
             )
         engine_records[name] = {
             "pin": {"kind": engine.pin_kind, "ref": engine.pin_ref},
             "version": engine.version,
             "clis": engine.clis,
-            "image": ref,
+            "image": image.ref,
+            # How each role gets its model and effort: a changed declaration changes the launch.
+            "roles": {
+                r: {"cli": role.cli, "delivery": role.delivery} for r, role in engine.roles.items()
+            },
         }
     for c in round_.configurations:
         if c.version != engines[c.engine].version:
@@ -155,10 +264,7 @@ def freeze_plan(
         for task in selected
         for c in round_.configurations
     ]
-    if len({t["id"] for t in trials}) != len(trials):
-        raise LedgerError("two trials share an id; two configurations share a hash prefix")
-
-    return {
+    data = {
         "format": PLAN_FORMAT,
         "matrix": {"path": matrix_path, "sha256": matrix_sha256},
         "stage": matrix.stage,
@@ -173,9 +279,209 @@ def freeze_plan(
         "tasks": [planned[t] for t in selected],
         "trials": trials,
     }
+    # The same checks resume applies, so a plan that is written can always be read back.
+    return parse_plan(data, "frozen plan")
 
 
-def create_run(runs_dir: Path, run_id: str, plan: dict) -> Path:
+def _object(value: object, where: str) -> dict:
+    if not isinstance(value, dict):
+        raise LedgerError(f"{where}: expected an object")
+    return value
+
+
+def _fields(value: object, where: str, keys: set[str]) -> dict:
+    value = _object(value, where)
+    if value.keys() != keys:
+        raise LedgerError(f"{where}: expected exactly the fields {', '.join(sorted(keys))}")
+    return value
+
+
+def _list(value: object, where: str) -> list:
+    if not (isinstance(value, list) and value):
+        raise LedgerError(f"{where}: expected a non-empty list")
+    return value
+
+
+def _string(value: object, where: str, pattern: re.Pattern | None = None) -> str:
+    if not (isinstance(value, str) and value and (pattern is None or pattern.fullmatch(value))):
+        raise LedgerError(f"{where}: expected a valid string")
+    return value
+
+
+def _count(value: object, where: str) -> int:
+    if type(value) is not int or value < 1:
+        raise LedgerError(f"{where}: expected a positive integer")
+    return value
+
+
+def _one_of(value: object, where: str, allowed: Sequence[str]) -> str:
+    if not (isinstance(value, str) and value in allowed):
+        raise LedgerError(f"{where}: expected one of {', '.join(allowed)}")
+    return value
+
+
+def parse_plan(data: object, where: str) -> Plan:
+    """Validate a plan as plan.json stores it; errors name `where` and the field or trial."""
+    found = data.get("format") if isinstance(data, dict) else None
+    if type(found) is not int or found != PLAN_FORMAT:
+        raise LedgerError(
+            f"{where}: format: plan format {found!r}, but this rbench reads format {PLAN_FORMAT};"
+            " continue the run with the rbench version that started it, or start a new run"
+        )
+    d = _fields(
+        data,
+        where,
+        {"format", "matrix", "stage", "round", "attempts", "configurations", "engines"}
+        | {"task_sets", "tasks", "trials"},
+    )
+
+    m = _fields(d["matrix"], f"{where}: matrix", {"path", "sha256"})
+    path = _string(m["path"], f"{where}: matrix.path")
+    posix = PurePosixPath(path)
+    if posix.is_absolute() or ".." in posix.parts or "\\" in path or posix.as_posix() != path:
+        raise LedgerError(f"{where}: matrix.path: expected a plain path relative to the checkout")
+    matrix = MatrixFile(path, _string(m["sha256"], f"{where}: matrix.sha256", _HEX64))
+    stage = _one_of(d["stage"], f"{where}: stage", tuple(STAGES))
+    attempts = _count(d["attempts"], f"{where}: attempts")
+
+    engines: dict[str, PlannedEngine] = {}
+    for name, raw in sorted(_object(d["engines"], f"{where}: engines").items()):
+        at = f"{where}: engines.{name}"
+        e = _fields(raw, at, {"pin", "version", "clis", "image", "roles"})
+        pin = _fields(e["pin"], f"{at}.pin", {"kind", "ref"})
+        clis = _object(e["clis"], f"{at}.clis")
+        image = Image(e["image"], clis)
+        check_image(at, image)
+        roles = {}
+        for role, r in sorted(_object(e["roles"], f"{at}.roles").items()):
+            r = _fields(r, f"{at}.roles.{role}", {"cli", "delivery"})
+            cli = None if r["cli"] is None else _one_of(r["cli"], f"{at}.roles.{role}.cli", CLIS)
+            delivery = _one_of(r["delivery"], f"{at}.roles.{role}.delivery", DELIVERIES)
+            roles[role] = PlannedRole(cli, delivery)
+        if not roles:
+            raise LedgerError(f"{at}.roles: expected at least one role")
+        kind = _one_of(pin["kind"], f"{at}.pin.kind", PIN_KINDS)
+        ref = _string(pin["ref"], f"{at}.pin.ref")
+        if kind == "cli":
+            version = clis.get(ref)
+        else:
+            version = _exact(at, kind, ref, "pin.ref")
+            if ref.startswith("refs/tags/"):
+                raise LedgerError(f"{at}.pin.ref: a tag; the plan needs its commit")
+        if e["version"] != version:
+            raise LedgerError(f"{at}.version: not the version its pin gives")
+        engines[name] = PlannedEngine(
+            Pin(kind, ref),
+            version,
+            dict(sorted(clis.items())),
+            image.ref,
+            roles,
+        )
+
+    configurations: dict[str, tuple[PlannedConfiguration, Configuration]] = {}
+    for i, raw in enumerate(_list(d["configurations"], f"{where}: configurations")):
+        at = f"{where}: configurations[{i}]"
+        c = _fields(raw, at, {"id", "providers", "settings"})
+        s = _fields(c["settings"], f"{at}.settings", {"engine", "version", "roles"})
+        engine = engines.get(s["engine"]) if isinstance(s["engine"], str) else None
+        if engine is None:
+            raise LedgerError(f"{at}.settings.engine: not an engine of the plan")
+        if s["version"] != engine.version:
+            raise LedgerError(f"{at}.settings.version: not the plan's version of its engine")
+        role_settings = _object(s["roles"], f"{at}.settings.roles")
+        if role_settings.keys() != engine.roles.keys():
+            raise LedgerError(f"{at}.settings.roles: not the roles of its engine")
+        roles = []
+        for role, r in sorted(role_settings.items()):
+            r = _fields(r, f"{at}.settings.roles.{role}", {"models", "effort"})
+            models = _list(r["models"], f"{at}.settings.roles.{role}.models")
+            for j, model in enumerate(models):
+                _one_of(model, f"{at}.settings.roles.{role}.models[{j}]", tuple(MODELS))
+            effort = _string(r["effort"], f"{at}.settings.roles.{role}.effort")
+            roles.append((role, RoleSetting(tuple(models), effort)))
+        config = Configuration(s["engine"], s["version"], tuple(roles))
+        if config.settings != s or config.id != c["id"]:
+            raise LedgerError(f"{at}.id: does not match its settings")
+        if c["providers"] != sorted(config.providers):
+            raise LedgerError(f"{at}.providers: not the CLIs of its models")
+        if config.id in configurations:
+            raise LedgerError(f"{at}.id: repeats an earlier configuration")
+        configurations[config.id] = (
+            PlannedConfiguration(config.id, tuple(c["providers"]), s),
+            config,
+        )
+    used = {c.engine for _, c in configurations.values()}
+    if used != engines.keys():
+        raise LedgerError(f"{where}: engines: expected exactly the engines of the configurations")
+
+    r = _fields(d["round"], f"{where}: round", {"name", "budget"})
+    budget = _object(r["budget"], f"{where}: round.budget")
+    providers = {p for _, c in configurations.values() for p in c.providers}
+    if budget.keys() != providers:
+        raise LedgerError(
+            f"{where}: round.budget: expected a budget for exactly {sorted(providers)}"
+        )
+    round_ = PlannedRound(
+        _string(r["name"], f"{where}: round.name"),
+        {p: _count(v, f"{where}: round.budget.{p}") for p, v in sorted(budget.items())},
+    )
+
+    task_sets = {}
+    for name, version in sorted(_object(d["task_sets"], f"{where}: task_sets").items()):
+        _one_of(name, f"{where}: task_sets", TASK_SETS)
+        task_sets[name] = _count(version, f"{where}: task_sets.{name}")
+    tasks: list[PlannedTask] = []
+    for i, raw in enumerate(_list(d["tasks"], f"{where}: tasks")):
+        at = f"{where}: tasks[{i}]"
+        t = _fields(raw, at, {"id", "set", "sha256"})
+        task = PlannedTask(
+            _string(t["id"], f"{at}.id", TASK_ID),
+            _one_of(t["set"], f"{at}.set", tuple(task_sets)),
+            _string(t["sha256"], f"{at}.sha256", _HEX64),
+        )
+        if any(other.id == task.id for other in tasks):
+            raise LedgerError(f"{at}.id: repeats an earlier task")
+        tasks.append(task)
+
+    expected = [
+        PlannedTrial(trial_id(t.id, c, a), a, t.id, c.id)
+        for a in range(1, attempts + 1)
+        for t in tasks
+        for _, c in configurations.values()
+    ]
+    raw_trials = _list(d["trials"], f"{where}: trials")
+    if len(raw_trials) != len(expected):
+        raise LedgerError(
+            f"{where}: trials: {len(raw_trials)} trials, but attempts × tasks × configurations"
+            f" gives {len(expected)}"
+        )
+    for i, (raw, want) in enumerate(zip(raw_trials, expected, strict=True)):
+        at = f"{where}: trials[{i}]"
+        t = _fields(raw, at, {"id", "attempt", "task", "configuration"})
+        _count(t["attempt"], f"{at}.attempt")
+        for key, value in dataclasses.asdict(want).items():
+            if t[key] != value:
+                raise LedgerError(
+                    f"{at}.{key}: does not match the plan's tasks, configurations and queue order"
+                )
+    if len({t.id for t in expected}) != len(expected):
+        raise LedgerError(f"{where}: trials: two configurations share a hash prefix")
+
+    return Plan(
+        PLAN_FORMAT,
+        matrix,
+        stage,
+        round_,
+        attempts,
+        tuple(p for p, _ in configurations.values()),
+        engines,
+        task_sets,
+        tuple(tasks),
+        tuple(expected),
+    )
+
+
+def create_run(runs_dir: Path, run_id: str, plan: Plan) -> Path:
     """Create `runs_dir/run_id` with the plan, the lock file and every trial pending.
 
     The directory is built under a temporary name and renamed into place, so a run directory
@@ -190,11 +496,11 @@ def create_run(runs_dir: Path, run_id: str, plan: dict) -> Path:
     runs_dir.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(dir=runs_dir, prefix=f".{run_id}.", suffix=".tmp"))
     try:
-        atomic_write(tmp / PLAN_FILE, dump_json(plan))
+        atomic_write(tmp / PLAN_FILE, dump_json(dataclasses.asdict(plan)))
         atomic_write(tmp / LOCK_FILE, b"")
         (tmp / TRIALS_DIR).mkdir(mode=0o700)
-        for trial in plan["trials"]:
-            trial_dir = tmp / TRIALS_DIR / trial["id"]
+        for trial in plan.trials:
+            trial_dir = tmp / TRIALS_DIR / trial.id
             trial_dir.mkdir(mode=0o700)
             (trial_dir / RAW_DIR).mkdir(mode=0o700)
             set_state(trial_dir, "pending")
@@ -206,37 +512,43 @@ def create_run(runs_dir: Path, run_id: str, plan: dict) -> Path:
     return run_dir
 
 
-def load_plan(run_dir: Path) -> dict:
-    """Read a run's frozen plan; refuse a plan written in another format."""
+def load_plan(run_dir: Path) -> Plan:
+    """Read and validate a run's frozen plan; refuse a plan written in another format."""
     path = Path(run_dir) / PLAN_FILE
     try:
-        plan = json.loads(path.read_bytes())
+        data = json.loads(path.read_bytes(), object_pairs_hook=no_repeated_keys)
     except (OSError, ValueError) as e:
         raise LedgerError(f"{path}: cannot read the plan: {e}") from e
-    found = plan.get("format") if isinstance(plan, dict) else None
-    if found != PLAN_FORMAT:
+    return parse_plan(data, str(path))
+
+
+def checkout_path(matrix_path: Path, root: Path | None = None) -> str:
+    """`matrix_path` relative to the rbench checkout, as plan.json stores it."""
+    root = (root or CHECKOUT_ROOT).resolve()
+    try:
+        return Path(matrix_path).resolve().relative_to(root).as_posix()
+    except ValueError:
         raise LedgerError(
-            f"{path}: plan format {found!r}, but this rbench reads format {PLAN_FORMAT};"
-            " continue the run with the rbench version that started it, or start a new run"
-        )
-    return plan
+            f"matrix {matrix_path} is outside the rbench checkout {root}; a run records its"
+            " matrix relative to the checkout, so keep the matrix file inside it"
+        ) from None
 
 
-def matrix_warning(plan: dict) -> str | None:
+def matrix_warning(plan: Plan, root: Path | None = None) -> str | None:
     """A warning when the plan's matrix file changed or is gone; the run keeps its plan.
 
-    A relative matrix path is read from the current directory, as the run read it.
+    The path is resolved against the rbench checkout, whatever the current directory.
     """
-    path = Path(plan["matrix"]["path"])
+    path = (root or CHECKOUT_ROOT) / plan.matrix.path
     try:
-        changed = hashlib.sha256(path.read_bytes()).hexdigest() != plan["matrix"]["sha256"]
+        changed = hashlib.sha256(path.read_bytes()).hexdigest() != plan.matrix.sha256
     except OSError:
         changed = True
     if not changed:
         return None
     return (
-        f"warning: matrix file {path} changed or is gone since the run started; the run"
-        " continues with its frozen plan (a changed matrix needs a new run)"
+        f"warning: matrix file {plan.matrix.path} changed or is gone since the run started; the"
+        " run continues with its frozen plan (a changed matrix needs a new run)"
     )
 
 
@@ -254,9 +566,12 @@ def load_engines(engines_dir: Path) -> dict[str, Engine]:
 
 
 def load_images(path: Path) -> dict[str, Image]:
-    """Read `{"<engine>": {"image": "<name>@sha256:<hex>", "clis": {"<cli>": "<version>"}}}`."""
+    """Read `{"<engine>": {"image": "<name>@sha256:<hex>", "clis": {"<cli>": "<version>"}}}`.
+
+    Every entry is checked, used by the round or not; a repeated key is refused.
+    """
     try:
-        data = json.loads(Path(path).read_bytes())
+        data = json.loads(Path(path).read_bytes(), object_pairs_hook=no_repeated_keys)
     except (OSError, ValueError) as e:
         raise LedgerError(f"images file {path}: cannot read it: {e}") from e
     if not isinstance(data, dict):
@@ -264,16 +579,10 @@ def load_images(path: Path) -> dict[str, Image]:
     images = {}
     for name, raw in data.items():
         where = f"images file {path}: engine {name!r}"
-        if not (isinstance(raw, dict) and raw.keys() == {"image", "clis"}):
-            raise LedgerError(f"{where}: expected exactly the fields image and clis")
-        clis = raw["clis"]
-        if not (
-            isinstance(raw["image"], str)
-            and isinstance(clis, dict)
-            and all(isinstance(v, str) for v in clis.values())
-        ):
-            raise LedgerError(f"{where}: image must be a string and clis an object of strings")
-        images[name] = Image(raw["image"], dict(clis))
+        raw = _fields(raw, where, {"image", "clis"})
+        image = Image(raw["image"], _object(raw["clis"], f"{where}: clis"))
+        check_image(where, image)
+        images[name] = image
     return images
 
 
@@ -286,11 +595,14 @@ def start_run(
     tasks_root: Path,
     runs_dir: Path,
     run_id: str | None = None,
+    root: Path | None = None,
 ) -> Path:
     """Load the inputs from disk, freeze the plan of one round and create its run directory.
 
-    The default run id is the UTC start time, the stage and the round.
+    Every input is checked before anything is written. The default run id is the UTC start time,
+    the stage and the round. `root` is the rbench checkout (default: this one).
     """
+    stored_path = checkout_path(matrix_path, root)
     raw = Path(matrix_path).read_bytes()
     try:
         data = tomllib.loads(raw.decode("utf-8"))
@@ -308,7 +620,7 @@ def start_run(
         task_sets,
         core,
         load_images(images_path),
-        str(matrix_path),
+        stored_path,
         hashlib.sha256(raw).hexdigest(),
     )
     if run_id is None:
