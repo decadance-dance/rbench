@@ -94,14 +94,28 @@ session found in a trial's transcripts SHALL appear in the shim log.
   from the shim log
 
 ### Requirement: Credentials
-Credentials SHALL come from a local, git-ignored file. They SHALL NOT appear in images, logs,
-results or reports. Codex SHALL use a login made only for the benchmark, in a login home no other
-tool uses. All Codex processes of one trial SHALL share that login file, and token refreshes SHALL
-be written back to that home only, never to the operator's other Codex logins.
+Credentials SHALL come from the operator's storage outside the repository: on macOS, the Keychain
+for the Claude token, and for Codex the benchmark-only login home, a directory. The benchmark SHALL
+pass them to the trial when it starts, without the value appearing on a command line, in a file in
+the run directory or in logs. They SHALL NOT appear in images (image configuration such as
+`config.Env`, or any layer), results or reports.
 
 #### Scenario: Credentials kept out of results
 - **WHEN** a run's raw output and report are produced
 - **THEN** they contain no credential value
+
+#### Scenario: Claude token passed at trial start
+- **WHEN** a trial starts a container that needs the Claude token
+- **THEN** the benchmark reads the token from the operator's storage and passes it by environment
+  variable name only, so no command line, run-directory file, log or image (configuration or
+  layer) holds its value
+
+### Requirement: Benchmark-only Codex login
+Codex SHALL use a login made only for the benchmark, in a login home no other tool uses. The
+benchmark SHALL mount that credential-only login directory into the trial and Codex SHALL use its
+`auth.json` in place; the file SHALL NOT be copied. All Codex processes of one trial SHALL share
+that login file, and token refreshes SHALL be written back to that home only, never to the
+operator's other Codex logins.
 
 #### Scenario: Token refresh during a trial
 - **WHEN** Codex refreshes its token in a trial

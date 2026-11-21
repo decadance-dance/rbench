@@ -1,9 +1,21 @@
 #!/bin/sh
-# The merge gate (CI job `ci-ok`): format, lints, tests. Every step runs; any failure fails.
+# The merge gate (CI job `ci-ok`): the publication guard, format, lints and tests.
+# Every step runs; any failure fails. The guard runs first: when it fails, the other steps run with
+# their output hidden, so they cannot quote a file that holds a hidden value.
 cd "$(dirname "$0")/.." || exit 1
 [ -f pyproject.toml ] || { echo "bin/check: no pyproject.toml yet, nothing to check"; exit 0; }
 status=0
-uv run --locked ruff format --check || status=1
-uv run --locked ruff check || status=1
-uv run --locked pytest -q || status=1
+quiet=
+uv run --locked python -m rbench.tasks.guard public || { status=1; quiet=1; }
+step() {
+  if [ -z "$quiet" ]; then
+    "$@" || status=1
+  elif ! "$@" >/dev/null 2>&1; then
+    status=1
+    echo "bin/check: failed, output hidden: $*" >&2
+  fi
+}
+step uv run --locked ruff format --check
+step uv run --locked ruff check
+step uv run --locked pytest -q
 exit $status

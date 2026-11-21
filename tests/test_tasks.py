@@ -424,6 +424,14 @@ def test_hidden_task_needs_hidden_id_prefix(tmp_path: Path) -> None:
         load_hidden(tmp_path)
 
 
+def test_hidden_task_id_is_more_than_the_prefix(tmp_path: Path) -> None:
+    write_task(tmp_path, HIDDEN_ID_PREFIX, "hidden")
+    with pytest.raises(
+        TaskError, match=rf"{ENTRY0}: task.json: 'id': a hidden task id needs characters after"
+    ):
+        load_hidden(tmp_path)
+
+
 def test_missing_set_directory_fails(tmp_path: Path) -> None:
     with pytest.raises(TaskError, match=r"does not exist"):
         load_tasks(tmp_path / "nope")
