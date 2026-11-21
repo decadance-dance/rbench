@@ -642,13 +642,22 @@ As implemented (#58, `rbench.trial.usage`):
   has no usage of its own and flags the trial.
 - The pin's rollout persistence drops `ModelReroute` and `Warning`, so a rollout cannot show the
   effective model. Its `exec --json` stdout shows a reroute as an `item.completed` error item whose
-  message starts with `model rerouted: `. A Codex session launch with such an item, or with no
-  stdout captured, flags the trial's model attribution as unverified.
+  message starts with `model rerouted: `, but only for the primary thread and turn: `exec` filters
+  the others out. A Codex thread's usage therefore has a verified model only when a captured stdout
+  that reads whole (present, not empty, every line a JSON object without a repeated key) and has
+  no reroute item shows that thread in `thread.started`. Any other thread with usage, a child
+  thread included, flags the trial's model attribution as unverified, and so does a launch whose
+  stdout does not read whole or shows a reroute.
+- Every `turn_context` must name a turn and a model. Two models for one turn, in one rollout or
+  across rollouts, leave that turn's records uncounted and flagged; in the cumulative fallback they
+  count as two models. A `token_count` whose `info` is null is a rate-limit update and is skipped;
+  any other non-object `info` makes the fallback malformed, at its file and line.
 - The stdout fallback's verified model is the one model that every launch of the thread names on its
   argv (`-m`, `--model`, `-c model=`); a model set only in `config.toml` flags the trial. An
   all-zero `turn.completed.usage`, the pin's default when no token count arrived, is no usage. The
   runner passes the stdout it captured per launch; the shims never capture it.
-- Counters are integers from 0 below 2**53, and so are the totals. An optional counter that is
+- Counters are integers from 0 below 2**53, and so are the totals; the ledger's `store_results`
+  and `read_results` hold stored counts to the same bound. An optional counter that is
   absent or null is 0. A line that is not valid JSON, a repeated key included, flags the usage
   incomplete at its file and line. Any other invalid value or a malformed `turn_context`,
   `token_usage_record` or assistant message rejects the usage, naming the file and line; in a

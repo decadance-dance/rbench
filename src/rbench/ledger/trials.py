@@ -136,8 +136,8 @@ def _check_counts(model: object, counts: object, at: str) -> None:
     if not (isinstance(counts, dict) and counts.keys() == USAGE_KEYS):
         raise LedgerError(f"{at}: expected exactly {', '.join(sorted(USAGE_KEYS))}")
     for key, count in counts.items():
-        if type(count) is not int or count < 0:
-            raise LedgerError(f"{at}: {key}: expected a token count from 0")
+        if type(count) is not int or not 0 <= count < 2**53:
+            raise LedgerError(f"{at}: {key}: expected a token count from 0 below 2**53")
 
 
 def set_state(trial_dir: Path, state: str, reason: str | None = None) -> None:

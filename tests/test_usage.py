@@ -84,6 +84,20 @@ def snapshot(usage: dict) -> dict:
     return line
 
 
+def unverified(thread: str) -> str:
+    return (
+        f"Codex thread {thread}: no clean stdout of a launch shows it, so the model its usage"
+        " ran on is unverified"
+    )
+
+
+def info(value: object) -> dict:
+    """A token_count event whose `info` is `value`."""
+    line = copy.deepcopy(TOKEN_COUNT)
+    line["payload"]["info"] = value
+    return line
+
+
 def log(*items: dict) -> list[dict]:
     return [{"seq": n} | item for n, item in enumerate(items, 1)]
 
@@ -212,7 +226,8 @@ def test_multi_process_trial_sums_every_session_by_model_with_side_calls(tmp_pat
 
     usage = count_usage(shim_log, root, out)
 
-    assert usage.incomplete == []
+    # `exec --json` shows only its primary thread, so the review thread's model is unverified.
+    assert usage.incomplete == [unverified("t2")]
     assert usage.models == {
         GPT: counts(40 + 50 + 0, 5 + 4 + 1, 60 + 0 + 9, 8),
         HAIKU: counts(5, 1),
@@ -393,7 +408,10 @@ def test_a_thread_usage_recorded_in_its_parent_rollout_is_not_counted_again(tmp_
     usage = count_usage(shim_log, root, {1: stdout(tmp_path, "t1")})
 
     assert usage.models == {GPT: counts(10, 2)}
-    assert usage.incomplete == [f"Launch 1 (codex): no usage of its own for its session {A}"]
+    assert usage.incomplete == [
+        f"Launch 1 (codex): no usage of its own for its session {A}",
+        unverified("t2"),
+    ]
 
 
 def test_a_fork_holding_only_its_parent_history_has_no_usage_of_its_own(tmp_path, root):
@@ -424,15 +442,74 @@ def test_codex_model_attribution_needs_the_launch_stdout(tmp_path, root):
     shim_log = log(*launch(1, "codex", "exec"), binding(1, A, "t1"))
 
     rerouted = count_usage(shim_log, root, {1: stdout(tmp_path, "t1", reroute=True)})
-    unverified = count_usage(shim_log, root)
+    without = count_usage(shim_log, root)
 
-    assert rerouted.models == unverified.models == {GPT: counts(5, 1)}
+    assert rerouted.models == without.models == {GPT: counts(5, 1)}
     assert rerouted.incomplete == [
-        f"Launch 1 (codex): model rerouted: {GPT} -> gpt-other (HighRiskCyberActivity)"
+        f"Launch 1 (codex): model rerouted: {GPT} -> gpt-other (HighRiskCyberActivity)",
+        unverified("t1"),
     ]
-    assert unverified.incomplete == [
-        "Launch 1 (codex): no stdout captured, so the model its responses ran on is unverified"
+    assert without.incomplete == [unverified("t1")]
+
+
+def broken(tmp_path: Path, kind: str) -> Path:
+    """A launch's stdout that cannot be read whole."""
+    file = tmp_path / "stdout" / f"{kind}.jsonl"
+    if kind == "truncated":  # cut inside the reroute error item
+        text = stdout(tmp_path, "t1", reroute=True).read_text()
+        file.write_text(text[: text.index("model rerouted") + 10])
+    elif kind == "empty":
+        file.parent.mkdir(exist_ok=True)
+        file.write_text("")
+    return file
+
+
+@pytest.mark.parametrize(
+    ("kind", "why"),
+    [
+        ("missing", "its stdout is unreadable (No such file or directory)"),
+        ("empty", "its stdout is empty"),
+        ("truncated", "its stdout line 3 is not a valid JSON record (Unterminated string"),
+    ],
+)
+def test_stdout_that_cannot_be_read_whole_leaves_the_model_unverified(tmp_path, root, kind, why):
+    write(root, A, [meta("t1"), turn("u1", GPT), record("t1", "u1", "r1", codex_usage(7, 0, 1))])
+    shim_log = log(*launch(1, "codex", "exec"), binding(1, A, "t1"))
+    usage = count_usage(shim_log, root, {1: broken(tmp_path, kind)})
+    assert usage.models == {GPT: counts(7, 1)}
+    [problem, thread] = usage.incomplete
+    assert problem.startswith(f"Launch 1 (codex): {why}")
+    assert problem.endswith(", so the models it shows are unverified")
+    assert thread == unverified("t1")
+
+
+def test_a_child_thread_the_stdout_does_not_show_has_an_unverified_model(tmp_path, root):
+    write(root, A, [meta("t1"), turn("u1", GPT), record("t1", "u1", "r1", codex_usage(7, 0, 1))])
+    write(root, B, [meta("t2"), turn("u2", GPT), record("t2", "u2", "r2", codex_usage(10, 0, 2))])
+    shim_log = log(*launch(1, "codex", "exec"), binding(1, A, "t1"), binding(1, B, "t2"))
+    usage = count_usage(shim_log, root, {1: stdout(tmp_path, "t1")})
+    assert usage.models == {GPT: counts(17, 3)}
+    assert usage.incomplete == [unverified("t2")]
+
+
+def test_conflicting_turn_models_in_one_rollout_stay_visible(tmp_path, root):
+    lines = [meta("t1"), turn("u1", GPT), record("t1", "u1", "r1", codex_usage(7, 0, 1))]
+    write(root, A, [*lines, turn("u1", "gpt-other")])
+    shim_log = log(*launch(1, "codex", "exec"), binding(1, A, "t1"))
+    usage = count_usage(shim_log, root, {1: stdout(tmp_path, "t1")})
+    assert usage.models == {}
+    assert usage.incomplete == [
+        f"{A}:3: turn u1 has 2 turn_context models",
+        f"Launch 1 (codex): no usage of its own for its session {A}",
     ]
+
+
+@pytest.mark.parametrize("model", [["gpt-other"], "", None])
+def test_a_turn_context_without_a_model_name_is_rejected(root, model):
+    lines = [meta("t1"), turn("u1", GPT), record("t1", "u1", "r1", codex_usage(7, 0, 1))]
+    write(root, A, [*lines, {"type": "turn_context", "payload": {"turn_id": "u1", "model": model}}])
+    with pytest.raises(UsageError, match=r"rollout-a\.jsonl:4: turn_context: expected a turn id"):
+        count_usage([], root)
 
 
 def test_without_records_the_last_token_count_total_is_the_thread_usage(tmp_path, root):
@@ -464,6 +541,14 @@ def test_without_records_the_last_token_count_total_is_the_thread_usage(tmp_path
         (
             [meta("t1"), turn("u1", GPT), turn("u2", "gpt-other"), snapshot(codex_usage(9, 0, 1))],
             "covers 2 models",
+        ),
+        (
+            [meta("t1"), turn("u1", GPT), snapshot(codex_usage(9, 0, 1)), turn("u1", "gpt-other")],
+            "covers 2 models",
+        ),
+        (
+            [meta("t1"), turn("u1", GPT), snapshot(codex_usage(7, 0, 1)), info([])],
+            f"is malformed ({A}:4: token_count info: expected an object)",
         ),
         (
             [meta("t1"), turn("u1", GPT), snapshot(codex_usage(1, 2, 1))],
@@ -539,8 +624,23 @@ def test_a_reroute_on_stdout_flags_the_stdout_fallback_too(tmp_path, root):
     usage = count_usage(shim_log, root, out)
     assert usage.models == {GPT: counts(9, 1)}
     assert usage.incomplete == [
-        f"Launch 1 (codex): model rerouted: {GPT} -> gpt-other (HighRiskCyberActivity)"
+        f"Launch 1 (codex): model rerouted: {GPT} -> gpt-other (HighRiskCyberActivity)",
+        unverified("t1"),
     ]
+
+
+def test_a_stdout_line_with_a_repeated_key_is_not_dropped(tmp_path, root):
+    shim_log = log(*launch(1, "codex", "-m", GPT, "exec"), binding(1, A, "t1"))
+    out = stdout(tmp_path, "t1", codex_usage(7, 0, 1))
+    with out.open("a") as f:
+        f.write('{"type": "turn.completed", "usage": {"input_tokens": 9, "input_tokens": 9}}\n')
+    usage = count_usage(shim_log, root, {1: out})
+    assert usage.models == {}
+    why = "line 4 is not a valid JSON record (a key is repeated"
+    assert usage.incomplete[0].startswith(
+        f"Codex rollout {A}: missing or unreadable, and the stdout of launch 1 {why}"
+    )
+    assert any(r.startswith(f"Launch 1 (codex): its stdout {why}") for r in usage.incomplete)
 
 
 def test_usage_record_keeps_normalization_apart_in_the_ledger(tmp_path):

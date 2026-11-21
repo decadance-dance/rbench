@@ -13,8 +13,9 @@ ledger's uncached input, output, cache read and cache creation:
   `token_count` total, only when it starts from zero, never resets and runs one model. A bound
   rollout that is missing or unreadable falls back to the last `turn.completed.usage` on the stdout
   of its thread's last launch, under the same conditions, with the model its launches name.
-- Codex's rollout does not record a model reroute; only a launch's stdout shows one. A Codex
-  session launch whose stdout the runner did not capture leaves its model attribution unverified.
+- Codex's rollout does not record a model reroute; only a launch's stdout shows one, and only for
+  the threads it starts. A Codex thread's usage has a verified model only when a captured stdout
+  that reads whole, with no reroute, shows that thread.
 
 The figure is flagged incomplete, with a reason per gap, when a session launch in the shim log has
 no session with usage of its own, when a thread's usage cannot be recovered, or when a response's
@@ -67,9 +68,9 @@ class _Rollout:
     path: str
     thread: str
     forked: bool
-    models: dict[str, str] = field(default_factory=dict)  # turn id -> its turn_context model
+    models: dict[str, set[str]] = field(default_factory=dict)  # turn id -> turn_context models
     responses: list[tuple[tuple, str, Counts, str]] = field(default_factory=list)
-    snapshots: list[tuple[object, str]] = field(default_factory=list)  # (total, where)
+    snapshots: list[tuple[object, str]] = field(default_factory=list)  # (token_count info, where)
 
 
 def count_usage(
@@ -79,7 +80,7 @@ def count_usage(
     against the shim log `records`. `codex_stdout` maps a launch number to the `codex exec --json`
     stdout the runner captured for it: the evidence of the model a launch ran, and the last
     fallback for a rollout that is missing."""
-    stdout = codex_stdout or {}
+    stdout = {n: _read_stdout(path) for n, path in (codex_stdout or {}).items()}
     incomplete: list[str] = []
     seen: dict[tuple, tuple[str, Counts]] = {}  # what is counted once -> (model, counts)
     used: set[str] = set()  # Claude session ids and Codex threads with usage of their own
@@ -110,6 +111,7 @@ def count_usage(
             incomplete.append(f"Codex rollout {path}: missing or unreadable, and {why}")
 
     sessions: dict[int | None, list[str]] = {}
+    verified: set[str] = set()  # Codex threads a clean stdout shows, with no reroute
     children = _children(records)
     for r in records:
         if r["kind"] == "hook":
@@ -127,8 +129,31 @@ def count_usage(
         for session in dict.fromkeys(bound):
             if threads.get(session, session) not in used:
                 incomplete.append(f"{where}: no usage of its own for its session {session}")
-        if launch.get("cli") == "codex":
-            incomplete += _model_doubt(where, stdout.get(n))
+        if launch.get("cli") == "codex" and n in stdout:
+            events, problem = stdout[n]
+            reroutes = [
+                f"{where}: {e['item']['message']}"
+                for e in events
+                if e.get("type") == "item.completed"
+                and isinstance(e.get("item"), dict)
+                and str(e["item"].get("message", "")).startswith(REROUTE)
+            ]
+            if problem:
+                incomplete.append(
+                    f"{where}: its stdout {problem}, so the models it shows are unverified"
+                )
+            incomplete += reroutes
+            if not (problem or reroutes):
+                verified |= {
+                    e.get("thread_id") for e in events if e.get("type") == "thread.started"
+                }
+    # The rollout cannot show a reroute (Codex 0.171.0 does not persist one), and `exec --json`
+    # shows only its primary thread's: a thread no clean stdout shows has an unverified model (D7).
+    for thread in sorted({key[1] for key in seen if key[0] in ("codex", "thread")} - verified):
+        incomplete.append(
+            f"Codex thread {thread}: no clean stdout of a launch shows it, so the model its usage"
+            " ran on is unverified"
+        )
 
     models: dict[str, Counts] = {}
     for model, counts in seen.values():
@@ -262,8 +287,10 @@ def _rollout(file: Path, path: str, incomplete: list[str]) -> _Rollout | None:
         where, kind, payload = f"{path}:{n}", r.get("type"), r.get("payload")
         if kind in ("turn_context", "token_usage_record") and not isinstance(payload, dict):
             raise UsageError(f"{where}: {kind}: expected a payload object")
-        if kind == "turn_context" and _text(payload.get("turn_id")) and _text(payload.get("model")):
-            rollout.models[payload["turn_id"]] = payload["model"]
+        if kind == "turn_context":
+            if not (_text(payload.get("turn_id")) and _text(payload.get("model"))):
+                raise UsageError(f"{where}: turn_context: expected a turn id and a model")
+            rollout.models.setdefault(payload["turn_id"], set()).add(payload["model"])
         elif kind == "token_usage_record":
             key = tuple(payload.get(k) for k in ("thread_id", "turn_id", "response_id"))
             if not all(_text(k) for k in key):
@@ -276,9 +303,9 @@ def _rollout(file: Path, path: str, incomplete: list[str]) -> _Rollout | None:
             kind == "event_msg"
             and isinstance(payload, dict)
             and payload.get("type") == "token_count"
-            and isinstance(payload.get("info"), dict)
+            and payload.get("info") is not None  # null: a rate-limit update only
         ):
-            rollout.snapshots.append((payload["info"].get("total_token_usage"), where))
+            rollout.snapshots.append((payload["info"], where))
     return rollout
 
 
@@ -286,8 +313,8 @@ def _codex(rollouts: list[_Rollout], seen: dict, incomplete: list[str]) -> set[s
     """Count the Codex threads' usage; the threads that have usage of their own."""
     models: dict[str, set[str]] = {}  # turn id -> the models turn_context names for it
     for rollout in rollouts:
-        for turn, model in rollout.models.items():
-            models.setdefault(turn, set()).add(model)
+        for turn, named in rollout.models.items():
+            models.setdefault(turn, set()).update(named)
     owners = {key[0] for r in rollouts for key, *_ in r.responses}
     covered = set()
     for rollout in rollouts:
@@ -307,8 +334,9 @@ def _codex(rollouts: list[_Rollout], seen: dict, incomplete: list[str]) -> set[s
         except UsageError as e:
             why = f"is malformed ({e})"
         if why is None:
-            model = next(iter(rollout.models.values()))
-            counts = _codex_counts(rollout.snapshots[-1][0], rollout.snapshots[-1][1])
+            model = next(iter(set().union(*rollout.models.values())))
+            info, at = rollout.snapshots[-1]
+            counts = _codex_counts(info["total_token_usage"], at)
             _add(seen, ("thread", rollout.thread), model, counts, where)
             covered.add(rollout.thread)
         else:
@@ -320,33 +348,23 @@ def _snapshot_doubt(rollout: _Rollout) -> str | None:
     """Why a thread's last cumulative `token_count` is not its own usage, or None (D7)."""
     if rollout.forked:
         return "includes its parent's usage (a fork)"
-    counts = [_codex_counts(total, where) for total, where in rollout.snapshots]
+    for info, where in rollout.snapshots:
+        if not isinstance(info, dict):
+            raise UsageError(f"{where}: token_count info: expected an object")
+    counts = [_codex_counts(info["total_token_usage"], at) for info, at in rollout.snapshots]
     if any(after[k] < before[k] for before, after in pairwise(counts) for k in after):
         return "was reset"
-    if len(set(rollout.models.values())) != 1:
-        return f"covers {len(set(rollout.models.values()))} models"
+    models = set().union(*rollout.models.values())
+    if len(models) != 1:
+        return f"covers {len(models)} models"
     return None
-
-
-def _model_doubt(where: str, stdout: Path | None) -> list[str]:
-    """Why a Codex launch's model attribution is in doubt (D7): its rollout cannot show a reroute
-    (Codex 0.171.0 does not persist one), so only its stdout can."""
-    if stdout is None:
-        return [f"{where}: no stdout captured, so the model its responses ran on is unverified"]
-    return [
-        f"{where}: {e['item']['message']}"
-        for e in _stdout_events(stdout)
-        if e.get("type") == "item.completed"
-        and isinstance(e.get("item"), dict)
-        and str(e["item"].get("message", "")).startswith(REROUTE)
-    ]
 
 
 def _from_stdout(
     path: str,
     bindings: list[dict],
     launches: Mapping[int, dict],
-    stdout: Mapping[int, Path],
+    stdout: Mapping[int, tuple[list[dict], str | None]],
     seen: dict,
 ) -> str | None:
     """Count a missing rollout's thread from its last launch's stdout; why it cannot, or None."""
@@ -360,7 +378,9 @@ def _from_stdout(
     last = own[-1]
     if last not in stdout:
         return f"no stdout of its last launch {last}"
-    events = _stdout_events(stdout[last])
+    events, problem = stdout[last]
+    if problem:
+        return f"the stdout of launch {last} {problem}"
     if not any(e.get("type") == "thread.started" and e.get("thread_id") == thread for e in events):
         return f"the stdout of launch {last} is not thread {thread}'s"
     usage = [e.get("usage") for e in events if e.get("type") == "turn.completed"]
@@ -380,20 +400,24 @@ def _from_stdout(
     return None
 
 
-def _stdout_events(file: Path) -> list[dict]:
+def _read_stdout(file: Path) -> tuple[list[dict], str | None]:
+    """A `codex exec --json` stdout's events, and why it cannot be trusted whole, or None."""
     try:
         text = file.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
+    except OSError as e:
+        return [], f"is unreadable ({e.strerror})"
     events = []
-    for line in text.splitlines():
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
         try:
             event = json.loads(line, object_pairs_hook=no_repeated_keys)
-        except (ValueError, RecursionError):
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-    return events
+        except (ValueError, RecursionError) as e:
+            return events, f"line {n} is not a valid JSON record ({e})"
+        if not isinstance(event, dict):
+            return events, f"line {n} is not a JSON object"
+        events.append(event)
+    return events, None if events else "is empty"
 
 
 def _argv_model(argv: Iterable[str]) -> str | None:
