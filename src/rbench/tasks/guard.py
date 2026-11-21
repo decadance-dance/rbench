@@ -1,14 +1,19 @@
 """Publication guard (spec review-tasks: Publication guard).
 
-`public` is the public check `bin/check` runs, in CI too. It has no hidden directory, so it looks
-for what needs none: a tracked path or file content with a task id carrying the hidden id prefix,
-and tracked run output under `runs/`. It names the file and line, never the id, since CI logs are
-public. The hidden canary prefix is known only in the hidden directory, so the pre-push check
-covers it.
+`public` is the check `bin/check` runs, in CI too. In every tracked path and in every tracked file's
+staged and work-tree content it looks for a task id with the hidden id prefix, and it flags anything
+tracked under `runs/`. With `RBENCH_HIDDEN_DIR` set, as on the operator's machine, it also looks
+for the real hidden task ids, their canaries and the hidden canary prefix, which live only in the
+hidden directory; a hidden directory it cannot read fails the check. It names the file by a redacted
+path and a line, never the matched value, since CI logs are public.
 
-`pre-push` is the git hook `bin/pre-push`. It reads the real hidden task ids, their canaries and the
-canary prefix from the directory `RBENCH_HIDDEN_DIR` names and rejects a push whose commits add any
-of them. It names the offending id on stderr, the operator's terminal, and writes no file.
+`pre-push` is the git hook `bin/pre-push`. It reads the same values from the hidden directory and
+rejects a push when a commit new to the destination adds one of them to a file, a path or its
+message, or when a pushed ref name or annotated tag carries one. It may name the offending hidden id
+on stderr, the operator's terminal, but never a canary or the prefix, and it writes no file.
+
+Content is searched as raw bytes (UTF-8 and binary files) and as UTF-16 and UTF-32 in both byte
+orders, with or without a byte order mark.
 
     python -m rbench.tasks.guard public
     python -m rbench.tasks.guard pre-push <remote> <url>   # ref lines on stdin, as git gives them
@@ -18,108 +23,249 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from rbench.tasks.hidden import hidden_config, load_hidden_tasks
 from rbench.tasks.loader import HIDDEN_DIR_ENV, HIDDEN_ID_PREFIX, TaskError
 
-# The hidden prefix, then the id form the loader accepts; an id character before it means the
-# prefix ends another word ("high-level"), not an id.
-HIDDEN_ID = re.compile(
-    rb"(?<![A-Za-z0-9_.-])" + re.escape(HIDDEN_ID_PREFIX.encode()) + rb"[a-z0-9][a-z0-9_.-]*"
-)
 RUNS_DIR = "runs/"
+REDACTED = "<redacted>"
+GITLINK = "160000"
+# (bytes before, bytes after) each ASCII character in raw bytes, UTF-16 and UTF-32.
+ENCODINGS = {
+    "utf-8": (b"", b""),
+    "utf-16-le": (b"", b"\0"),
+    "utf-16-be": (b"\0", b""),
+    "utf-32-le": (b"", b"\0\0\0"),
+    "utf-32-be": (b"\0\0\0", b""),
+}
+
+
+def _hidden_id_pattern(before: bytes, after: bytes) -> re.Pattern[bytes]:
+    """The hidden prefix and then what the loader's id rule accepts after it, in one encoding.
+
+    A letter or digit before the prefix makes it the end of another word ("high-level"). The bare
+    prefix and placeholders such as the prefix and `*` or `<n>` pass; a prose word that is also a
+    valid id is flagged on purpose.
+    """
+    b, a = re.escape(before), re.escape(after)
+    prefix = b"".join(b + re.escape(bytes([c])) + a for c in HIDDEN_ID_PREFIX.encode())
+    word = b + rb"[A-Za-z0-9]" + a
+    char = rb"(?:" + b + rb"[a-z0-9_.-]" + a + rb")"
+    return re.compile(rb"(?<!" + word + rb")" + prefix + char + rb"+")
+
+
+HIDDEN_IDS = [(_hidden_id_pattern(*pad), pad[0] + b"\n" + pad[1]) for pad in ENCODINGS.values()]
+HIDDEN_ID = HIDDEN_IDS[0][0]
 
 
 class GuardError(Exception):
     """Git failed, or the hidden directory could not be read: the guard cannot vouch."""
 
 
-def _git(cwd: Path, *args: str) -> bytes:
-    result = subprocess.run(["git", "-C", str(cwd), *args], check=False, capture_output=True)
+@dataclass(frozen=True)
+class Needle:
+    """A value from the hidden directory, in every encoding, and how the hook names it."""
+
+    forms: tuple[bytes, ...]
+    label: str
+
+    @classmethod
+    def of(cls, value: str, label: str) -> "Needle":
+        return cls(tuple(value.encode(e) for e in ENCODINGS), label)
+
+    def found_in(self, data: bytes) -> bool:
+        return any(form in data for form in self.forms)
+
+
+@dataclass(frozen=True)
+class Hidden:
+    """The needles, canaries before ids before the prefix, and the secret values to redact."""
+
+    needles: list[Needle]
+    secrets: list[str]
+
+    def redact(self, text: str) -> str:
+        for secret in self.secrets:
+            text = text.replace(secret, REDACTED)
+        return text
+
+
+def hidden_values(environ: Mapping[str, str], cwd: Path) -> Hidden:
+    """Read the hidden directory; `TaskError` when it is not configured or cannot be read."""
+    config = hidden_config(environ, cwd=cwd)
+    tasks = load_hidden_tasks(config)
+    needles = [Needle.of(t.canary, f"the canary of hidden task {t.id}") for t in tasks]
+    needles += [Needle.of(t.id, f"hidden task id {t.id}") for t in tasks]
+    needles.append(Needle.of(config.canary_prefix, "the hidden canary prefix"))
+    return Hidden(needles, [t.canary for t in tasks] + [config.canary_prefix])
+
+
+def _git(cwd: Path, *args: str, input: bytes | None = None) -> bytes:
+    result = subprocess.run(
+        ["git", "-C", str(cwd), *args], check=False, capture_output=True, input=input
+    )
     if result.returncode != 0:
         detail = result.stderr.decode(errors="replace").strip()
         raise GuardError(f"git {args[0]} failed in {cwd}: {detail}")
     return result.stdout
 
 
-def public_findings(root: Path) -> list[str]:
-    """Every tracked file of the checkout at `root` that must not be published, with the reason."""
-    findings = []
-    for name in sorted(os.fsdecode(n) for n in _git(root, "ls-files", "-z").split(b"\0")):
-        if not name:
-            continue
+def _objects(cwd: Path, shas: Iterable[str]) -> dict[str, bytes]:
+    """The content of each object, read in one `git cat-file --batch`."""
+    shas = sorted(set(shas))
+    out = _git(cwd, "cat-file", "--batch", input="".join(f"{s}\n" for s in shas).encode())
+    objects, pos = {}, 0
+    for sha in shas:
+        end = out.index(b"\n", pos)
+        header = out[pos:end].split()
+        if len(header) != 3:
+            raise GuardError(f"git cat-file cannot read object {sha}")
+        size = int(header[2])
+        objects[sha] = out[end + 1 : end + 1 + size]
+        pos = end + 2 + size
+    return objects
+
+
+def _redact_path(name: str) -> str:
+    return HIDDEN_ID.sub(REDACTED.encode(), os.fsencode(name)).decode(errors="replace")
+
+
+def _hidden_id_lines(data: bytes, hidden: Hidden | None) -> list[tuple[int, str]]:
+    """(line, what) for each hidden id form, and each hidden value when given, in `data`."""
+    found = set()
+    for pattern, newline in HIDDEN_IDS:
+        for m in pattern.finditer(data):
+            found.add((data.count(newline, 0, m.start()) + 1, "a task id with the hidden prefix"))
+    for needle in hidden.needles if hidden else ():
+        for form, newline in zip(needle.forms, (p[1] for p in HIDDEN_IDS), strict=True):
+            start = data.find(form)
+            while start != -1:
+                found.add((data.count(newline, 0, start) + 1, "a value from the hidden directory"))
+                start = data.find(form, start + 1)
+    return sorted(found)
+
+
+def public_findings(root: Path, hidden: Hidden | None = None) -> list[str]:
+    """Every tracked file of the checkout at `root` that must not be published, with the reason.
+
+    Both the staged content and the work-tree content of each file count.
+    """
+    entries = []
+    for record in _git(root, "ls-files", "--stage", "-z").split(b"\0"):
+        if record:
+            meta, _, name = record.partition(b"\t")
+            mode, sha, _ = meta.decode().split()
+            entries.append((os.fsdecode(name), mode, sha))
+    staged = _objects(root, (sha for _, mode, sha in entries if mode != GITLINK))
+    findings = set()
+    for name, mode, sha in entries:
+        shown = _redact_path(name)
+        if hidden:
+            shown = hidden.redact(shown)
         if name.startswith(RUNS_DIR):
-            findings.append(f"{name}: unpublished run output; results go out via rbench publish")
+            findings.add(f"{shown}: unpublished run output; results go out via rbench publish")
             continue
-        if HIDDEN_ID.search(os.fsencode(name)):
-            findings.append(f"{name}: the path holds a task id with the hidden prefix")
+        if shown != name:
+            findings.add(f"{shown}: the path holds a task id or value from the hidden directory")
+            continue
+        if mode == GITLINK:
             continue
         path = root / name
+        work = None
         if path.is_symlink():
-            data = os.fsencode(os.readlink(path))
+            work = os.fsencode(os.readlink(path))
         elif path.is_file():
-            data = path.read_bytes()
-        else:
-            continue  # deleted in the work tree, or a submodule
-        for number, line in enumerate(data.splitlines(), 1):
-            if HIDDEN_ID.search(line):
-                findings.append(f"{name}:{number}: a task id with the hidden prefix")
-    return findings
+            work = path.read_bytes()
+        versions = [("", staged[sha])]
+        if work is not None and work != staged[sha]:
+            versions = [(" (staged)", staged[sha]), ("", work)]
+        for where, data in versions:
+            for line, what in _hidden_id_lines(data, hidden):
+                findings.add(f"{name}:{line}{where}: {what}")
+    return sorted(findings)
 
 
-def hidden_needles(environ: Mapping[str, str], cwd: Path) -> list[tuple[bytes, str]]:
-    """What a push must not add, each with how the terminal names it; canaries before the prefix."""
-    config = hidden_config(environ, cwd=cwd)
-    tasks = load_hidden_tasks(config)
-    needles = [(t.canary.encode(), f"the canary of hidden task {t.id}") for t in tasks]
-    needles += [(t.id.encode(), f"hidden task id {t.id}") for t in tasks]
-    needles.append((config.canary_prefix.encode(), "the hidden canary prefix"))
-    return needles
+def _advertised(cwd: Path, remote: str) -> list[str]:
+    """The objects the destination's refs point at that this repository has."""
+    shas = {line.split()[0].decode() for line in _git(cwd, "ls-remote", remote).splitlines()}
+    if not shas:
+        return []
+    check = _git(cwd, "cat-file", "--batch-check", input="".join(f"{s}\n" for s in shas).encode())
+    return sorted(line.split()[0].decode() for line in check.splitlines() if b"missing" not in line)
 
 
-def _added_text(cwd: Path, commit: str) -> bytes:
-    """The commit's message and the lines, paths and names its first-parent diff adds."""
-    shown = _git(
-        cwd,
-        "show",
-        "--text",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--diff-merges=first-parent",
-        "--format=%B%x00",
-        commit,
-    )
-    message, _, patch = shown.partition(b"\0")
-    # Removed lines are already where they came from; "--- a/path" is repeated by "+++ b/path".
-    added = [line for line in patch.splitlines() if not line.startswith(b"-")]
-    return b"\n".join([message, *added])
+def _changes(cwd: Path, parent: str | None, commit: str) -> dict[bytes, tuple[str, str | None]]:
+    """{new path: (new blob, old blob or None)} for each path `commit` adds or modifies."""
+    args = [parent, commit] if parent else ["--root", commit]
+    fields = _git(cwd, "diff-tree", "-r", "-z", "-M", "--no-commit-id", *args).split(b"\0")
+    changes, i = {}, 0
+    while i < len(fields) and fields[i]:
+        src_mode, dst_mode, src_sha, dst_sha, status = fields[i].decode().lstrip(":").split()
+        paths = 2 if status[0] in "RC" else 1
+        if status[0] != "D" and dst_mode != GITLINK:
+            old = None if status[0] == "A" or src_mode == GITLINK else src_sha
+            changes[fields[i + paths]] = (dst_sha, old)
+        i += 1 + paths
+    return changes
 
 
-def push_findings(
-    ref_lines: Sequence[str], needles: list[tuple[bytes, str]], cwd: Path
-) -> list[str]:
-    """The hidden ids and canaries the pushed refs carry, from git's pre-push stdin lines."""
-    findings = []
+def _commit_texts(cwd: Path, commit: str) -> list[tuple[str, bytes]]:
+    """(where, text) for what `commit` adds: its message, new paths, and lines new to every parent."""
+    header, _, message = _objects(cwd, [commit])[commit].partition(b"\n\n")
+    parents = [
+        line.split()[1].decode() for line in header.splitlines() if line.startswith(b"parent ")
+    ]
+    texts = [(f"commit {commit[:12]} message", message)]
+    per_parent = [_changes(cwd, p, commit) for p in parents or [None]]
+    # A path the commit leaves as one parent has it adds nothing.
+    paths = sorted(set.intersection(*(set(c) for c in per_parent)))
+    blobs = _objects(cwd, (sha for c in per_parent for p in paths for sha in c[p] if sha))
+    for path in paths:
+        name = os.fsdecode(path)
+        known = {line for c in per_parent if c[path][1] for line in blobs[c[path][1]].split(b"\n")}
+        added = [line for line in blobs[per_parent[0][path][0]].split(b"\n") if line not in known]
+        texts.append((f"commit {commit[:12]} path {name}", path))
+        texts.append((f"commit {commit[:12]} file {name}", b"\n".join(added)))
+    return texts
+
+
+def push_findings(ref_lines: Sequence[str], remote: str, hidden: Hidden, cwd: Path) -> list[str]:
+    """What the pushed refs add from the hidden directory, from git's pre-push stdin lines."""
+    pushes = []
     for line in ref_lines:
-        if not line.strip():
-            continue
-        local_ref, local_sha, remote_ref, _ = line.split()
-        if set(local_sha) == {"0"}:
-            continue  # a deletion pushes no content
-        refs = f"{local_ref} {remote_ref}".encode()
-        texts = [(f"the ref name {remote_ref}", refs)]
-        # Every commit no remote-tracking ref has: also the ones a later commit reverts.
-        commits = _git(cwd, "rev-list", local_sha, "--not", "--remotes").decode().split()
-        texts += [(f"commit {c[:12]}", _added_text(cwd, c)) for c in commits]
+        if line.strip():
+            _, local_sha, remote_ref, remote_sha = line.split()
+            if set(local_sha) != {"0"}:  # a deletion pushes no content
+                pushes.append((local_sha, remote_ref, remote_sha))
+    if not pushes:
+        return []
+    # What the destination advertises is already there; a stale tracking ref proves nothing.
+    exclude = [f"^{sha}" for sha in _advertised(cwd, remote)]
+    findings = []
+    for local_sha, remote_ref, remote_sha in pushes:
+        texts = [(f"the ref name {remote_ref}", remote_ref.encode())]
+        tag = local_sha
+        while local_sha != remote_sha and _git(cwd, "cat-file", "-t", tag).strip() == b"tag":
+            raw = _objects(cwd, [tag])[tag]
+            texts.append((f"the annotated tag {tag[:12]} for {remote_ref}", raw))
+            tag = raw.split(b"\n", 1)[0].split()[1].decode()
+        stdin = "\n".join([local_sha, *exclude]) + "\n"
+        commits = _git(cwd, "rev-list", "--stdin", input=stdin.encode()).decode().split()
+        for commit in commits:
+            texts += _commit_texts(cwd, commit)
         for where, text in texts:
-            for needle, label in needles:
-                if needle in text:
-                    findings.append(f"{where} adds {label}")
+            for needle in hidden.needles:
+                if needle.found_in(text):
+                    findings.append(f"{hidden.redact(where)} adds {needle.label}")
                     break
     return findings
+
+
+def _configured(environ: Mapping[str, str]) -> bool:
+    return bool(environ.get(HIDDEN_DIR_ENV, "").strip())
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -127,19 +273,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     cwd = Path.cwd()
     try:
         if args == ["public"]:
-            findings = public_findings(cwd)
+            hidden = hidden_values(os.environ, cwd) if _configured(os.environ) else None
+            findings = public_findings(cwd, hidden)
             for finding in findings:
                 print(f"publication guard: {finding}", file=sys.stderr)
             return 1 if findings else 0
-        if args[:1] == ["pre-push"]:
-            if not os.environ.get(HIDDEN_DIR_ENV, "").strip():
+        if len(args) == 3 and args[0] == "pre-push":
+            if not _configured(os.environ):
                 print(
                     f"pre-push: {HIDDEN_DIR_ENV} is not set; hidden ids and canaries not checked",
                     file=sys.stderr,
                 )
                 return 0
-            needles = hidden_needles(os.environ, cwd)
-            findings = push_findings(sys.stdin.read().splitlines(), needles, cwd)
+            hidden = hidden_values(os.environ, cwd)
+            findings = push_findings(sys.stdin.read().splitlines(), args[1], hidden, cwd)
             for finding in findings:
                 print(f"pre-push: rejected: {finding}", file=sys.stderr)
             return 1 if findings else 0
