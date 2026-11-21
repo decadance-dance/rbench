@@ -1,0 +1,65 @@
+{
+  "canary": "rbench-canary-5e9bd2210bf44457b4a78ec7ba438b0e",
+  "items": [
+    {
+      "category": "correctness",
+      "end_line": 34,
+      "file": "packages/auth-atproto/src/routes/login.ts",
+      "id": "simnaut_emdash_2-41d75006#0",
+      "message": "The AT Protocol login route uses `url.origin` (the raw internal request origin) as `baseUrl` for the OAuth client, rather than `getPublicOrigin(url, emdash?.config)`. Behind a TLS-terminating reverse proxy, the internal origin is `http://localhost:4321` while the browser-facing origin is `https://example.com`. The AT Protocol PDS will attempt to fetch the client metadata document from the internal URL (unreachable), and the `client_id` will be wrong, causing the OAuth authorization flow to fail in all production reverse-proxy deployments. GitHub/Google OAuth in `[provider].ts` correctly use `getPublicOrigin(url, emdash?.config)`. The same problem exists in `callback.ts` line 42 and `setup-admin.ts` line 56.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "must",
+      "start_line": 27
+    },
+    {
+      "category": "correctness",
+      "end_line": 60,
+      "file": "packages/auth-atproto/src/routes/callback.ts",
+      "id": "simnaut_emdash_2-41d75006#1",
+      "message": "Same reverse-proxy bug as in login.ts: `baseUrl` is set to `url.origin` instead of `getPublicOrigin(url, emdash?.config)`. The callback route creates an OAuthClient with the internal URL, which must match the `client_id` and `redirect_uri` registered during authorization. While both authorize and callback using the same wrong URL means they're consistent with each other, the `client_id` still points to an unreachable metadata URL in production, breaking the OAuth flow.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "must",
+      "start_line": 41
+    },
+    {
+      "category": "reliability",
+      "end_line": 15,
+      "file": "packages/core/src/database/migrations/034_published_at_index.ts",
+      "id": "simnaut_emdash_2-41d75006#2",
+      "message": "The `CREATE INDEX` statement for `idx_{table}_deleted_published_id` is missing `IF NOT EXISTS`. The `SchemaRegistry.createCollectionTable()` (also changed in this PR, at registry.ts line 600) creates the same index when any new collection is created. If a user runs the version of EmDash that adds the SchemaRegistry index creation (part of this PR) and creates a new collection, then for some reason runs migrations again (e.g., a test environment that tears down and rebuilds), migration 034 would fail with 'index already exists'. This is the exact issue that was documented as fixed in migration 033 (`CREATE INDEX IF NOT EXISTS`).",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 12
+    },
+    {
+      "category": "correctness",
+      "end_line": 61,
+      "file": "packages/auth-atproto/src/routes/setup-admin.ts",
+      "id": "simnaut_emdash_2-41d75006#4",
+      "message": "Same reverse-proxy bug: `baseUrl = url.origin` instead of `getPublicOrigin()`. During the setup wizard, if the server is behind a reverse proxy, the AT Protocol OAuth URL generated here will use the internal origin as `client_id`, causing the PDS to fail when it attempts to fetch the metadata document or validate the redirect URI.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "must",
+      "start_line": 55
+    },
+    {
+      "category": "security",
+      "end_line": 205,
+      "file": "packages/core/src/astro/middleware.ts",
+      "id": "simnaut_emdash_2-41d75006#5",
+      "message": "The fast-path for plugin routes outside `/_emdash/` (e.g., `/.well-known/atproto-client-metadata.json`) bypasses the entire middleware chain, including CSRF protection. While GET requests don't need CSRF protection, any future state-changing route injected by an auth provider at a non-`/_emdash/` path would receive no CSRF check. The fast-path calls `next()` directly without invoking `checkPublicCsrf`. This is currently OK because `client-metadata.json` is GET-only, but the architecture silently skips CSRF for all methods on fast-path routes.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 192
+    },
+    {
+      "category": "reliability",
+      "end_line": 46,
+      "file": "packages/core/src/astro/routes/api/auth/mode.ts",
+      "id": "simnaut_emdash_2-41d75006#7",
+      "message": "The `/auth/mode` endpoint is public and returns the configured auth provider list (`providers`). When `emdash` is not initialized (e.g., before first setup), `emdash?.config?.authProviders` is `undefined` and `providers` defaults to `[]`. However, `getAuthMode(emdash?.config)` is called with `undefined` config, which returns the default passkey mode. This is correct. But `emdash?.db` check for signup detection is done with optional chaining, so when the DB is uninitialized, `signupEnabled` stays `false`. The catch block silently swallows errors from the `allowed_domains` query. If the table query fails for reasons other than the table not existing (e.g., DB corruption), the signup state would incorrectly report false. This is minor but could mask real DB errors.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 19
+    }
+  ]
+}

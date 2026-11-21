@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "ca37c592d6c08a286dbafca455ca2481acdf484685a3e30d3c84539a7504a47d",
+  "base": "17e33ca1ebf643d47201a8f94b8ab3e88848cf23",
+  "description": "## Summary\n\n- Introduce `MediaManager` abstraction that centralizes all file lifecycle operations with permission hardening (0o600 files, 0o700 directories)\n- Unify duplicated screenshot/audio cleanup and orphan sweep into generic functions via `MediaTable` descriptor, with file-first deletion ordering for crash safety\n- Add startup orphan sweep, path validation on file ops, and honest error logging in `Storage::status()`\n\n## Test Plan\n\n- [x] 143 tests passing (68 in storage crate, 143 workspace-wide)\n- [x] Permission hardening verified: files get 0o600, directories get 0o700\n- [x] File-first cleanup ordering tested\n- [x] Orphan sweep detects and removes untracked files\n- [x] `status()` handles metadata errors gracefully\n- [x] Path validation rejects paths outside storage root\n- [x] Clippy clean, no secrets in diff\n\nPart of HEU-405",
+  "head": "04ac4c02d48083676c14dd3fa70d26ca102bd50e",
+  "id": "mheuss_chronicle_14-04ac4c02",
+  "language": "Rust",
+  "pr": 14,
+  "repo": "mheuss/chronicle",
+  "set": "reviewbench",
+  "title": "feat(storage): storage & data security hardening (HEU-405)"
+}

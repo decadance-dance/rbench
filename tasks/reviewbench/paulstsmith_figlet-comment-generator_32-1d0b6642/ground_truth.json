@@ -1,0 +1,95 @@
+{
+  "canary": "rbench-canary-c7e97084218e4e5c830c36a7e2153dd3",
+  "items": [
+    {
+      "category": "correctness",
+      "end_line": 75,
+      "file": "FIGLet.VSCodeExtension/src/BannerUtils.ts",
+      "id": "PaulStSmith_figlet-comment-generator_32-1d0b6642#0",
+      "message": "The `editBuilder.replace(editor.selection, ...)` path was removed and replaced unconditionally with `editBuilder.insert`. When the user has an active (non-empty) selection and confirms the banner, the banner is now inserted at column 0 of the cursor's line instead of replacing the selected text. The original selection remains in the document alongside the newly inserted banner, producing duplicate/garbled content.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 62
+    },
+    {
+      "category": "reliability",
+      "end_line": 8,
+      "file": ".github/workflows/publish-figlet-nuget.yml",
+      "id": "PaulStSmith_figlet-comment-generator_32-1d0b6642#2",
+      "message": "Path filter was narrowed from `FIGLet/**` to `FIGLet/**/*.cs`. A PR that only bumps the version in `FIGLet/FIGLet.csproj`, adds an embedded font resource, or changes a `.resx` file will not trigger this publish workflow, causing the NuGet release to be silently skipped.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 8
+    },
+    {
+      "category": "reliability",
+      "end_line": 9,
+      "file": ".github/workflows/publish-vscode-extension.yml",
+      "id": "PaulStSmith_figlet-comment-generator_32-1d0b6642#3",
+      "message": "Path filter was narrowed to `**/*.ts` and `**/*.tsx` only. Changes to `package.json` (where the extension version lives), `package-lock.json`, `webpack.config.js`, `.vscodeignore`, or icon/asset files will not trigger the VS Code extension publish workflow, silently skipping releases that only update those files.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 8
+    },
+    {
+      "category": "reliability",
+      "end_line": 8,
+      "file": ".github/workflows/publish-figprint.yml",
+      "id": "PaulStSmith_figlet-comment-generator_32-1d0b6642#5",
+      "message": "Path filter was narrowed from `FIGPrint/**` to `FIGPrint/**/*.cs`. A version bump to `FIGPrint/FIGPrint.csproj` alone — the typical release commit — will not match this filter and the FIGPrint winget/GitHub release workflow will never fire automatically.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 8
+    },
+    {
+      "category": "reliability",
+      "end_line": 9,
+      "file": ".github/workflows/publish-vs-extension.yml",
+      "id": "PaulStSmith_figlet-comment-generator_32-1d0b6642#6",
+      "message": "Path filter was narrowed to `**/*.cs` only for both the VS extension and the FIGLet library. Changes to `.xaml` UI files, `.resx` resources, `.vsixmanifest`, or the library `.csproj` will not trigger the Visual Studio extension publish, causing silent release skips.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 8
+    },
+    {
+      "category": "reliability",
+      "end_line": 8,
+      "file": ".github/workflows/publish-figlet-py.yml",
+      "id": "PaulStSmith_figlet-comment-generator_32-1d0b6642#8",
+      "message": "The workflow path trigger has been narrowed from `'FIGLet.Python/**'` to `'FIGLet.Python/**/*.py'`. This will prevent the workflow from running on changes to `FIGLet.Python/pyproject.toml`, where the package version is defined. A version bump without other `.py` file changes will not trigger a new release.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "should",
+      "start_line": 8
+    },
+    {
+      "category": "reliability",
+      "end_line": 9,
+      "file": ".github/workflows/publish-figlet-ts.yml",
+      "id": "PaulStSmith_figlet-comment-generator_32-1d0b6642#9",
+      "message": "The workflow path trigger has been narrowed from `'FIGLet.TS/**'` to only `**/*.ts` and `**/*.tsx` files. This will prevent the workflow from running on changes to `FIGLet.TS/package.json`, where the package version is defined. A version bump without other `.ts` or `.tsx` file changes will not trigger a new release.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "should",
+      "start_line": 8
+    },
+    {
+      "category": "maintainability",
+      "end_line": 256,
+      "file": ".github/workflows/publish-figprint.yml",
+      "id": "PaulStSmith_figlet-comment-generator_32-1d0b6642#20",
+      "message": "There is a stray empty-string entry between the x64 installer's `NestedInstallerFiles` block and the start of the arm64 installer entry. When joined with newlines this produces a blank line inside the YAML sequence between two list items. While YAML tolerates blank lines between sequence items, it's inconsistent with the rest of the manifest (which has no blank lines between fields). Recommend removing the `\"\"` entry on line 255 for cleanliness and to avoid any risk with strict YAML linters used by the winget-pkgs pipeline.",
+      "producer": "ccr:claude-opus-4.7[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 254
+    },
+    {
+      "category": "documentation",
+      "end_line": 64,
+      "file": "ChangeLog-2026.md",
+      "id": "PaulStSmith_figlet-comment-generator_32-1d0b6642#21",
+      "message": "This changelog entry says the generated manifest defines `figprint` as the portable command alias, but the updated installer manifest generation only writes `RelativeFilePath: FIGPrint.exe` and omits `PortableCommandAlias`. The release notes will be inaccurate unless the workflow is updated to match.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 63
+    }
+  ]
+}

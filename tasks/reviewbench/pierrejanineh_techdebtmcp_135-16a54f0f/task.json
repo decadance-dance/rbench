@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "978a175a90fcc1c5fc4a975b15d0121a8e584d1ab9e2e0773f3ee82ecb54fa75",
+  "base": "ea0385c7349bbaee04456c57bf0ec3f217d63532",
+  "description": "## Summary\n\n- Reject patterns longer than 1 000 characters in `CustomRulesEngine.validatePattern()`, preventing oversized regex from reaching the engine\n- Allowlist regex flags to `gimsuy` characters only in `validatePattern()`, blocking invalid or dangerous flag strings\n- Strip disallowed flag characters at `executePattern()` runtime as a defense-in-depth measure for rules loaded directly from `.techdebtrc.json` (bypassing `validatePattern`)\n- Export `MAX_CODE_LENGTH` (500 000) from `customRulesEngine.ts` and enforce it in `parseExecuteCustomRulesInput()` to cap the inline `code` parameter, preventing an unbounded string from being fed through every custom rule regex\n- Update `CHANGELOG.md` with the security fix entry\n\nCloses #127\n\n## Test plan\n- [x] `validatePattern` rejects patterns > 1 000 chars with a descriptive error\n- [x] `validatePattern` accepts patterns exactly at the 1 000-char boundary\n- [x] `validatePattern` rejects flags containing any character outside `gimsuy`\n- [x] `validatePattern` accepts all six valid flag characters (`gimsuy`)\n- [x] `executePattern` strips disallowed flags at runtime without throwing, still matches correctly\n- [x] `parseExecuteCustomRulesInput` throws `McpError` when `code` exceeds 500 000 characters\n- [x] `parseExecuteCustomRulesInput` accepts `code` exactly at the 500 000-character limit\n- [x] All 538 existing tests continue to pass\n- [x] TypeScript build succeeds (`npm run build`)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+  "head": "16a54f0f85a9091f220418850eac6b4122782be5",
+  "id": "pierrejanineh_techdebtmcp_135-16a54f0f",
+  "language": "TypeScript",
+  "pr": 135,
+  "repo": "PierreJanineh/TechDebtMCP",
+  "set": "reviewbench",
+  "title": "fix: guard against ReDoS via user-controlled regex in custom rules engine"
+}

@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "4525885e3e664bad0e8bdccbdfcb7a6f01e09c5790898309518de375b7948290",
+  "base": "08efd0bbc34fd29de2a4077f07d24f3dc02a63b6",
+  "description": "## Summary\n\nThe staleness filter was removing 77 of 83 eligible markets because their prices hadn't changed in 5 cycles. For a BUY NO variance strategy, stable prices with active volume represent persistent mispricings — the ideal opportunity, not staleness.\n\nChanged the staleness signal from \"price unchanged\" to \"no trading activity\": a market is stale only when price is unchanged AND volume is below a floor (default 10) AND open interest hasn't changed. Markets with stable prices but active trading now pass through correctly.\n\n- Replaced `volume_spike_ratio` parameter with `volume_floor` (minimum volume to consider active)\n- Added `open_interest` tracking to StalenessEntry for OI-change detection\n- Backward compatible with existing `scan_staleness.json` files (old entries missing `open_interest` default to 0)\n\nCloses #467\n\n## Test plan\n- [x] 15 unit tests pass (was 10, added 5 new tests for volume floor boundary, OI changes, backward compat)\n- [x] Full test suite passes (985 tests)\n- [x] Lint clean on all changed files\n- [ ] Verify next scan cycle surfaces more candidates (expect ~80 instead of ~3)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+  "head": "e1477f8b3f18c1de6ff87dbca9465a7b106dc193",
+  "id": "allan-mobley-jr_gimmes_468-e1477f8b",
+  "language": "Python",
+  "pr": 468,
+  "repo": "allan-mobley-jr/gimmes",
+  "set": "reviewbench",
+  "title": "Fix staleness filter for NO variance strategy"
+}

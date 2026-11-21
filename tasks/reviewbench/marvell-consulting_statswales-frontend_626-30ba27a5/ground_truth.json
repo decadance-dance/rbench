@@ -1,0 +1,65 @@
+{
+  "canary": "rbench-canary-9a675f8c11174e4297d7d153f999c65c",
+  "items": [
+    {
+      "category": "testing",
+      "end_line": 201,
+      "file": "tests-e2e/consumer/dataset-download.spec.ts",
+      "id": "Marvell-Consulting_statswales-frontend_626-30ba27a5#0",
+      "message": "The new test uses `download.path()` to access the downloaded file, but this returns `null` when tests run against a remote browser (the common CI setup for Playwright). The rest of the e2e codebase consistently uses `download.saveAs(targetPath)` to write the file to a known path before reading it. In a remote browser environment this test will always fail at the `toBeTruthy()` assertion. The fix is to `saveAs` into `testInfo.outputDir` (as other helpers do) and read from there.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 184
+    },
+    {
+      "category": "security",
+      "end_line": 229,
+      "file": "src/consumer/services/consumer-api.ts",
+      "id": "Marvell-Consulting_statswales-frontend_626-30ba27a5#1",
+      "message": "The `language` parameter is typed as `string` but cast to `Locale` without any runtime validation. The GET handler in the controller constructs `download_language` directly from `req.query.download_language?.toString()` (consumer.ts:353), meaning a user can craft an arbitrary string into the `lang` query param and `Accept-Language` header sent to the backend. The parameter type should be narrowed to `Locale` at the method boundary, or runtime validation should be added in the GET handler (matching what the POST path already does via `downloadLanguageValidator()`).",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 224
+    },
+    {
+      "category": "security",
+      "end_line": 242,
+      "file": "src/consumer/services/consumer-api.ts",
+      "id": "Marvell-Consulting_statswales-frontend_626-30ba27a5#2",
+      "message": "Same `language: string` → `as Locale` unsafe cast as in `downloadPublishedData`. The unsanitised user-supplied `download_language` query param flows through the GET handler into this method. The parameter type should be `Locale`, not `string`, to match the actual constraint.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 237
+    },
+    {
+      "category": "security",
+      "end_line": 933,
+      "file": "src/publisher/services/publisher-api.ts",
+      "id": "Marvell-Consulting_statswales-frontend_626-30ba27a5#3",
+      "message": "Same `language: string` → `as Locale` unsafe cast in `downloadDatasetPreview`. The GET handler in `publish.ts` reads `req.query.download_language?.toString()` without validation and passes it here. The parameter type should be `Locale` to close the gap between the validated POST path and the unvalidated GET path.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 924
+    },
+    {
+      "category": "testing",
+      "end_line": 932,
+      "file": "src/publisher/services/publisher-api.ts",
+      "id": "Marvell-Consulting_statswales-frontend_626-30ba27a5#5",
+      "message": "The publisher preview download path now depends on this `lang` override, but there is no corresponding publisher-side regression coverage; the added e2e test only exercises consumer downloads, while the existing `tests/publisher-api.test.ts` suite covers other `PublisherApi` request construction. Add coverage that verifies preview downloads send the selected download language rather than the page language.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 932
+    },
+    {
+      "category": "testing",
+      "end_line": 241,
+      "file": "src/consumer/services/consumer-api.ts",
+      "id": "Marvell-Consulting_statswales-frontend_626-30ba27a5#6",
+      "message": "This pivot download path now relies on the selected language being passed through `fetch`, but the new regression test only downloads the non-pivot dataset path; the existing consumer pivot e2e tests do not exercise downloads. Add coverage for pivot downloads so this branch cannot keep using the page language unnoticed.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "nit",
+      "start_line": 241
+    }
+  ]
+}

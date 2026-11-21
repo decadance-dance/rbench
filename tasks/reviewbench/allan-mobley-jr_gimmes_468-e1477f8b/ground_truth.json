@@ -1,0 +1,65 @@
+{
+  "canary": "rbench-canary-675e4970322e4e17bd3141e97bbad482",
+  "items": [
+    {
+      "category": "maintainability",
+      "end_line": 95,
+      "file": "src/gimmes/strategy/staleness.py",
+      "id": "allan-mobley-jr_gimmes_468-e1477f8b#0",
+      "message": "The `volume` field in StalenessEntry is written each cycle but never read back in the staleness logic. The new code only reads `entry[\"price\"]`, `entry.get(\"open_interest\", 0)`, and `entry[\"count\"]` — `entry[\"volume\"]` is never consulted. Storing it is misleading: the TypedDict requires it and it's persisted to disk each scan, but it has no effect on any decision.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 89
+    },
+    {
+      "category": "api-architecture",
+      "end_line": 315,
+      "file": "src/gimmes/cli.py",
+      "id": "allan-mobley-jr_gimmes_468-e1477f8b#1",
+      "message": "`check_staleness` is called without the new `volume_floor` parameter, so it always falls back to the hardcoded default of 10. `volume_floor` is also absent from `ScannerConfig`, meaning users have no way to tune or override the threshold that is now the primary activity signal in the staleness filter.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 312
+    },
+    {
+      "category": "correctness",
+      "end_line": 80,
+      "file": "src/gimmes/strategy/staleness.py",
+      "id": "allan-mobley-jr_gimmes_468-e1477f8b#2",
+      "message": "`oi_changed = oi != entry.get(\"open_interest\", 0)` defaults the missing field to 0. On first load of an old `scan_staleness.json` (without `open_interest`), every market with nonzero OI — essentially all real markets — will have `oi_changed=True`, resetting their accumulated stale count to 0. This silently voids all previously-built-up staleness state on migration, making the filter ineffective for another full `staleness_cycles` rounds.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 80
+    },
+    {
+      "category": "correctness",
+      "end_line": 79,
+      "file": "src/gimmes/strategy/staleness.py",
+      "id": "allan-mobley-jr_gimmes_468-e1477f8b#4",
+      "message": "`volume = m.volume_24h if m.volume_24h > 0 else m.volume` falls back to the lifetime cumulative `volume` field when `volume_24h` is zero. Any market with nonzero historical cumulative volume (even if completely inactive for months) will satisfy `has_volume >= volume_floor` and never be considered stale. This makes the fallback path counterproductive: it's intended to handle missing 24h data but actually permanently exempts high-history dead markets from staleness filtering.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 72
+    },
+    {
+      "category": "documentation",
+      "end_line": 320,
+      "file": "src/gimmes/config.py",
+      "id": "allan-mobley-jr_gimmes_468-e1477f8b#7",
+      "message": "Potential mismatch in the documented behavior of `staleness_cycles`. While the docstring mentions 'inactive markets' as those with no volume, price change, or open interest change, the default volume floor of 10 in `check_staleness` contradicts this for very low-volume but valid markets.",
+      "producer": "llm_review:gpt-4o",
+      "severity": "nit",
+      "start_line": 316
+    },
+    {
+      "category": "testing",
+      "end_line": 31,
+      "file": "tests/unit/test_staleness.py",
+      "id": "allan-mobley-jr_gimmes_468-e1477f8b#9",
+      "message": "The helper always sets `volume_24h` equal to `volume`, so the new activity logic is never tested for the important case where recent 24h volume is zero but cumulative volume is nonzero. That gap misses the fallback path in `check_staleness` that can mark historically traded but currently inactive markets as active.",
+      "producer": "ccr:gpt-5.5[ReasoningEffort=medium]",
+      "severity": "should",
+      "start_line": 29
+    }
+  ]
+}

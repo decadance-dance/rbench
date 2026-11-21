@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "08c0e3ed990de0d981b4457f20b3428c36df3c9e6b75f9cca90c521396945816",
+  "base": "4fe23e22e3937c38cb859a3b9c00b193bb309aa1",
+  "description": "`server/team/auth.js` and `server/team/index.js` both `require('jsonwebtoken')` and `require('bcryptjs')` at runtime, but neither package was declared in `server/package.json`, causing a \"Cannot find module\" crash on startup.\n\n- **`server/package.json`**: Added `jsonwebtoken ^9.0.3` and `bcryptjs ^3.0.3` as runtime dependencies\n- **`server/package-lock.json`**: Updated lockfile reflecting the new installs",
+  "head": "0c34439aeebedc646d76d90db6b79a5c54b4cb8f",
+  "id": "cmik_apilix_12-0c34439a",
+  "language": "TypeScript",
+  "pr": 12,
+  "repo": "cmik/apilix",
+  "set": "reviewbench",
+  "title": "Add jsonwebtoken and bcryptjs to server dependencies"
+}

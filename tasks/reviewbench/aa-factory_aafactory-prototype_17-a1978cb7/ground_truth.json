@@ -1,0 +1,95 @@
+{
+  "canary": "rbench-canary-165a14de5bdf4c58bca0f21ff01ff949",
+  "items": [
+    {
+      "category": "reliability",
+      "end_line": 45,
+      "file": "aafactory/src/tests/test_chat/test_mock_chat.py",
+      "id": "AA-Factory_aafactory-prototype_17-a1978cb7#0",
+      "message": "Both pytest-mock and pytest-asyncio are missing from pyproject.toml dependencies. The test uses the `mocker` fixture (provided by pytest-mock) and `@pytest.mark.asyncio` (provided by pytest-asyncio), but neither package is listed under [tool.poetry.group.dev.dependencies]. The test will fail to collect/run in any clean environment.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "must",
+      "start_line": 1
+    },
+    {
+      "category": "testing",
+      "end_line": 40,
+      "file": "aafactory/src/tests/test_chat/test_mock_chat.py",
+      "id": "AA-Factory_aafactory-prototype_17-a1978cb7#1",
+      "message": "The test never calls `send_request_to_llm` — the actual function under test. It directly invokes the mocked `chat_interface.send_request_to_open_ai` and then asserts against the return value the mock was configured to produce. No real application logic is exercised, so the test does not validate the behaviour it claims to test.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "must",
+      "start_line": 34
+    },
+    {
+      "category": "testing",
+      "end_line": 32,
+      "file": "aafactory/src/tests/test_chat/test_mock_chat.py",
+      "id": "AA-Factory_aafactory-prototype_17-a1978cb7#2",
+      "message": "`_load_avatar_infos_for_chat` is imported at the top of the file with `from aafactory.chat.interface import _load_avatar_infos_for_chat`, binding the name in the test module's own namespace before the patch is applied. The `mocker.patch('aafactory.chat.interface._load_avatar_infos_for_chat', ...)` only replaces the attribute on the module object, not the already-captured local reference. Calling `_load_avatar_infos_for_chat()` on line 32 therefore invokes the real function, which opens a TinyDB database and will fail in a test environment.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "must",
+      "start_line": 32
+    },
+    {
+      "category": "testing",
+      "end_line": 37,
+      "file": "aafactory/src/tests/test_chat/test_mock_chat.py",
+      "id": "AA-Factory_aafactory-prototype_17-a1978cb7#3",
+      "message": "`send_request_to_open_ai` is called with 10 positional arguments, but its real signature (aafactory/src/aafactory/fetcher/fetching.py) is `send_request_to_open_ai(messages: list[dict[str, str]])` — a single parameter. The arguments passed don't match the actual API, so the mock is being exercised with a completely wrong call shape; if patching ever failed, this would raise a TypeError immediately.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 35
+    },
+    {
+      "category": "testing",
+      "end_line": 21,
+      "file": "aafactory/src/tests/test_chat/test_mock_chat.py",
+      "id": "AA-Factory_aafactory-prototype_17-a1978cb7#4",
+      "message": "`llm_side_effect` returns a 3-tuple `('', [['Hello', 'Hi there!']], 'video_path.mp4')`, but the real `send_request_to_open_ai` returns a plain string (the cleaned LLM text). If `send_request_to_llm` were actually called, `text_response` would be this tuple and the subsequent call `send_request_to_elevenlabs(text_response, voice_id)` would receive a tuple instead of a string, breaking the real code path the mock is supposed to stand in for.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 13
+    },
+    {
+      "category": "testing",
+      "end_line": 45,
+      "file": "aafactory/src/tests/test_chat/test_mock_chat.py",
+      "id": "AA-Factory_aafactory-prototype_17-a1978cb7#5",
+      "message": "Global `CHAT_HISTORY` is cleared at test start but never restored on teardown. If the test fails after the side effect has already appended to `CHAT_HISTORY`, subsequent tests in the session will observe dirty state. A pytest fixture with `yield` and a `CHAT_HISTORY.clear()` in the teardown block is needed.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "nit",
+      "start_line": 7
+    },
+    {
+      "category": "testing",
+      "end_line": 45,
+      "file": "aafactory/src/tests/test_chat/test_mock_chat.py",
+      "id": "AA-Factory_aafactory-prototype_17-a1978cb7#6",
+      "message": "The PR description states 'running two tests, one for elevenLabs and one for zonos', but only a single test function exists. The Zonos code path through `send_request_to_llm` (the `voice_model == 'zonos'` branch in interface.py) is never covered.",
+      "producer": "llm_review:claude-sonnet-4.6",
+      "severity": "should",
+      "start_line": 1
+    },
+    {
+      "category": "testing",
+      "end_line": 9,
+      "file": "aafactory/src/tests/test_chat/test_mock_chat.py",
+      "id": "AA-Factory_aafactory-prototype_17-a1978cb7#7",
+      "message": "The global `CHAT_HISTORY` is modified from within a mock's `side_effect`, which is an indirect and potentially confusing way to test state changes. This makes the test brittle because it relies on the internal implementation detail of `send_request_to_open_ai` modifying this global. A better approach would be to have the test itself check the state of `CHAT_HISTORY` after the function call, based on the expected behavior of the function under test.",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 9
+    },
+    {
+      "category": "maintainability",
+      "end_line": 28,
+      "file": "aafactory/src/tests/test_chat/test_mock_chat.py",
+      "id": "AA-Factory_aafactory-prototype_17-a1978cb7#8",
+      "message": "The return value of the mocked `_load_avatar_infos_for_chat` is a tuple. The test then accesses its elements using magic-number indices (e.g., `avatar_info[9]`). This makes the test hard to read and brittle to changes in the structure of `avatar_info`. Using a `namedtuple` or a simple data class would make the code more self-documenting (e.g., `avatar_info.language`).",
+      "producer": "llm_review:gemini-2.5-pro",
+      "severity": "nit",
+      "start_line": 24
+    }
+  ]
+}

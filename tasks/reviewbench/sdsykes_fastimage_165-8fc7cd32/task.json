@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "52ce1bfeb25252a9623425462507b8cb7447a318de0e202eeab19b2c12dcd3a4",
+  "base": "7a0dcf780e6d8cd7686520a3a1f57e7cd85b0b46",
+  "description": "Solution for https://github.com/sdsykes/fastimage/issues/164\r\n\r\n### Summary\r\n\r\n- Adds `FastImage.resolution(uri)` class method returning `[[x, y], :units]` or `nil`\r\n- Adds `#resolution` and `#resolution_units` instance methods returning the components separately\r\n- Supports JPEG (JFIF APP0), PNG (pHYs chunk), BMP (DIB header), and TIFF (EXIF IFD rational tags)\r\n- Extends `GoodFixtures` with a resolution column and adds a `test_should_report_resolution_correctly` sweep test covering all fixture files\r\n\r\n### Supported formats and units\r\n\r\n| Format | Source | Possible units |\r\n|--------|--------|----------------|\r\n| JPEG | JFIF APP0 segment | `:inches`, `:centimeters`, `:no_units` |\r\n| PNG | pHYs chunk | `:meters`, `:no_units` |\r\n| BMP | DIB header (`XPelsPerMeter`/`YPelsPerMeter`) | `:meters` |\r\n| TIFF | EXIF `XResolution`/`YResolution` rational tags | `:inches`, `:centimeters`, `:no_units` |\r\n\r\nFormats without resolution metadata (GIF, WebP, SVG, HEIC, AVIF, JXL, PSD, ICO) return `nil` for both methods.\r\n\r\n### API\r\n\r\n```ruby\r\n# Class method — returns [[x, y], :units] or nil\r\nFastImage.resolution(\"image.jpg\")  # => [[72, 72], :inches]\r\nFastImage.resolution(\"image.png\")  # => nil\r\n\r\n# Instance methods\r\nfi = FastImage.new(\"image.tiff\")\r\nfi.resolution        # => [72.0, 72.0]\r\nfi.resolution_units  # => :inches\r\n```\r\n\r\n### Notes\r\n\r\n- TIFF resolution values are `Float` (stored as RATIONAL numerator/denominator in EXIF); other formats return `Integer`\r\n- BMP returns `nil` when both PPM values are zero (unspecified) or when the file uses the older `BITMAPCOREHEADER` which has no resolution fields\r\n- The EXIF parser was extended with named tag/data-type constants and a two-pass approach to read RATIONAL offsets after the IFD scan",
+  "head": "8fc7cd32904240c2c841e70aef2ba5c3bb659ffd",
+  "id": "sdsykes_fastimage_165-8fc7cd32",
+  "language": "Ruby",
+  "pr": 165,
+  "repo": "sdsykes/fastimage",
+  "set": "reviewbench",
+  "title": "Add resolution support for image formats (JPEG, TIFF, PNG, BMP) along with unit parsing"
+}
