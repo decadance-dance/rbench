@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-fe3e4c84ce1255ac77a11c3a8daac73e",
+  "items": [
+    {
+      "category": "documentation",
+      "end_line": 38,
+      "file": "CHANGES.md",
+      "id": "psf_black_5272-7e2e327d#3678519973",
+      "message": "```suggestion\n- Fix `--skip-magic-trailing-comma` dropping the trailing comma of a one-element\n  subscript (`a[x,]`) when the line is long enough to be split and contains a power\n  operator (#5272)\n```",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/psf/black/pull/5272#discussion_r3678519973 fixed-by 85055d1344bb2f8835354c03fa87e587e1ed84a6",
+      "start_line": 34
+    }
+  ]
+}

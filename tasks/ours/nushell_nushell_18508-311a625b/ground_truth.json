@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-d7178def26d13b321b79352f95a7f70e",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 43,
+      "file": "crates/nu-command/src/strings/str_/replace.rs",
+      "id": "nushell_nushell_18508-311a625b#3512528587",
+      "message": "Does this get turned into a ShellError somewhere else?",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/nushell/nushell/pull/18508#discussion_r3512528587 fixed-by 719650e6c1c4483fe7e306d367bb6f1ac9792b23",
+      "start_line": 43
+    }
+  ]
+}

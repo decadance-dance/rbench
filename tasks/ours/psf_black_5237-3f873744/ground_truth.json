@@ -1,0 +1,82 @@
+{
+  "canary": "rbench-canary-a7080fe4e8a8dd876ce144363dae9a7c",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 51,
+      "file": "src/black/report.py",
+      "id": "psf_black_5237-3f873744#3724277918",
+      "message": "The only places `str` is used is in tests. I'd prefer to change this to only accept Exceptions and update the tests. That adds more test coverage for this change, as well as preventing us from mistakenly passing in strings in the future.\n\nYou may find that means `test_invalid_input_error_includes_path_location` becomes redundant, it's fine to remove it if so.",
+      "producer": "human",
+      "severity": "must",
+      "source": "https://github.com/psf/black/pull/5237#discussion_r3724277918 fixed-by 4515b2a4dcef945f374028ac9016df1acd7d107b",
+      "start_line": 51
+    },
+    {
+      "category": "other",
+      "end_line": 59,
+      "file": "src/black/report.py",
+      "id": "psf_black_5237-3f873744#3724554197",
+      "message": "Instead of modifying `context` here, could you modify it in `parsing.py` to be lowercase from the start?\nhttps://github.com/wanxiankai/black/blob/3f8737446e0cce43d298066a5470e05ea994649e/src/black/parsing.py#L125\nand again in the `TokenError` section",
+      "producer": "human",
+      "severity": "must",
+      "source": "https://github.com/psf/black/pull/5237#discussion_r3724554197 fixed-by 4515b2a4dcef945f374028ac9016df1acd7d107b",
+      "start_line": 59
+    },
+    {
+      "category": "other",
+      "end_line": 60,
+      "file": "src/black/report.py",
+      "id": "psf_black_5237-3f873744#3724565245",
+      "message": "Similarly, could you include an initial newline in `details` in `parsing.py`? (And remove it from the `error_msg = ...` line)",
+      "producer": "human",
+      "severity": "must",
+      "source": "https://github.com/psf/black/pull/5237#discussion_r3724565245 fixed-by 4515b2a4dcef945f374028ac9016df1acd7d107b",
+      "start_line": 60
+    },
+    {
+      "category": "other",
+      "end_line": 133,
+      "file": "src/black/parsing.py",
+      "id": "psf_black_5237-3f873744#3724587186",
+      "message": "Why use a class method instead of the constructor here?",
+      "producer": "human",
+      "severity": "must",
+      "source": "https://github.com/psf/black/pull/5237#discussion_r3724587186 fixed-by 4515b2a4dcef945f374028ac9016df1acd7d107b",
+      "start_line": 131
+    },
+    {
+      "category": "other",
+      "end_line": 127,
+      "file": "src/black/parsing.py",
+      "id": "psf_black_5237-3f873744#3724598724",
+      "message": "Could this stay formatted as multiple lines?",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/psf/black/pull/5237#discussion_r3724598724 fixed-by 4515b2a4dcef945f374028ac9016df1acd7d107b",
+      "start_line": 127
+    },
+    {
+      "category": "other",
+      "end_line": 36,
+      "file": "src/black/parsing.py",
+      "id": "psf_black_5237-3f873744#3724667591",
+      "message": "Flake8 erorr:\n```\nsrc/black/parsing.py:28:5: B042 Exception class with `__init__` should pass all args to `super().__init__()` to work in edge cases of `pickle` and `copy.copy()`. It should also not take any kwargs.\n```",
+      "producer": "human",
+      "severity": "must",
+      "source": "https://github.com/psf/black/pull/5237#discussion_r3724667591 fixed-by 4515b2a4dcef945f374028ac9016df1acd7d107b",
+      "start_line": 36
+    },
+    {
+      "category": "other",
+      "end_line": 42,
+      "file": "src/black/parsing.py",
+      "id": "psf_black_5237-3f873744#3724671294",
+      "message": "I assume this is needed for pickling? Is it still needed after the Flake8 error is resolved? A comment to explain why this is needed could be helpful.",
+      "producer": "human",
+      "severity": "must",
+      "source": "https://github.com/psf/black/pull/5237#discussion_r3724671294 fixed-by 4515b2a4dcef945f374028ac9016df1acd7d107b",
+      "start_line": 42
+    }
+  ]
+}

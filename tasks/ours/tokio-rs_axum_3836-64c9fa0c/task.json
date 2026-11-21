@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "c005b8b781df8bbb399a8e5d014783ab47ca7a7e34bb431ae64677d51ff869a3",
+  "base": "98aea470f9190fad1915897166ac0f149522011a",
+  "description": "## Motivation\n\n`get` registers a handler for both `GET` and `HEAD`, so a `get` route's `Allow`\nheader value is `GET,HEAD`. When two `MethodRouter`s are merged, their `Allow`\nheader values are joined together. The join did not remove duplicates, so\nmerging a `get` route with a separately built `head` route produced an `Allow`\nheader of `GET,HEAD,HEAD`:\n\n```rust\nuse axum::routing::{get, head, MethodRouter};\n\n// GET (also serves HEAD) merged with an explicit HEAD handler\nlet router: MethodRouter = get(|| async {}).merge(head(|| async {}));\n// a 405/OPTIONS response now carries `Allow: GET,HEAD,HEAD`\n```\n\nThis is reachable through `Router::merge` as well, whenever the merged routers\nhave a `get` route on one side and an explicit `head` route on the other for the\nsame path. The builder path already guards against this: `append_allow_header`\nskips a method that is already present, which is why `get(..).head(..)` on a\nsingle router correctly yields `GET,HEAD`. Only the merge path was missing the\nsame guard.\n\n## Solution\n\nRoute the `Bytes` + `Bytes` case of `AllowHeader::merge` through the existing\n`append_allow_header` helper, one method at a time, so the merged value reuses\nthe same de-duplication the builder already performs. `append_allow_header` only\ncopies the bytes of the method it is given, so its parameter is relaxed from\n`&'static str` to `&str` to accept the method names split out of the other\nheader value.\n\nBehavior is otherwise unchanged: `None`/`Skip` states merge as before, and\nmerging routers with disjoint methods still concatenates them in order (the\nexisting `allow_header_when_merging` test, which expects `PUT,PATCH,GET,HEAD`,\nstill passes). A regression test covers merging a `get` route with a separate\n`head` route and asserts the `Allow` header is `GET,HEAD`.\n\n",
+  "head": "64c9fa0c96886ec1367a0346fc920fb14679cec5",
+  "id": "tokio-rs_axum_3836-64c9fa0c",
+  "language": "Rust",
+  "pr": 3836,
+  "repo": "tokio-rs/axum",
+  "set": "ours",
+  "title": "Fix duplicate methods in the `Allow` header after merging `MethodRouter`s"
+}

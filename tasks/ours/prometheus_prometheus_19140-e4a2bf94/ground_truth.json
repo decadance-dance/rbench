@@ -1,0 +1,27 @@
+{
+  "canary": "rbench-canary-036ea343fe776ef73f2673d679dfd8b3",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 2358,
+      "file": "tsdb/head.go",
+      "id": "prometheus_prometheus_19140-e4a2bf94#3549632661",
+      "message": "nit, we're not actually checking that the WAL has samples, so maybe\n\n```suggestion\n\t\t// Keep the series record in checkpoints until its last sample time; while the\n\t\t// WAL may still hold samples for this ref, they can't outlive maxt.\n```",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/prometheus/prometheus/pull/19140#discussion_r3549632661 fixed-by 60e18ef373015a96f5e4419e711e90741cbead10",
+      "start_line": 2358
+    },
+    {
+      "category": "testing",
+      "end_line": 9149,
+      "file": "tsdb/head_test.go",
+      "id": "prometheus_prometheus_19140-e4a2bf94#3549833099",
+      "message": "Let's verify that we don't leak memory via walExpiry : \n```\n_, ok = head.getWALExpiry(1)\nrequire.True(t, ok, \"ref 1 expiry (500) must be retained (>= mint 250)\")\n_, ok = head.getWALExpiry(2)\nrequire.False(t, ok, \"ref 2 expiry (200) must be cleared (< mint 250)\")\n```",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/prometheus/prometheus/pull/19140#discussion_r3549833099 fixed-by ed715db113d068bf377392e8a1bc4f5a131ec64a",
+      "start_line": 9149
+    }
+  ]
+}

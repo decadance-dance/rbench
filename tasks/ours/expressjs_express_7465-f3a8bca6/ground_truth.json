@@ -1,0 +1,27 @@
+{
+  "canary": "rbench-canary-7d52c336574a8d62609442fcc8e07514",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 43,
+      "file": ".github/workflows/npm-publish.yml",
+      "id": "expressjs_express_7465-f3a8bca6#3991765901",
+      "message": "```suggestion\n      #   major <  current npm \"latest\" major   -> latest-<major>\n```",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/expressjs/express/pull/7465#discussion_r3991765901 fixed-by 5620c786a1f61c28632fc63b2b140e14720e4869",
+      "start_line": 43
+    },
+    {
+      "category": "other",
+      "end_line": 69,
+      "file": ".github/workflows/npm-publish.yml",
+      "id": "expressjs_express_7465-f3a8bca6#3991781621",
+      "message": "```suggestion\n          else tag = `latest-${major}`\n```",
+      "producer": "human",
+      "severity": "must",
+      "source": "https://github.com/expressjs/express/pull/7465#discussion_r3991781621 fixed-by ee7f67869e1c58949cd2e005048b0e37ae4e0dd3",
+      "start_line": 69
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-6d707181e4f5600b0e58ef1669afd8de",
+  "items": [
+    {
+      "category": "documentation",
+      "end_line": 222,
+      "file": "docs/Reference/Encapsulation.md",
+      "id": "fastify_fastify_6893-e360888d#3699075730",
+      "message": "```suggestion\navailable only in that context and its children.\n```",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/fastify/fastify/pull/6893#discussion_r3699075730 fixed-by c5469b51610eebcac887aa382ef15c8452a88d02",
+      "start_line": 222
+    }
+  ]
+}

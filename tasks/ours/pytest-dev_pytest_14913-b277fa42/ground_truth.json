@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-cb4a4790156f06f197ed63067be33ded",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 1946,
+      "file": "src/_pytest/config/__init__.py",
+      "id": "pytest-dev_pytest_14913-b277fa42#3815498214",
+      "message": "```suggestion\n                return [xs for x in  value.split(\"\\n\")) if (xs := x.strip()]\n```\n",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/pytest-dev/pytest/pull/14913#discussion_r3815498214 fixed-by bc143c9f36d090b0cb37e7a5a7a1c4b8bb9497ff",
+      "start_line": 1946
+    }
+  ]
+}

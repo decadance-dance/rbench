@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "9066dfde8e1a2ac71999615537db8b1f688414ebe594ad58749453077949e6c8",
+  "base": "e2ab40b79094b2da9aff418909ea138f565318cd",
+  "description": "<!--\r\nThanks for contributing to Nushell!\r\n\r\nBefore submitting, please read the contributing guide:\r\nhttps://github.com/nushell/nushell/blob/main/CONTRIBUTING.md\r\n\r\nThis template helps reviewers understand your changes and allows us to generate high-quality release notes.\r\n-->\r\n\r\n## Description\r\nLet's try to make AGENTS.md more useful.\r\n<!--\r\nExplain what this PR does and why.\r\n\r\nThis section is intentionally flexible:\r\n- Describe the problem\r\n- Explain your approach\r\n- Include technical details if relevant\r\n\r\nGood examples:\r\n- \"In this PR, I fixed...\"\r\n- \"In this PR, I added support for...\"\r\n- \"This change improves X by...\"\r\n\r\nWrite as much or as little as needed for reviewers to understand your changes.\r\n-->\r\n\r\n## User-facing changes (Release notes)\r\n<!--\r\nThis section is used (mostly as-is) for https://www.nushell.sh/blog/\r\n\r\nDescribe how Nushell behavior changes from a user's perspective.\r\nDo NOT describe internal Rust changes here.\r\n\r\nWrite in a release note style, for example:\r\n- \"Added support for...\"\r\n- \"Fixed an issue where...\"\r\n- \"Nushell now supports...\"\r\n- \"Improved performance of...\"\r\n\r\nIf your changes do NOT affect users (internal refactors, cleanup, etc.),\r\njust write:\r\n- \"n/a\"\r\n- \"nan\"\r\n- or similar\r\n\r\nThis tells us the change should not appear in the changelog.\r\n\r\nTips:\r\n- Focus on observable behavior\r\n- Include examples if helpful\r\n- Keep it concise\r\n\r\nYou can:\r\n- Write a short paragraph (will appear as a bullet point), OR\r\n- Use headings (###) if your change needs more structure\r\n\r\nAvoid writing things like:\r\n- \"In this PR, I refactored...\"\r\n- \"This updates internal code...\"\r\n\r\nYou may leave this blank until the PR is ready.\r\n-->\r\n\r\n## Additional notes\r\n<!--\r\nOptional.\r\n\r\nExamples:\r\n- fixes #123\r\n- closes #456\r\n- related #789\r\n\r\nAnything else reviewers should know.\r\nRemove this section if not needed.\r\n-->",
+  "head": "e19540245fce966308d4fa59ea52e38afdda0b6b",
+  "id": "nushell_nushell_18683-e1954024",
+  "language": "Rust",
+  "pr": 18683,
+  "repo": "nushell/nushell",
+  "set": "ours",
+  "title": "agent.md updates"
+}

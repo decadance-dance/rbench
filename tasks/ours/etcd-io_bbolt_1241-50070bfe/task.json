@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "3ef6b811cfb9050f8a302a814a06f284ec748d8f071f8042d9b9fc9e31263265",
+  "base": "59c50cedf27b40aa2ffd8a35fbf18ad1daa0c1e2",
+  "description": "Adding changelog details for #1161 .",
+  "head": "50070bfe2c55d7756ce31d219e3d3ac21f0d2b28",
+  "id": "etcd-io_bbolt_1241-50070bfe",
+  "language": "Go",
+  "pr": 1241,
+  "repo": "etcd-io/bbolt",
+  "set": "ours",
+  "title": "Changelog update for #1161"
+}

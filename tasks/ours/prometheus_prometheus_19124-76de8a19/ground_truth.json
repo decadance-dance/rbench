@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-92c83a27e9951c0d10729c12765b0646",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 648,
+      "file": "web/api/v1/api.go",
+      "id": "prometheus_prometheus_19124-76de8a19#3577703668",
+      "message": "nit: let's not mask imported `stats` package\n\n```suggestion\nfunc (api *API) statsParamWarning(s string) error {\n```",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/prometheus/prometheus/pull/19124#discussion_r3577703668 fixed-by 010302504d44117f32248e39bbf1dcfd530afea9",
+      "start_line": 648
+    }
+  ]
+}

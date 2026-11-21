@@ -144,6 +144,21 @@ def test_archive_hash_survives_an_upstream_repack(source: Path, tmp_path: Path) 
     assert first.path.read_bytes() == second.path.read_bytes()
 
 
+def test_archive_bytes_do_not_depend_on_how_the_source_compressed_them(
+    source: Path, tmp_path: Path
+) -> None:
+    # Compressible files, so each zlib level gives different object bytes in the source pack, and
+    # over 100 of them, so the fetch keeps its pack instead of unpacking it into loose objects.
+    commit(source, {f"note-{i:03}.txt": f"line {i}\n" * 2000 for i in range(140)}, "notes")
+    base, head = pr(source, MIT, MIT)
+    archives = []
+    for level in ("1", "9"):
+        git(source, "-c", f"pack.compression={level}", "repack", "-adFq")
+        out = tmp_path / f"level-{level}.bundle"
+        archives.append(build_archive(REPO, str(source), base, head, out, "ours"))
+    assert archives[0].sha256 == archives[1].sha256
+
+
 def test_license_id_recorded_and_license_file_kept(
     source: Path, tmp_path: Path, fake_bin: FakeBin
 ) -> None:

@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-6f9f10127adeda1f7af070236d525148",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 1054,
+      "file": "caddyconfig/httpcaddyfile/httptype.go",
+      "id": "caddyserver_caddy_7920-4a6dd47e#3746778470",
+      "message": "Connection policies are first-match terminal so inserting an empty policy here suppresses every setting from the matching wildcard policy, not only client authentication.\n\nThis needs to preserve the wildcard policy’s other settings while removing only client authentication.",
+      "producer": "human",
+      "severity": "must",
+      "source": "https://github.com/caddyserver/caddy/pull/7920#discussion_r3746778470 fixed-by bd5a6aef41b2325f2ebc75d068323950497411dc",
+      "start_line": 1054
+    }
+  ]
+}

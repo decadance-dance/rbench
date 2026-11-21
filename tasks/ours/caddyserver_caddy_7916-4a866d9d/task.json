@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "20830530faf0498dc561076bed1962803ec42c311d314f6aa731a4ad665faa08",
+  "base": "e096ca9503188f057c69a049f709fdade6077631",
+  "description": "Fixes #7870.\n\nMultiple `reverse_proxy` handlers configured with different active health checks (`health_uri`, `health_headers`, ...) against the same upstream dial address currently share a single `Host` in the global pool, so one handler's failing probes mark the address unhealthy for every other handler. This keys the pool by dial address plus a stable fingerprint of the active health-check config, so distinct checks get independent health state.\n\nThe fingerprint is strictly internal to pool identity:\n\n- the Prometheus `upstreams_healthy` label is untouched (still the plain `Dial` address);\n- the `/reverse_proxy/upstreams` admin endpoint strips the fingerprint at emission (`hostKeyAddress`), so API output reports plain dial addresses as before.\n\n**Scope note:** dynamic upstreams are intentionally not covered here — they resolve through the separate per-lookup `dynamicHosts` path with different lifetime semantics, so the same collapse there is left for a follow-up rather than half-fixed in this change.\n\nThe regression test (`TestActiveHealthChecksSameAddressDifferentChecksAreIndependent`) spins up two handlers with different `health_uri` against one address and asserts vhost B's health state stays independent while vhost A's probes fail; it fails on master and passes with this change.\n\nFiles: `modules/caddyhttp/reverseproxy/{healthchecks,hosts,reverseproxy,admin}.go`, `active_health_test.go`\n\nAssistance Disclosure\nThis patch was developed with AI assistance. It was reviewed and tested before submission (affected package tests pass), and is submitted from a human-owned account that takes responsibility for the change.",
+  "head": "4a866d9dd4ebe1a9aa78265cd47ca189af4dca22",
+  "id": "caddyserver_caddy_7916-4a866d9d",
+  "language": "Go",
+  "pr": 7916,
+  "repo": "caddyserver/caddy",
+  "set": "ours",
+  "title": "reverseproxy: isolate active health-check state per distinct check config"
+}

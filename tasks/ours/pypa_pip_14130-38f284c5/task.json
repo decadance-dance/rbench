@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "c2e20daaa5474dc10cf21d02bd73e0c03efa72adc3842aea24564a6b3e58a249",
+  "base": "10dfb6b9005484578b386f64b9f36982e3dc6679",
+  "description": "<!---\r\nThank you for your soon to be pull request. Before you submit this, please\r\ndouble check to make sure that you've added a news file fragment. In pip we\r\ngenerate our NEWS.rst from multiple news fragment files, and all pull requests\r\nrequire either a news file fragment or a marker to indicate they don't require\r\none.\r\n\r\nTo read more about adding a news file fragment for your PR, please check out\r\nour documentation at: https://pip.pypa.io/en/latest/development/contributing/#news-entries\r\n-->\r\n\r\nCloses #14129.\r\n\r\nMoved the `--exclude` filter after `get_not_required` so excluded packages no longer drop their dependencies into the top-level listing.",
+  "head": "38f284c5e9d5c14aa0849386771e36b3bb62bb95",
+  "id": "pypa_pip_14130-38f284c5",
+  "language": "Python",
+  "pr": 14130,
+  "repo": "pypa/pip",
+  "set": "ours",
+  "title": "Fix `pip list --exclude` making `--not-required` list dependencies"
+}

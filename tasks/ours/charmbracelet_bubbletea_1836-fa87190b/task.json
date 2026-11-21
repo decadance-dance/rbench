@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "23bf5c4e36546af17c40f4984a29702a6293edd7f1cd8ee15a6f02809dfe2989",
+  "base": "ff51ba4c51f85875761b15a64f9ab9aa0eaa9fa1",
+  "description": "### Problem\n\nWhen running Bubble Tea v2 applications on serial consoles, headless setups, or terminals where window dimensions are not yet configured or reported as 0x0 (e.g. stty rows 0 cols 0), term.GetSize returns (0, 0, nil). Bubble Tea sets p.width = 0 and p.height = 0 and passes these dimensions to the renderer and model. Because the viewport height and width are 0, rendered output lines are clipped, resulting in a completely blank screen.\n\n### Root Cause\n\nIn Program.Run and Program.checkResize:\n- term.GetSize(p.ttyOutput.Fd()) can return (0, 0, nil) or non-positive values without returning an error.\n- Previously, these dimensions were assigned directly to p.width and p.height without verifying they are positive.\n- When s.height is 0 in cursedRenderer, line buffering clips lines, producing no visible content.\n\n### Solution\n\n1. Added fallbackDimensions(width, height int) (int, int) helper on *Program with standard terminal defaults (defaultWidth = 80, defaultHeight = 24).\n2. If width <= 0, fall back to COLUMNS (checking program environment first, then os.Getenv) if positive, otherwise fall back to 80.\n3. If height <= 0, fall back to LINES (checking program environment first, then os.Getenv) if positive, otherwise fall back to 24.\n4. Applied fallback in both Program.Run and Program.checkResize.\n5. Added unit tests in tty_test.go covering fallback to 80x24, fallback to COLUMNS/LINES, handling invalid or zero env values, and initial window size message dispatch.\n\nFixes #1828",
+  "head": "fa87190b4629c883fa116379c8960dc8b27d96de",
+  "id": "charmbracelet_bubbletea_1836-fa87190b",
+  "language": "Go",
+  "pr": 1836,
+  "repo": "charmbracelet/bubbletea",
+  "set": "ours",
+  "title": "fix(tty): fall back to default dimensions when terminal size is 0x0"
+}

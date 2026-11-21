@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "8361947fb6b31ac48b92d265be8858ca824795c7e8b364ac343950a5543234b4",
+  "base": "849fbda3ce87e3829b30d005979bee59928c01ff",
+  "description": "<!--\r\nThanks for submitting a PR, your contribution is really appreciated!\r\n\r\nHere is a quick checklist that should be present in PRs.\r\n\r\n- [x] Include documentation when adding new features.\r\n- [x] Include new tests or update existing tests when applicable.\r\n- [x] Allow maintainers to push and squash when merging my commits. Please uncheck this if you prefer to squash the commits yourself.\r\n\r\nIf this change fixes an issue, please:\r\n\r\n- [x] Add text like ``closes #XYZW`` to the PR description and/or commits (where ``XYZW`` is the issue number). See the [github docs](https://help.github.com/en/github/managing-your-work-on-github/linking-a-pull-request-to-an-issue#linking-a-pull-request-to-an-issue-using-a-keyword) for more information.\r\n\r\n> [!IMPORTANT]\r\n> **Unsupervised agentic contributions are not accepted**. See our [AI/LLM-Assisted Contributions Policy](https://github.com/pytest-dev/pytest/blob/main/CONTRIBUTING.rst#aillm-assisted-contributions-policy).\r\n\r\n- [x] If AI agents were used, they are credited in `Co-authored-by` commit trailers.\r\n\r\nUnless your change is trivial or a small documentation fix (e.g., a typo or reword of a small section) please:\r\n\r\n- [x] Create a new changelog file in the `changelog` directory, with a name like `<ISSUE NUMBER>.<TYPE>.rst`. See [changelog/README.rst](https://github.com/pytest-dev/pytest/blob/main/changelog/README.rst) for details.\r\n\r\n  Write sentences in the **past or present tense**, examples:\r\n\r\n  * *Improved verbose diff output with sequences.*\r\n  * *Terminal summary statistics now use multiple colors.*\r\n\r\n  Also make sure to end the sentence with a `.`.\r\n\r\n- [x] Add yourself to `AUTHORS` in alphabetical order.\r\n-->\r\n\r\nApply warning filters to warnings emitted by `pytest_configure` hooks.\r\n\r\nThis affects users of pytest-asyncio as the plugin implements a `pytest_configure` hook that issues a warning. This also means we have to update the plugin integration test as now that warning is converted into an error (the fix is to specify a default fixture loop scope).\r\n\r\nCloses #10128",
+  "head": "367710997bf0d46b0f39e25fbf72a39d5445bb03",
+  "id": "pytest-dev_pytest_14760-36771099",
+  "language": "Python",
+  "pr": 14760,
+  "repo": "pytest-dev/pytest",
+  "set": "ours",
+  "title": "Apply warning filters to `pytest_configure`"
+}

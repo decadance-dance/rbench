@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-c2ab1ce9c09580c531936690332e0336",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 1063,
+      "file": "tea.go",
+      "id": "charmbracelet_bubbletea_1836-fa87190b#4164449107",
+      "message": "This fallback also runs when the output isn't a terminal at all, such as output to a buffer, a pipe, or a Wish/SSH session. Apps that used to receive a 0x0 size there will now get a made-up 80x24. Moving this line inside the `if p.ttyOutput != nil` block above would limit the fix to the actual bug",
+      "producer": "human",
+      "severity": "must",
+      "source": "https://github.com/charmbracelet/bubbletea/pull/1836#discussion_r4164449107 fixed-by 383d7da53ac2a58e4777737c1fbb82f920cb2c18",
+      "start_line": 1063
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-b541ff54e3589c0588785fa765b47226",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 1330,
+      "file": "sklearn/metrics/_classification.py",
+      "id": "scikit-learn_scikit-learn_34423-fdb46ccc#3526242392",
+      "message": "The spec does not specify that inputs should only be float, see: https://data-apis.org/array-api/latest/API_specification/generated/array_api.array.__truediv__.html#truediv\n\nIf that is the case it may be worth asking in https://github.com/data-apis/array-api-strict if this is intentional",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/scikit-learn/scikit-learn/pull/34423#discussion_r3526242392 fixed-by 38fdbdfc20a48f0802780b50d236556dc7501f45",
+      "start_line": 1330
+    }
+  ]
+}

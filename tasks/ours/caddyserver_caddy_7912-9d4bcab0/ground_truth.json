@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-3f0b031f6fcc5eb7896d08458050d44f",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 372,
+      "file": "modules/caddyhttp/reverseproxy/fastcgi/fastcgi.go",
+      "id": "caddyserver_caddy_7912-9d4bcab0#3682038704",
+      "message": "This still assigns `localAddr.String()` when `SplitHostPort` fails which could expose a Unix-socket path as `SERVER_ADDR`. Please set it only when the extracted host parses as an IP address.",
+      "producer": "human",
+      "severity": "must",
+      "source": "https://github.com/caddyserver/caddy/pull/7912#discussion_r3682038704 fixed-by 240e472ed3fec7f7bb120777600f9a2da4e522e1",
+      "start_line": 372
+    }
+  ]
+}

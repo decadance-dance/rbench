@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-f3ce6a4c58ca6e39fa4fcdcf880aac71",
+  "items": [
+    {
+      "category": "documentation",
+      "end_line": 169,
+      "file": "doc/modules/clustering.rst",
+      "id": "scikit-learn_scikit-learn_34440-1e874984#3545635985",
+      "message": "```suggestion\n.. math:: \\sum_{i=0}^{N-1}\\min_{\\mu_j \\in C}(||x_i - \\mu_j||^2)\n\n```",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/scikit-learn/scikit-learn/pull/34440#discussion_r3545635985 fixed-by c5d2b647fd4bc4e8801d20470f52878af9081af4",
+      "start_line": 168
+    }
+  ]
+}

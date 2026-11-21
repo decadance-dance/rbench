@@ -1,0 +1,16 @@
+{
+  "canary": "rbench-canary-299845a07e6c065107fa55c0aff351e6",
+  "items": [
+    {
+      "category": "other",
+      "end_line": 127,
+      "file": "axum/src/routing/path_router.rs",
+      "id": "tokio-rs_axum_3909-c264bd14#4135135617",
+      "message": "This comment is a bit strange as we're building a `Endpoint::Route(route)` in the next line",
+      "producer": "human",
+      "severity": "nit",
+      "source": "https://github.com/tokio-rs/axum/pull/3909#discussion_r4135135617 fixed-by e38f528545781d5d315d3578dbef88b6d2c7218c",
+      "start_line": 127
+    }
+  ]
+}

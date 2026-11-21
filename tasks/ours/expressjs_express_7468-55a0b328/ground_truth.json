@@ -1,0 +1,27 @@
+{
+  "canary": "rbench-canary-8bf1e66b1b36ea1dab81f4b55e6f1929",
+  "items": [
+    {
+      "category": "documentation",
+      "end_line": 11,
+      "file": "History.md",
+      "id": "expressjs_express_7468-55a0b328#4196443509",
+      "message": "`^6.16.0` in #7478",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/expressjs/express/pull/7468#discussion_r4196443509 fixed-by f7240f149e7227dba363abb3e8ff5f359cf8df79",
+      "start_line": 11
+    },
+    {
+      "category": "documentation",
+      "end_line": 42,
+      "file": "History.md",
+      "id": "expressjs_express_7468-55a0b328#4196526712",
+      "message": "Technically, `content-disposition` was updated to `^2.0.1`, not `^2.0.0`, but the `1.x` -> `2.x` change is important here.\r\n\r\nhttps://github.com/expressjs/express/blob/7ef98448f8b38099ab1ded55e458538ad47a51e7/package.json#L37",
+      "producer": "human",
+      "severity": "should",
+      "source": "https://github.com/expressjs/express/pull/7468#discussion_r4196526712 fixed-by f7240f149e7227dba363abb3e8ff5f359cf8df79",
+      "start_line": 42
+    }
+  ]
+}
