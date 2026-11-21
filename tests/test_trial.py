@@ -187,6 +187,8 @@ def test_project_file_and_commands(fake_bin, tmp_path):
     result = project.exec_agent(["curl", "https://github.com"], stdin="x")
     fake_bin.scenario("docker")
     project.copy_proxy_log(tmp_path / "proxy.log")
+    project.copy_to_agent(tmp_path / "stage", "/rbench")
+    project.copy_from_agent("/rbench/output", tmp_path / "out")
     project.down()
 
     assert (result.returncode, result.stdout) == (7, "out")
@@ -196,6 +198,8 @@ def test_project_file_and_commands(fake_bin, tmp_path):
         (base + ["up", "--detach", "--wait"], ""),
         (base + ["exec", "-T", "agent", "curl", "https://github.com"], "x"),
         (base + ["cp", f"proxy:{PROXY_LOG}", str(tmp_path / "proxy.log")], ""),
+        (base + ["cp", "--archive", str(tmp_path / "stage"), "agent:/rbench"], ""),
+        (base + ["cp", "agent:/rbench/output", str(tmp_path / "out")], ""),
         (base + DOWN, ""),
     ]
 
@@ -310,6 +314,7 @@ def test_agent_build_context_holds_only_the_image_and_its_policy():
     assert files == [
         ".dockerignore",
         "Dockerfile",
+        "gh",
         "lib/collector.py",
         "lib/session_hook.py",
         "lib/shim.py",
@@ -317,4 +322,4 @@ def test_agent_build_context_holds_only_the_image_and_its_policy():
         "requirements.toml",
     ]
     copies = re.findall(r"^COPY .*? (\S+) \S+$", (context / "Dockerfile").read_text(), re.MULTILINE)
-    assert copies == ["managed-settings.json", "requirements.toml", "lib/"]
+    assert copies == ["gh", "managed-settings.json", "requirements.toml", "lib/"]

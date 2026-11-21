@@ -3,8 +3,8 @@
 The agent container sits only on `internal`, an internal bridge in isolated gateway mode: it has
 no route out, no host address on the bridge and no external DNS. The proxy sits on `internal` and
 on `egress`, an ordinary bridge, and is the agent's only way out. Nothing is mounted into the
-agent here: the scrubbed repository is copied in (#39) and the Codex login home mounted (#40) by
-the steps that own them.
+agent here: the scrubbed repository is copied in (`rbench.trial.repository`) and the Codex login
+home mounted (#40) by the steps that own them.
 
 The project name is the project's identity, and `up` removes whatever runs under it first. The
 caller owns the name: unique to the run and the trial on the Docker daemon, stable across the
@@ -116,6 +116,7 @@ class TrialProject:
                 check=False,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 input=stdin,
                 stdin=None if stdin is not None else subprocess.DEVNULL,
             )
@@ -126,6 +127,16 @@ class TrialProject:
         """Copy the proxy's access log, every allowed and refused request, to `dest`."""
         what = f"copying the proxy log of trial project {self.name}"
         self._compose("cp", f"proxy:{PROXY_LOG}", str(dest), what=what)
+
+    def copy_to_agent(self, src: Path, dest: str) -> None:
+        """Copy `src` to `dest` in the agent, owned by the agent's user (`cp -a`), never mounted."""
+        what = f"copying into the agent of trial project {self.name}"
+        self._compose("cp", "--archive", str(src), f"agent:{dest}", what=what)
+
+    def copy_from_agent(self, src: str, dest: Path) -> None:
+        """Copy `src` in the agent to `dest`; what the engine wrote there is untrusted."""
+        what = f"copying {src} from the agent of trial project {self.name}"
+        self._compose("cp", f"agent:{src}", str(dest), what=what)
 
     def down(self) -> None:
         """Remove the project's containers and networks; the images stay for the next trial."""

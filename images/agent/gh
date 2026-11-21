@@ -1,0 +1,138 @@
+#!/usr/bin/env node
+// The `gh` of a trial (spec trial-isolation, Local PR lookups only; design D4). It answers
+// `pr view` and `pr diff` from the frozen PR (/rbench/pr.json) and the scrubbed repository
+// (/rbench/repo), reports the PR open with no comments or reviews, and stores each `pr comment`
+// body in /rbench/output/comment-<n>.md as engine output. It never opens a connection. Anything
+// else, another PR, another repository (-R) or a feature it does not implement fails with exit 1.
+// RBENCH_TRIAL_ROOT replaces /rbench for tests.
+"use strict";
+const fs = require("fs");
+const path = require("path");
+const { execFileSync } = require("child_process");
+
+const root = process.env.RBENCH_TRIAL_ROOT || "/rbench";
+const repo = path.join(root, "repo");
+const args = process.argv.slice(2);
+
+function fail(message) {
+  process.stderr.write(`gh (rbench trial): ${message}\n`);
+  process.exit(1);
+}
+
+function unavailable() {
+  fail(
+    `'gh ${args.join(" ")}' is not available: in this benchmark trial gh answers only` +
+      " 'pr view', 'pr diff' and 'pr comment' for the PR under review, and nothing leaves the trial",
+  );
+}
+
+// Git's stdout as bytes: a patch may hold any encoding, and it goes out unchanged.
+function git(...argv) {
+  return execFileSync("git", ["-C", repo, ...argv], { maxBuffer: 1 << 30 });
+}
+
+// Full ref names, and `--` after them, so a tracked file named `base` cannot be read as either.
+const BASE = "refs/heads/base";
+const REVIEWED = "refs/heads/reviewed";
+const COLORS = ["always", "never", "auto"];
+
+// Splits `rest` into at most one PR selector and the options this stub knows; `valued` names the
+// options that take a value, `flags` those that do not.
+function parse(rest, valued, flags) {
+  const opts = {};
+  const positional = [];
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (!arg.startsWith("-") || arg === "-") {
+      positional.push(arg);
+      continue;
+    }
+    const eq = arg.indexOf("=");
+    const name = eq > 0 && arg.startsWith("--") ? arg.slice(0, eq) : arg;
+    // A repeated option is refused: only one value would be checked and used.
+    if (Object.hasOwn(opts, valued[name] ?? flags[name] ?? "")) fail(`${name} given more than once`);
+    if (valued[name]) {
+      const value = eq > 0 && arg.startsWith("--") ? arg.slice(eq + 1) : rest[++i];
+      if (value === undefined) fail(`${name} needs a value`);
+      opts[valued[name]] = value;
+    } else if (flags[name] && eq < 0) {
+      opts[flags[name]] = true;
+    } else {
+      unavailable();
+    }
+  }
+  if (positional.length > 1) unavailable();
+  return { opts, selector: positional[0] };
+}
+
+function loadPr(selector) {
+  const pr = JSON.parse(fs.readFileSync(path.join(root, "pr.json"), "utf8"));
+  const ok = [undefined, String(pr.number), `#${pr.number}`, "reviewed"];
+  if (!ok.includes(selector)) fail(`no pull request found for '${selector}' in this trial`);
+  return pr;
+}
+
+function view(rest) {
+  const { opts, selector } = parse(rest, { "--json": "json" }, { "--comments": "comments", "-c": "comments" });
+  const pr = loadPr(selector);
+  const fields = {
+    number: () => pr.number,
+    title: () => pr.title,
+    body: () => pr.body,
+    state: () => "OPEN",
+    isDraft: () => false,
+    closed: () => false,
+    baseRefName: () => "base",
+    headRefName: () => "reviewed",
+    baseRefOid: () => git("rev-parse", "--verify", "--end-of-options", BASE).toString().trim(),
+    headRefOid: () => git("rev-parse", "--verify", "--end-of-options", REVIEWED).toString().trim(),
+    comments: () => [],
+    reviews: () => [],
+    latestReviews: () => [],
+    reviewRequests: () => [],
+    reviewDecision: () => "",
+  };
+  if (opts.json === undefined) {
+    process.stdout.write(`title:\t${pr.title}\nstate:\tOPEN\nnumber:\t${pr.number}\n--\n${pr.body}\n`);
+    return;
+  }
+  const out = {};
+  for (const name of opts.json.split(",").map((f) => f.trim()).sort()) {
+    if (!Object.hasOwn(fields, name)) {
+      fail(`unknown JSON field '${name}'; this trial has: ${Object.keys(fields).sort().join(", ")}`);
+    }
+    out[name] = fields[name]();
+  }
+  process.stdout.write(JSON.stringify(out) + "\n");
+}
+
+function diff(rest) {
+  const { opts, selector } = parse(rest, { "--color": "color" }, { "--name-only": "nameOnly" });
+  loadPr(selector);
+  if (opts.color !== undefined && !COLORS.includes(opts.color)) {
+    fail(`invalid value '${opts.color}' for --color: use ${COLORS.join(", ")}`);
+  }
+  const only = opts.nameOnly ? ["--name-only"] : [];
+  process.stdout.write(git("diff", "--no-color", "--no-ext-diff", "--no-textconv", ...only, BASE, REVIEWED, "--"));
+}
+
+function comment(rest) {
+  const { opts, selector } = parse(rest, { "--body": "body", "-b": "body", "--body-file": "file", "-F": "file" }, {});
+  loadPr(selector);
+  if ((opts.body === undefined) === (opts.file === undefined)) fail("pr comment needs exactly one of --body or --body-file");
+  const body = opts.body ?? fs.readFileSync(opts.file === "-" ? 0 : opts.file, "utf8");
+  const dir = path.join(root, "output");
+  fs.mkdirSync(dir, { recursive: true });
+  for (let n = 1; ; n++) {
+    try {
+      fs.writeFileSync(path.join(dir, `comment-${n}.md`), body, { flag: "wx" });
+      return;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+    }
+  }
+}
+
+const commands = { view, diff, comment };
+if (args[0] !== "pr" || !Object.hasOwn(commands, args[1] ?? "")) unavailable();
+commands[args[1]](args.slice(2));
