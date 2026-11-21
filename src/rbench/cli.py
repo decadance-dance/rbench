@@ -8,6 +8,8 @@ import sys
 from enum import IntEnum
 from importlib.metadata import version
 
+from rbench.plan import command as plan_command
+
 
 class ExitCode(IntEnum):
     OK = 0
@@ -57,6 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, help_ in COMMANDS:
         sub = commands.add_parser(name, help=help_, description=help_, **common)
+        if name == "plan":
+            plan_command.add_arguments(sub)
         if name == "run":
             sub.add_argument(
                 "--wait",
@@ -69,6 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "plan":
+        return plan_command.run(args)
     name = " ".join(filter(None, [args.command, getattr(args, "task_command", None)]))
     print(f"rbench {name}: not implemented yet", file=sys.stderr)
     return ExitCode.ERROR
