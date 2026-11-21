@@ -29,40 +29,41 @@ FINDING = {
 }
 
 
+# A dropped candidate and a pass report as rreview 0.1.1 writes them, synthetic.
+DROPPED = {
+    "id": "security-1",
+    "title": "Logs the token",
+    "panelist": "Security & Trust Boundaries",
+    "file": "src/app.py",
+    "line_range": {"start": 9, "end": 9},
+    "priority": 3,
+    "confidence_score": 0.6,
+    "claim": "c Trigger: t Impact: i",
+    "drop_reason": "disproved",
+    "evidence": "The value is redacted on line 8.",
+}
+PASS = {
+    "role": "judge",
+    "agent": "codex",
+    "model": SOL,
+    "effort": "high",
+    "status": "completed",
+    "duration_ms": 5,
+}
+
+
 def result(gated: list[dict], ungated: list[dict] | None = None) -> dict:
     """A `result.json` of rreview 0.1.1 (`result::ReviewResult`), synthetic."""
     return {
         "findings": gated,
         "ungated_findings": gated if ungated is None else ungated,
-        "dropped_candidates": [
-            {
-                "id": "security-1",
-                "title": "Praise, not a defect",
-                "panelist": "security",
-                "file": "src/app.py",
-                "line_range": {"start": 9, "end": 9},
-                "priority": 3,
-                "confidence_score": 0.2,
-                "claim": "c",
-                "drop_reason": "refuted",
-                "evidence": "e",
-            }
-        ],
+        "dropped_candidates": [DROPPED],
         "overall_correctness": "patch is incorrect",
         "overall_explanation": "x",
         "review_process": "y",
         "base": "a" * 40,
         "head": "b" * 40,
-        "passes": [
-            {
-                "role": "judge",
-                "agent": "codex",
-                "model": SOL,
-                "effort": "high",
-                "status": "completed",
-                "duration_ms": 5,
-            },
-        ],
+        "passes": [PASS],
         "degraded": False,
         "sandbox": "external",
     }
@@ -103,6 +104,10 @@ def test_declaration_pins_the_release_commit_and_d13_roles():
         (lambda t: t.replace('gpt-6.2-sol", effort = "high" }\n\n[roles.coord',
                              'gpt-6.2-sol", effort = "ultra" }\n\n[roles.coord'),
          "accepts no effort 'ultra' on codex"),
+        # Review round 2 of PR #119: a default that planning would freeze but launch refuses.
+        (lambda t: t.replace('[roles.judge]\ncli = "codex"\ndelivery = "flag"\ndefault = { model = "gpt-6.2-sol"',
+                  '[roles.judge]\ncli = "claude"\ndelivery = "flag"\ndefault = { model = "claude-sonnet-5-5"'),
+         "default: .*same CLI"),
     ],
 )  # fmt: skip
 def test_declaration_is_refused_off_what_the_adapter_supports(tmp_path, edit, error):
@@ -241,6 +246,13 @@ def test_clean_review_has_no_findings_and_dropped_candidates_never_become_any():
     assert findings(json.dumps(result([])), 0) == []
 
 
+@pytest.mark.parametrize("name", [" ", "dir/ lead.py", "a b/c.py"])
+def test_paths_follow_git_filename_rules(name):
+    # Review round 2 of PR #119: git can name a file " "; rreview accepts it from the diff.
+    (out,) = findings(json.dumps(result([FINDING | {"file": name}])), 1)
+    assert out["file"] == name
+
+
 @pytest.mark.parametrize(
     "stdout, code, error",
     [
@@ -269,7 +281,33 @@ def test_clean_review_has_no_findings_and_dropped_candidates_never_become_any():
         (json.dumps(result([FINDING | {"start_line": 5}])), 1, "start_line <= end_line"),
         (json.dumps(result([FINDING | {"confidence_score": 1.5}])), 1, "confidence_score"),
         (json.dumps(result([FINDING | {"stage": "panel"}])), 1, "stage"),
-        (json.dumps(result([FINDING | {"file": " "}])), 1, "relative"),
+        (json.dumps(result([FINDING | {"file": "a\0b.py"}])), 1, r"\.file: .*relative"),
+        (json.dumps(result([FINDING | {"file": "a//b.py"}])), 1, r"\.file: .*relative"),
+        # Review round 2 of PR #119: metadata rreview 0.1.1 never writes.
+        (json.dumps(result([]) | {"overall_correctness": "unknown"}), 0, "overall_correctness"),
+        (
+            json.dumps(result([]) | {"passes": [PASS | {"status": "unknown"}]}),
+            0,
+            r"passes\[0\]\.status",
+        ),
+        (
+            json.dumps(
+                result([])
+                | {"dropped_candidates": [DROPPED | {"line_range": {"start": 9, "end": 8}}]}
+            ),
+            0,
+            r"line_range: expected 1 <= start <= end",
+        ),
+        (
+            json.dumps(result([]) | {"dropped_candidates": [DROPPED | {"drop_reason": "refuted"}]}),
+            0,
+            "drop_reason",
+        ),
+        (
+            json.dumps(result([]) | {"dropped_candidates": [DROPPED | {"confidence_score": 0.2}]}),
+            0,
+            "0.5-1",
+        ),
         (json.dumps(result([{k: v for k, v in FINDING.items() if k != "body"}])), 1, "fields"),
         # A malformed finding below the gate still fails the trial.
         (json.dumps(result([], [FINDING | {"end_line": "4"}])), 0, r"ungated_findings\[0\]"),

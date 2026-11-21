@@ -78,10 +78,13 @@ def bind(engine: Engine, engines_dir: Path) -> Engine:
                 f"{where}: role {name!r}: delivery must be 'flag' (rreview passes model and"
                 " effort as flags)"
             )
-        try:
-            _effort(f"{where}: role {name!r}: default", MODELS[role.default.model], role.default)
-        except ValueError as e:
-            raise DeclarationError(str(e)) from None
+    # The default configuration must launch: efforts rreview takes, coordinator and judge apart.
+    roles = engine.default_configuration()
+    default = {r: {"models": [s.model], "effort": s.effort} for r, s in roles.items()}
+    try:
+        launch({"version": engine.version, "roles": default})
+    except ValueError as e:
+        raise DeclarationError(f"{where}: default: {e}") from None
     return engine
 
 
@@ -153,10 +156,17 @@ def _is(test: Callable[[object], bool], what: str) -> Check:
 
 
 def _relative(v: object) -> bool:
-    """A path in the repository as git names it: not absolute, no empty, `.` or `..` part."""
-    if not (isinstance(v, str) and v.strip()):
+    """A path in the repository as git can name it: no NUL, not absolute, no empty, `.` or `..`
+    part. Whitespace is a valid file name."""
+    if not isinstance(v, str) or "\0" in v:
         return False
     return all(p not in ("", ".", "..") for p in v.split("/"))
+
+
+def _range(v: object, at: str) -> None:
+    _object({"start": _U32, "end": _U32})(v, at)
+    if not 1 <= v["start"] <= v["end"]:
+        raise RreviewOutputError(f"{at}: expected 1 <= start <= end")
 
 
 def _list(item: Check) -> Check:
@@ -190,26 +200,36 @@ _U64 = _is(lambda v: type(v) is int and 0 <= v < 2**64, "an integer 0 to 2^64-1"
 _PRIORITY = _is(lambda v: type(v) is int and 0 <= v <= 3, "an integer 0-3")
 # serde writes an f64 as a JSON float; NaN and infinities fail the comparison.
 _CONFIDENCE = _is(lambda v: type(v) is float and 0.0 <= v <= 1.0, "a number 0-1")
+_PATH = _is(_relative, "a path relative to the repository")
 _FINDING = _object({
-    "title": _TEXT, "body": _TEXT, "file": _is(_relative, "a path relative to the repository"),
+    "title": _TEXT, "body": _TEXT, "file": _PATH,
     "start_line": _U32, "end_line": _U32, "priority": _PRIORITY, "confidence_score": _CONFIDENCE,
     "stage": _is(lambda v: v in STAGES, f"one of {', '.join(STAGES)}"),
     "candidate_ids": _list(_STR),
 })  # fmt: skip
+# rreview 0.1.1 keeps only panel candidates with confidence 0.5-1 (src/panelist.rs `check`) and
+# drops them for one of these reasons, with evidence (src/coordinator.rs `parse_review`).
+DROP_REASONS = ("disproved", "speculative", "deterministic_ci", "below_bar")
+VERDICTS = ("patch is correct", "patch is incorrect")
+PASS_STATUSES = ("completed", "failed")
 _DROPPED = _object({
-    "id": _STR, "title": _STR, "panelist": _STR, "file": _STR,
-    "line_range": _object({"start": _U32, "end": _U32}), "priority": _PRIORITY,
-    "confidence_score": _CONFIDENCE, "claim": _STR, "drop_reason": _STR, "evidence": _STR,
+    "id": _TEXT, "title": _TEXT, "panelist": _TEXT, "file": _PATH, "line_range": _range,
+    "priority": _PRIORITY,
+    "confidence_score": _is(lambda v: type(v) is float and 0.5 <= v <= 1.0, "a number 0.5-1"),
+    "claim": _TEXT, "drop_reason": _is(lambda v: v in DROP_REASONS, f"one of {', '.join(DROP_REASONS)}"),
+    "evidence": _TEXT,
 })  # fmt: skip
 _PASS = _object(
-    {"role": _STR, "agent": _STR, "model": _STR, "effort": _STR, "status": _STR,
+    {"role": _STR, "agent": _STR, "model": _STR, "effort": _STR,
+     "status": _is(lambda v: v in PASS_STATUSES, f"one of {', '.join(PASS_STATUSES)}"),
      "duration_ms": _U64, "error": _STR},
     optional=frozenset({"effort", "error"}),
 )  # fmt: skip
 _COMMIT_ID = _is(lambda v: isinstance(v, str) and bool(_COMMIT.fullmatch(v)), "a commit id")
 _RESULT = _object({
     "findings": _list(_FINDING), "ungated_findings": _list(_FINDING),
-    "dropped_candidates": _list(_DROPPED), "overall_correctness": _STR,
+    "dropped_candidates": _list(_DROPPED),
+    "overall_correctness": _is(lambda v: v in VERDICTS, " or ".join(map(repr, VERDICTS))),
     "overall_explanation": _STR, "review_process": _STR, "base": _COMMIT_ID, "head": _COMMIT_ID,
     "passes": _list(_PASS), "degraded": _is(lambda v: type(v) is bool, "a boolean"),
     "sandbox": _is(lambda v: v == "external", "external (--sandbox external)"),
