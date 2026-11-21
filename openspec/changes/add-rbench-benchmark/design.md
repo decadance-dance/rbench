@@ -405,8 +405,9 @@ limit stops the run by default; waiting for the reset is opt-in (`--wait`).
   token had expired, 3 concurrent processes had to refresh at the same time, and all 3 finished.
   The new tokens landed only in the mounted login home, and a later refresh from them succeeded.
   Codex re-reads `auth.json` before it refreshes, and saves by compare-and-save under
-  `auth.json.lock`. The benchmark never copies a login: a copy shares the refresh token, so a
-  refresh in one copy can leave the other with a used refresh token.
+  `auth.json.lock`. A forced refresh on a copy of the login used up the refresh token that the
+  original still held. The original then needed a new `codex login`. So rbench never copies
+  `auth.json`. There is one login file, bind-mounted, and Codex refreshes it in place.
 - **[`codex-review` may not run non-interactively.]** → Codex's built-in review is a TUI command;
   the spike finds a non-interactive way to run it. Without one, `codex-review` leaves the matrix.
 - **[Claude Code may not report the used share of its subscription window.]** → The spike checks.
