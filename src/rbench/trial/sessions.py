@@ -34,6 +34,29 @@ ORIGIN_SOURCES = ("startup", "fork", "clear")
 LAUNCH_KEYS = ("cli", "argv", "final_argv", "added", "rewrites", "session_id", "cwd", "homes")
 
 
+# The fields the binding reads, by record kind, as the collector writes them
+# (images/agent/lib/collector.py); a record that lacks one or holds another type is not read.
+RECORD_FIELDS: dict[str, dict[str, tuple[type, ...]]] = {
+    "launch": {"launch": (int,), "cli": (str,), "argv": (list,)},
+    "child": {"launch": (int,), "pid": (int,), "start": (int, type(None))},
+    "exit": {"launch": (int,), "status": (int,)},
+    "binding": {"launch": (int,), "path": (str,), "meta": (dict, type(None))},
+    "hook": {
+        "session_id": (str,),
+        "source": (str,),
+        "claude_pid": (int, type(None)),
+        "claude_start": (int, type(None)),
+    },
+    "watch": {},
+    "rejected": {},
+}
+OPTIONAL_FIELDS = {"start", "meta", "claude_pid", "claude_start"}
+
+
+def _typed(value: object, types: tuple[type, ...]) -> bool:
+    return isinstance(value, types) and not isinstance(value, bool)
+
+
 class SessionError(ValueError):
     """A shim log or transcript that cannot be read as one."""
 
@@ -48,12 +71,24 @@ def read_shim_log(path: Path) -> list[dict]:
             raise SessionError(f"{path}:{n}: not JSON: {e}") from e
         if not (
             isinstance(record, dict)
-            and isinstance(record.get("seq"), int)
+            and _typed(record.get("seq"), (int,))
             and isinstance(record.get("kind"), str)
-            and (record["kind"] not in ("child", "exit", "binding") or "launch" in record)
+            and record["kind"] in RECORD_FIELDS
         ):
             raise SessionError(f"{path}:{n}: not a shim log record")
+        for key, types in RECORD_FIELDS[record["kind"]].items():
+            present = key in record or key not in OPTIONAL_FIELDS
+            if present and not _typed(record.get(key), types):
+                raise SessionError(f"{path}:{n}: {record['kind']} record: invalid {key}")
+        if record["kind"] == "launch" and not all(isinstance(a, str) for a in record["argv"]):
+            raise SessionError(f"{path}:{n}: launch record: invalid argv")
         records.append(record)
+    launches = {r["launch"] for r in records if r["kind"] == "launch"}
+    for r in records:
+        if r["kind"] in ("child", "exit", "binding") and r["launch"] not in launches:
+            raise SessionError(
+                f"{path}: a {r['kind']} record of launch {r['launch']}, never logged"
+            )
     return sorted(records, key=lambda r: r["seq"])
 
 

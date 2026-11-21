@@ -138,7 +138,7 @@ def test_trial_sandbox(trial):
     assert [(r["method"], r["target"]) for r in refused] == [
         ("CONNECT", "github.com:443"),
         ("CONNECT", f"{ip}:443"),
-        ("GET", "http://github.com/"),
+        ("GET", "http://github.com"),  # the destination only
     ]
 
     # No route but the proxy: external DNS fails, and so does a direct connection to an address.

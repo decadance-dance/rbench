@@ -12,28 +12,44 @@ contaminated, and excluded from scores, when:
 - the repository's object count differs from the one recorded before the engine (D4);
 - a transcript session does not bind to exactly one origin launch in the shim log (D5).
 
-Evidence the audit cannot read (a malformed proxy log record, an unreadable or non-regular file of
-the trial directory, the shim log, the object count) fails closed, as contamination. Every other
-proxy line outside the allowlist is a refused attempt: it does not contaminate, and `audit.json`
-lists it for run health (spec benchmark-report).
+Evidence the audit cannot read fails closed, as contamination: a malformed proxy log record or shim
+log record, an unreadable or non-regular file of the trial directory, a proxy log, shim log or
+transcript root that is not a regular file (or directory) inside the trial directory reached
+without a symlink, and an object count it cannot read. Every other proxy line outside the
+allowlist is a refused attempt: it does not contaminate, and `audit.json` lists it for run health
+(spec benchmark-report). The trial's own `status.json` and `audit.json` are not evidence.
 
-Reasons and refused attempts are untrusted text that goes to run health, so every known hidden value
-(a hidden task's id, its canary and the hidden canary prefix) is redacted from them; a hidden task's
-canary is reported by its set only (spec review-tasks).
+Proxy diagnostics name only the destination (the CONNECT authority, or a URL's scheme, host and
+port), never a path, query or user part. Reasons and refused attempts are untrusted text that goes
+to run health, so every known hidden value (a hidden task's id, its canary and the hidden canary
+prefix) is redacted from them, and a hidden task's canary is reported by its set only (spec
+review-tasks); lone surrogates are escaped so the record is always valid UTF-8.
+
+Memory is bounded per file: the canary scan maps the file and decodes JSON escapes (`\\uXXXX`,
+`\\n`, ...) in windows of `SCAN_WINDOW` bytes, so an escaped spelling of a canary is found in a
+string of any length without decoding the string whole.
 """
 
 import ipaddress
-import json
 import mmap
 import os
 import re
 import stat
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Callable, Collection, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
+from urllib.parse import unquote, urlsplit
 
 from rbench.atomic import atomic_write
-from rbench.ledger.trials import AUDIT_FILE, LedgerError, dump_json, read_status, set_state
+from rbench.ledger.trials import (
+    AUDIT_FILE,
+    STATUS_FILE,
+    LedgerError,
+    dump_json,
+    read_status,
+    set_state,
+)
 from rbench.tasks.loader import Task
 from rbench.trial.images import IMAGES_DIR
 from rbench.trial.repository import (
@@ -58,15 +74,19 @@ _TIME = re.compile(r"[0-9]+\.[0-9]{3}")
 _RESULT = re.compile(r"[A-Z_]+/[0-9]{3}")
 _METHOD = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 _TARGET = re.compile(r"[!-~]+")
-# A JSON string literal with at least one escape: its decoded text may spell a canary that its raw
-# bytes do not. Valid JSON has no backslash between two strings, so a match never straddles two.
-_ESCAPED_STRING = re.compile(rb'"[^"\\\n]*(?:\\.[^"\\\n]*)+"')
+# A JSON escape, with the low half of a surrogate pair; at most 12 bytes.
+_ESCAPE = re.compile(rb'\\(?:u([0-9a-fA-F]{4})(?:\\u([dD][c-fC-F][0-9a-fA-F]{2}))?|(["\\/bfnrt]))')
+_ESCAPE_MAX = 12
+_SIMPLE_ESCAPES = {b'"': b'"', b"\\": b"\\", b"/": b"/", b"b": b"\b", b"f": b"\f", b"n": b"\n"}
+_SIMPLE_ESCAPES |= {b"r": b"\r", b"t": b"\t"}
+SCAN_WINDOW = 256 << 10
 
 
 @dataclass(frozen=True)
 class Audit:
     """Why a trial is contaminated (empty when it is not), and its distinct refused connection
-    attempts in order of first appearance, each `{"method", "target", "result", "count"}`, with
+    attempts in order of first appearance, each `{"method", "target", "result", "count"}` where
+    `target` is the destination only, with
     the number of further refused attempts not listed."""
 
     reasons: tuple[str, ...] = ()
@@ -103,7 +123,13 @@ def audit_trial(
     tasks = tuple(tasks)
     redact = _redactor(tasks)
     hosts = read_allowlist() if allowlist is None else allowlist
-    reasons, refused, omitted = audit_proxy_log(proxy_log, hosts)
+    reasons: list[str] = []
+    refused: list[dict] = []
+    omitted = 0
+    if problem := _evidence(trial_dir, proxy_log, "the proxy log"):
+        reasons.append(problem)
+    else:
+        reasons, refused, omitted = audit_proxy_log(proxy_log, hosts)
     reasons += _canaries(Path(trial_dir), tasks)
     try:
         objects = count_objects(run, REPO_DIR, "the trial's repository")
@@ -114,15 +140,69 @@ def audit_trial(
             reasons.append(
                 f"the repository's object count changed from {repository.objects} to {objects}"
             )
-    try:
-        reasons += unbound_sessions(read_shim_log(shim_log), transcripts)
-    except (OSError, ValueError) as e:  # ValueError: SessionError, or bytes that are not UTF-8
-        reasons.append(f"the shim log or a transcript cannot be read: {e}")
+    problems = [
+        _evidence(trial_dir, shim_log, "the shim log"),
+        _evidence(trial_dir, transcripts, "the transcript root", directory=True),
+    ]
+    if any(problems):
+        reasons += [p for p in problems if p]
+    else:
+        try:
+            reasons += unbound_sessions(read_shim_log(shim_log), transcripts)
+        # ValueError: SessionError, or bytes that are not UTF-8; RecursionError: deep JSON.
+        except (OSError, ValueError, RecursionError) as e:
+            reasons.append(f"the shim log or a transcript cannot be read: {e}")
     # Errors name files by host path; the record names them within the trial directory.
     within = f"{Path(trial_dir)}{os.sep}"
-    reasons = [redact(reason.replace(within, "")) for reason in reasons]
-    refused = [{k: redact(v) if isinstance(v, str) else v for k, v in r.items()} for r in refused]
+    reasons = [_safe(redact(reason.replace(within, ""))) for reason in reasons]
+    refused = [
+        {k: _safe(redact(v)) if isinstance(v, str) else v for k, v in r.items()} for r in refused
+    ]
     return Audit(tuple(reasons), tuple(refused), omitted)
+
+
+def _safe(text: str) -> str:
+    """`text` as valid UTF-8: a lone surrogate from decoded JSON is escaped."""
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _evidence(trial_dir: Path, path: Path, what: str, directory: bool = False) -> str | None:
+    """Why `path` cannot be read as evidence, or None: it must be a regular file (a directory when
+    `directory`) inside the trial directory, reached without a symlink. A missing directory is an
+    empty one: `collect` creates the transcript root only when it copies a transcript."""
+    root, target = Path(os.path.abspath(trial_dir)), Path(os.path.abspath(path))
+    try:
+        parts = target.relative_to(root).parts
+    except ValueError:
+        parts = ()
+    if not parts:
+        return f"{what} is not inside the trial directory, so it cannot be audited"
+    current = root
+    for part in parts:
+        current /= part
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            return None if directory else f"{what} is missing"
+        except OSError as e:
+            return f"{what} cannot be read: {e.strerror or e}"
+        if stat.S_ISLNK(mode):
+            return f"{what} is reached through a symlink, so it cannot be audited"
+    if not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
+        kind = "directory" if directory else "regular file"
+        return f"{what} is not a {kind}, so it cannot be audited"
+    return None
+
+
+def _open_regular(path: Path) -> BinaryIO:
+    """`path` opened for reading, refused unless it is a regular file and not a symlink: a FIFO
+    must not block the audit, and a link must not lead it out of the trial directory."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    f = os.fdopen(fd, "rb")
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        f.close()
+        raise OSError(f"{path.name} is not a regular file")
+    return f
 
 
 def record_audit(trial_dir: Path, audit: Audit) -> None:
@@ -162,7 +242,7 @@ def audit_proxy_log(log: Path, allowlist: Collection[str]) -> tuple[list[str], l
     refused: dict[tuple[str, str, str], int] = {}
     omitted = 0
     try:
-        with log.open("rb") as f:
+        with _open_regular(log) as f:
             n = 0
             while line := f.readline(MAX_PROXY_LINE + 1):
                 n += 1
@@ -181,6 +261,7 @@ def audit_proxy_log(log: Path, allowlist: Collection[str]) -> tuple[list[str], l
                     host, _, port = target.rpartition(":")
                     if method == "CONNECT" and port == "443" and host.lower() in hosts:
                         continue
+                    target = _destination(method, target)
                     if upstream == "-" and result[-3] in "45":
                         key = (method, target, result)
                         if key in refused:
@@ -206,6 +287,21 @@ def audit_proxy_log(log: Path, allowlist: Collection[str]) -> tuple[list[str], l
         {"method": m, "target": t, "result": r, "count": c} for (m, t, r), c in refused.items()
     ]
     return reasons, listed, omitted
+
+
+def _destination(method: str, target: str) -> str:
+    """Where a request went, without the path, query or user part that may carry anything: the
+    CONNECT authority, or a URL's scheme, host and port, percent-decoded so redaction sees it."""
+    if method == "CONNECT":
+        return unquote(target)
+    try:
+        url = urlsplit(target)
+    except ValueError:
+        return "-"
+    host = url.netloc.rpartition("@")[2]
+    if host:
+        return f"{url.scheme}://{unquote(host)}"
+    return f"{url.scheme}:" if url.scheme else "-"
 
 
 def _proxy_record(line: bytes) -> list[str] | None:
@@ -264,13 +360,16 @@ def _canaries(trial_dir: Path, tasks: tuple[Task, ...]) -> list[str]:
         raise ValueError("the canary scan needs the loaded tasks")
     by_length = sorted(owners, key=len, reverse=True)
     raw = re.compile(b"|".join(re.escape(c.encode()) for c in by_length))
-    text = re.compile("|".join(re.escape(c) for c in by_length))
+    longest = len(by_length[0].encode())
     problems: list[str] = []
     hits = []
+    ledger = {Path(trial_dir) / STATUS_FILE, Path(trial_dir) / AUDIT_FILE}
     for path in _files(trial_dir, problems):
+        if path in ledger:
+            continue  # the audit's own record, written from earlier evidence
         label = path.relative_to(trial_dir).as_posix()
         try:
-            found = _found(path, raw, text)
+            found = _found(path, raw, longest)
         except (OSError, ValueError) as e:  # ValueError: mmap of a file that changed size
             problems.append(f"{label} cannot be read: {getattr(e, 'strerror', None) or e}")
             continue
@@ -305,17 +404,52 @@ def _files(root: Path, problems: list[str]) -> list[Path]:
     return sorted(found)
 
 
-def _found(path: Path, raw: re.Pattern[bytes], text: re.Pattern[str]) -> set[str]:
-    """The canaries in a file, kept as a set of distinct values while the matches stream by."""
-    with path.open("rb") as f:
+def _found(path: Path, raw: re.Pattern[bytes], longest: int) -> set[str]:
+    """The canaries in a file's bytes and in its bytes with JSON escapes decoded, kept as a set of
+    distinct values while the matches stream by."""
+    with _open_regular(path) as f:
         if os.fstat(f.fileno()).st_size == 0:
             return set()
         with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as data:
-            found = {m.group().decode() for m in raw.finditer(data)}
-            for literal in _ESCAPED_STRING.finditer(data):
-                try:
-                    value = json.loads(literal.group())
-                except ValueError:
-                    continue
-                found.update(m.group() for m in text.finditer(value))
-            return found
+            found = {m.group() for m in raw.finditer(data)}
+            tail = b""
+            for window in _unescaped(data):
+                text = tail + window
+                found.update(m.group() for m in raw.finditer(text))
+                tail = text[-(longest - 1) :] if longest > 1 else b""
+            return {c.decode("utf-8", "surrogatepass") for c in found}
+
+
+def _unescaped(data: mmap.mmap) -> Iterator[bytes]:
+    """`data` with every JSON escape decoded to UTF-8, in windows of about `SCAN_WINDOW` bytes.
+
+    Decoding runs over the whole file, inside strings or not: that only adds matches. A window ends
+    before any escape that may run past it, at a point the left-to-right scan also passes outside
+    an escape, so the next window starts in step with it.
+    """
+    start, size = 0, len(data)
+    while start < size:
+        end = min(start + SCAN_WINDOW, size)
+        stop = end if end == size else end - _ESCAPE_MAX
+        out, pos = bytearray(), start
+        for m in _ESCAPE.finditer(data, start, end):
+            if m.start() >= stop:
+                break
+            out += data[pos : m.start()]
+            out += _unescape(m)
+            pos = m.end()
+        if pos < stop:
+            out += data[pos:stop]
+            pos = stop
+        yield bytes(out)
+        start = pos
+
+
+def _unescape(m: re.Match[bytes]) -> bytes:
+    if m[3]:
+        return _SIMPLE_ESCAPES[m[3]]
+    high = int(m[1], 16)
+    if m[2] and 0xD800 <= high < 0xDC00:
+        return chr(0x10000 + ((high - 0xD800) << 10) + int(m[2], 16) - 0xDC00).encode()
+    low = chr(int(m[2], 16)).encode("utf-8", "surrogatepass") if m[2] else b""
+    return chr(high).encode("utf-8", "surrogatepass") + low

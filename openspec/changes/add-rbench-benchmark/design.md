@@ -222,8 +222,13 @@ server or build step, and opens from disk as the spec requires.
   squid connected upstream (an address, not `-`) or answered without a 4xx or 5xx status. Any
   other such line is a refused attempt: run health lists it from the trial's `audit.json`. A
   record that is not valid in every field contaminates the trial, as does any file of the trial
-  directory the audit cannot read or that is not a regular file. Known hidden values are redacted
-  from what the audit records, and a contaminated trial's audit is final.
+  directory the audit cannot read or that is not a regular file, and a proxy log, shim log or
+  transcript root that is not inside the trial directory or is reached through a symlink. Run
+  health gets only a request's destination (the CONNECT authority, or a URL's scheme, host and
+  port), never its path or query, and known hidden values are redacted from what the audit
+  records. The canary scan decodes JSON escapes in 256 KiB windows, so its memory per file is
+  bounded whatever the length of a string. A contaminated trial's audit is final, and the audit's
+  own `status.json` and `audit.json` are not evidence.
 - The compose project's live test (#37) passes on Docker 29.4.1 with no credentials and no model
   call. Refused and logged: `CONNECT github.com:443`, a `CONNECT` to the numeric address of
   `api.anthropic.com`, and plain HTTP. `api.anthropic.com` tunnels. External names and

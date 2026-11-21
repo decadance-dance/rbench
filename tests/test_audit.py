@@ -2,8 +2,11 @@
 
 import json
 import os
+import shutil
+import tracemalloc
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 
@@ -16,6 +19,7 @@ from rbench.trial import (
     read_allowlist,
     record_audit,
 )
+from rbench.trial import audit as audit_module
 from rbench.trial.audit import MAX_LISTED
 
 OWN = Task(
@@ -139,6 +143,7 @@ def test_a_successful_connection_outside_the_allowlist_contaminates(trial, line)
     audit = trial.audit()
 
     _, _, result, method, target, _ = line.split()
+    target = target.removesuffix("/")  # the destination only
     reason = f"the proxy log shows a connection outside the allowlist: {method} {target} "
     assert audit.reasons == (reason + f"({result}, line 2)",)
     record_audit(trial.dir, audit)
@@ -172,7 +177,7 @@ def test_a_malformed_proxy_record_fails_closed(trial, line):
 
 def test_a_missing_proxy_log_fails_closed(trial):
     trial.proxy_log.unlink()
-    assert trial.audit().reasons == ("the proxy log cannot be read: No such file or directory",)
+    assert trial.audit().reasons == ("the proxy log is missing",)
 
 
 def test_a_refused_attempt_does_not_contaminate_and_is_listed_for_run_health(trial):
@@ -185,10 +190,10 @@ def test_a_refused_attempt_does_not_contaminate_and_is_listed_for_run_health(tri
 
     refused = [
         {"method": "CONNECT", "target": "github.com:443", "result": "TCP_DENIED/403", "count": 1},
-        {"method": "GET", "target": "http://example.com/", "result": "TCP_DENIED/403", "count": 1},
+        {"method": "GET", "target": "http://example.com", "result": "TCP_DENIED/403", "count": 1},
         {
             "method": "NONE",
-            "target": "error:invalid-request",
+            "target": "error:",
             "result": "NONE_NONE/400",
             "count": 1,
         },
@@ -266,8 +271,6 @@ def test_a_canary_spelled_with_json_escapes_is_found(trial):
 
 
 def test_a_canary_scan_keeps_distinct_canaries_only(trial):
-    import tracemalloc
-
     (trial.raw / "big.bin").write_bytes((OTHER.canary.encode() + b"\0") * 250_000)
     tracemalloc.start()
     try:
@@ -430,3 +433,180 @@ def test_every_reason_is_recorded(trial):
     assert len(audit.reasons) == 3
     assert read_status(trial.dir).reason == "; ".join(audit.reasons)
     assert json.loads((trial.dir / AUDIT_FILE).read_text())["contaminated"] == list(audit.reasons)
+
+
+def test_proxy_diagnostics_name_the_destination_only(trial):
+    hidden = replace(HIDDEN, id=f"{HIDDEN_ID_PREFIX}ascii", canary="synthetic-hidden-" + "5" * 32)
+    # Squid keeps a percent-escaped spelling; a path, query or user part may carry anything.
+    encoded = "".join(f"%{b:02X}" for b in f"{hidden.id}/{hidden.canary}".encode())
+    host = "".join(f"%{b:02X}" for b in hidden.id.encode()) + ".example"
+    url = f"http://user{encoded}@example.com/secret-path/{encoded}?q={encoded}"
+    trial.proxy_log.write_text(
+        f"{ALLOWED}\n1700000003.000 172.18.0.3 TCP_DENIED/403 GET {url} -\n"
+        f"1700000004.000 172.18.0.3 TCP_MISS/200 GET {url}x 93.184.215.14\n"
+        f"1700000005.000 172.18.0.3 TCP_TUNNEL/200 CONNECT {host}:443 93.184.215.14\n"
+    )
+
+    audit = trial.audit(tasks=[OWN, OTHER, hidden])
+    record_audit(trial.dir, audit)
+
+    assert audit.refused == (
+        {"method": "GET", "target": "http://example.com", "result": "TCP_DENIED/403", "count": 1},
+    )
+    outside = "the proxy log shows a connection outside the allowlist:"
+    assert audit.reasons == (
+        f"{outside} GET http://example.com (TCP_MISS/200, line 3)",
+        f"{outside} CONNECT <redacted>.example:443 (TCP_TUNNEL/200, line 4)",
+    )
+    for file in (trial.dir / AUDIT_FILE, trial.dir / "status.json"):
+        text = file.read_text()
+        for value in (hidden.id, hidden.canary, "synthetic-hidden-", "secret-path", "user"):
+            assert value not in text and value not in unquote(text), (file.name, value)
+
+
+def guard_opens(monkeypatch) -> list[Path]:
+    """Every path the audit opens, by `Path.open` or `os.open`."""
+    opened: list[Path] = []
+    path_open, os_open = Path.open, os.open
+
+    def guarded_path(self, *args, **kwargs):
+        opened.append(Path(os.path.abspath(self)))
+        return path_open(self, *args, **kwargs)
+
+    def guarded_os(path, *args, **kwargs):
+        opened.append(Path(os.path.abspath(path)))
+        return os_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_path)
+    monkeypatch.setattr(os, "open", guarded_os)
+    return opened
+
+
+@pytest.mark.parametrize("which", ["proxy log", "shim log", "transcript root"])
+def test_a_linked_input_is_never_opened(trial, tmp_path, monkeypatch, which):
+    outside = tmp_path / "outside"
+    if which == "transcript root":
+        trial.transcripts.rename(outside)
+        trial.transcripts.symlink_to(outside, target_is_directory=True)
+    else:
+        path = trial.proxy_log if which == "proxy log" else trial.shim_log
+        path.rename(outside)
+        path.symlink_to(outside)
+    opened = guard_opens(monkeypatch)
+
+    audit = trial.audit()
+    record_audit(trial.dir, audit)
+
+    assert f"the {which} is reached through a symlink, so it cannot be audited" in audit.reasons
+    assert not [p for p in opened if p.is_relative_to(outside)]
+    assert read_status(trial.dir).state == "contaminated"
+
+
+def test_a_proxy_log_fifo_does_not_block_the_audit(trial):
+    trial.proxy_log.unlink()
+    os.mkfifo(trial.proxy_log)
+
+    audit = trial.audit()
+    record_audit(trial.dir, audit)
+
+    assert audit.reasons == (
+        "the proxy log is not a regular file, so it cannot be audited",
+        "raw/proxy.log is not a regular file, so it cannot be audited",
+    )
+    assert read_status(trial.dir).state == "contaminated"
+
+
+def test_an_input_outside_the_trial_directory_is_refused(trial, tmp_path):
+    outside = tmp_path / "proxy.log"
+    outside.write_text(ALLOWED + "\n")
+    trial.proxy_log = outside
+
+    assert trial.audit().reasons == (
+        "the proxy log is not inside the trial directory, so it cannot be audited",
+    )
+
+
+def test_a_missing_transcript_root_holds_no_transcripts(trial):
+    shutil.rmtree(trial.transcripts)
+    assert trial.audit().reasons == ()
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"kind": "child", "launch": 1},  # no pid
+        {"kind": "child", "launch": 1, "pid": [40], "start": 400},
+        {"kind": "exit", "launch": 7, "status": 0},  # a launch never logged
+        {"kind": "hook", "session_id": "s", "source": "startup", "claude_pid": "40"},
+        {"kind": "launch", "launch": 2, "cli": "claude", "argv": [1]},
+        {"kind": "unknown"},
+        {"kind": ["launch"]},
+    ],
+)
+def test_a_malformed_shim_record_fails_closed(trial, record):
+    with trial.shim_log.open("a") as f:
+        f.write(json.dumps({"seq": 9} | record) + "\n")
+
+    audit = trial.audit()
+    record_audit(trial.dir, audit)
+
+    (reason,) = audit.reasons
+    assert reason.startswith("the shim log or a transcript cannot be read: raw/shim.jsonl")
+    assert read_status(trial.dir).state == "contaminated"
+
+
+def test_a_lone_surrogate_in_a_transcript_is_recorded_safely(trial):
+    rollout = trial.transcripts / "home/node/.codex/sessions/2026/11/21/rollout-x.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text('{"type": "session_meta", "payload": {"id": "\\ud800"}}\n')
+
+    audit = trial.audit()
+    record_audit(trial.dir, audit)
+
+    path = "/home/node/.codex/sessions/2026/11/21/rollout-x.jsonl"
+    assert audit.reasons == (f"Codex thread \\ud800 ({path}): no origin launch in the shim log",)
+    status = read_status(trial.dir)
+    assert (status.state, status.reason) == ("contaminated", audit.reasons[0])
+
+
+def test_the_escaped_scan_is_bounded_in_memory(trial):
+    # One JSON string of millions of escapes, with an escaped canary at its end.
+    escaped = f"\\u{ord(OTHER.canary[0]):04x}" + OTHER.canary[1:]
+    (trial.raw / "t.jsonl").write_text('{"m": "' + "\\n" * 2_000_000 + escaped + '"}\n')
+    tracemalloc.start()
+    try:
+        audit = trial.audit()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert audit.reasons == ("the canary of task t-other appears in raw/t.jsonl",)
+    assert peak < 4 << 20
+
+
+def test_an_escape_across_a_window_boundary_is_decoded(trial, monkeypatch):
+    monkeypatch.setattr(audit_module, "SCAN_WINDOW", 64)
+    escaped = f"\\u{ord(OTHER.canary[0]):04x}" + OTHER.canary[1:]
+    file = trial.raw / "t.json"
+    for offset in range(90):
+        # An escaped backslash takes the escape's backslash: `\\u0072` stays literal text.
+        file.write_text('"' + "x" * offset + "\\" + escaped + '"')
+        assert trial.audit().reasons == (), offset
+        file.write_text('"' + "x" * offset + "\\n" + escaped + '"')
+        assert trial.audit().reasons == ("the canary of task t-other appears in raw/t.json",), (
+            offset
+        )
+
+
+def test_recomputing_a_verdict_ignores_the_audits_own_record(trial):
+    # A refused host spelling a public canary: audit.json keeps it as the refused destination.
+    line = f"1700000003.000 172.18.0.3 TCP_DENIED/403 CONNECT {OTHER.canary}.example:443 -"
+    trial.proxy_log.write_text(f"{ALLOWED}\n{line}\n")
+    first = trial.audit()
+    record_audit(trial.dir, first)
+    assert OTHER.canary in (trial.dir / AUDIT_FILE).read_text()
+
+    again = trial.audit()
+
+    assert again == first
+    record_audit(trial.dir, again)

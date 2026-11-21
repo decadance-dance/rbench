@@ -12,7 +12,8 @@ A trial directory holds:
                     "normalization": {"<model>": {...}}}
     raw/           engine output, transcripts and logs
     audit.json     the contamination audit (`rbench.trial.audit`): {"contaminated": [<reason>],
-                   "refused": [{"method", "target", "result", "count"}], "refused_omitted"},
+                   "refused": [{"method", "target" (destination only), "result",
+                   "count"}], "refused_omitted"},
                    the refused connection attempts listed in run health; final once the
                    trial is contaminated
 
